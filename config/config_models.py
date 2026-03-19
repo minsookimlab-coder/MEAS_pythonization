@@ -1,0 +1,263 @@
+import re
+from enum import Enum
+from typing import Dict, Any, Literal, Optional, List
+from pydantic import BaseModel, Field, field_validator
+
+
+def cast_extra_params(params: dict) -> dict:
+    """
+    extra_params의 문자열 값을 적절한 숫자 타입으로 자동 변환합니다.
+    int로 변환 가능하면 int, float으로 변환 가능하면 float, 아니면 str 유지.
+    """
+    result = {}
+    for k, v in params.items():
+        if isinstance(v, str):
+            try:
+                if v.isdigit() or (v.startswith('-') and v[1:].isdigit()):
+                    result[k] = int(v)
+                else:
+                    result[k] = float(v)
+            except ValueError:
+                result[k] = v
+        else:
+            result[k] = v
+    return result
+
+
+class CommandConfig(BaseModel):
+    """visa_libraries.yaml의 커맨드 항목 하나를 나타내는 모델."""
+    desc: str = ""
+    long_name: str = ""
+    type: Literal["Write", "Query (Read)"] = "Write"
+    unit: str = ""
+    proto: str = ""
+    has_paired_read: bool = False
+    paired_read_proto: str = ""
+    params: List[str] = Field(default_factory=lambda: [""] * 5)
+    comments: List[str] = Field(default_factory=lambda: [""] * 5)
+
+
+class ActiveMeasConfig(BaseModel):
+    """활성화된 측정(Measurement) 항목 모델."""
+    long_name: str = ""
+    original: str = ""
+    proto: str = ""
+    text: str = ""
+    unit: str = ""
+
+
+class ActiveSweepConfig(BaseModel):
+    """활성화된 스윕(Sweep) 항목 모델."""
+    long_name: str = ""
+    original: str = ""
+    sweep_from_cmd: str = ""
+    text: str = ""
+    unit: str = ""
+
+
+class InstrumentCommandProfile(BaseModel):
+    """visa_libraries.yaml의 장비 프로파일 하나 전체 모델."""
+    commands: List[CommandConfig] = Field(default_factory=list)
+    active_sweeps: List[ActiveSweepConfig] = Field(default_factory=list)
+    active_meas: List[ActiveMeasConfig] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# VISA Library models
+# ---------------------------------------------------------------------------
+
+class MeasurementParamDef(BaseModel):
+    """Measurement parameter 정의 (읽기 전용)."""
+    description: str = ""
+    cmd_query: str                          # 템플릿 (예: "FETCh:SENSe{m}:LIA:X?")
+    params: Dict[str, str] = Field(default_factory=dict)  # 설정 시 고정값 (예: {"m": "1"})
+    figure_axis: str = ""
+    unit: str = ""
+
+    def resolved_cmd(self) -> str:
+        """params를 적용한 완성 쿼리 명령어를 반환합니다."""
+        if not self.params:
+            return self.cmd_query
+        try:
+            return self.cmd_query.format(**self.params)
+        except KeyError as e:
+            raise ValueError(f"cmd_query 파라미터 누락: {e}") from e
+
+
+class SweepValueDef(BaseModel):
+    """Sweep value 정의 — cmd_set에 {placeholder} 포함, paired_read 필수."""
+    description: str = ""
+    cmd_set: str            # "smua.source.levelv = {v}"
+    figure_axis: str = ""
+    unit: str = ""
+    paired_read: MeasurementParamDef
+
+    @field_validator("cmd_set")
+    @classmethod
+    def has_placeholder(cls, v: str) -> str:
+        if not re.search(r"\{(\w+)\}", v):
+            raise ValueError("cmd_set must contain at least one {param} placeholder, e.g. {v}")
+        return v
+
+
+class WriteCmdDef(BaseModel):
+    """Write-only 명령어 정의 — 기기에 값을 설정하거나 상태를 변경하는 단순 쓰기 명령."""
+    description: str = ""
+    cmd_set: str            # "smua.source.output = smua.OUTPUT_ON"
+    figure_axis: str = ""
+    unit: str = ""
+
+
+class InstrumentCmdLibrary(BaseModel):
+    """alias당 하나의 VISA 명령어 라이브러리."""
+    measurements: List[MeasurementParamDef] = Field(default_factory=list)
+    sweep_values: List[SweepValueDef] = Field(default_factory=list)
+    write_cmds: List[WriteCmdDef] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Parameter Manager models
+# ---------------------------------------------------------------------------
+
+class SelectedEntry(BaseModel):
+    """Parameter Manager에서 선택된 항목 — alias + description으로 라이브러리 항목을 식별."""
+    alias: str
+    description: str
+
+
+class ParameterManagerProfile(BaseModel):
+    """Parameter Manager의 현재 선택 상태 (라이브러리 포인터만 저장)."""
+    sweep_values: List[SelectedEntry] = Field(default_factory=list)
+    measurements: List[SelectedEntry] = Field(default_factory=list)
+    write_cmds: List[SelectedEntry] = Field(default_factory=list)
+    second_sweep_channels: List[SelectedEntry] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Main UI Profile — 파라미터가 채워진 인스턴스화된 항목
+# ---------------------------------------------------------------------------
+
+class InstantiatedMeasurement(BaseModel):
+    """파라미터가 모두 채워진 측정 항목."""
+    alias: str
+    description: str
+    resolved_cmd: str       # 모든 파라미터 적용 완료된 query 명령
+    figure_axis: str = ""
+    unit: str = ""
+    fill_params: Dict[str, str] = Field(default_factory=dict)  # 원본 입력값 (재편집용)
+    axis_suffix: str = ""   # user-defined suffix appended to figure_axis in data files
+
+
+class InstantiatedSweepValue(BaseModel):
+    """파라미터가 채워진 sweep value 항목 — cmd_set에 {v} 하나만 남아있음."""
+    alias: str
+    description: str
+    cmd_set: str            # 비-sweep 파라미터 채워짐, sweep 파라미터 → {v}
+    paired_read_cmd: str    # 완전히 resolved된 paired measurement 명령
+    figure_axis: str = ""
+    unit: str = ""
+    safety_steps: int = 0           # 0 = safety 없음
+    safety_interval_ms: float = 0.0 # sub-step 사이 대기 시간 (ms)
+    fill_params: Dict[str, str] = Field(default_factory=dict)  # 원본 입력값 (재편집용)
+
+
+class InstantiatedWriteCmd(BaseModel):
+    """파라미터가 채워진 write 항목 — sweep 파라미터가 있으면 {v}, 없으면 고정 명령."""
+    alias: str
+    description: str
+    cmd_set: str            # {v} 있을 수도 없을 수도 있음
+    figure_axis: str = ""
+    unit: str = ""
+    fill_params: Dict[str, str] = Field(default_factory=dict)  # 원본 입력값 (재편집용)
+
+
+class SecondSweepAdvanceType(str, Enum):
+    SIMPLE_HOP    = "simple_hop"
+    SWEEP         = "sweep"
+    FEEDBACK      = "feedback"
+    WAIT_FOR_TIME = "wait_for_time"
+
+
+class InstantiatedSecondSweepChannel(BaseModel):
+    """Double sweep의 second sweep channel — advance type에 따른 파라미터 포함."""
+    alias: str
+    description: str
+    source_type: Literal["sweep_value", "write_cmd"]
+    advance_type: SecondSweepAdvanceType = SecondSweepAdvanceType.SIMPLE_HOP
+    cmd_set: str                        # {v} 포함
+    # SWEEP type
+    paired_read_cmd: str = ""
+    sweep_rate: float = 1.0
+    safety_steps: int = 0
+    safety_interval_ms: float = 0.0
+    # FEEDBACK type
+    feedback_read_cmd: str = ""
+    feedback_poll_interval: float = 1.0   # seconds
+    feedback_tolerance_pct: float = 95.0  # %: |V_read-V_prev|/|V_next-V_prev| >= pct/100
+    # WAIT_FOR_TIME type
+    wait_time: float = 1.0
+    figure_axis: str = ""
+    unit: str = ""
+
+
+class DoubleSweepConfig(BaseModel):
+    """Double Sweep 창의 파라미터 설정 (double_sweep.yaml에 저장)."""
+    start_point: float = 0.0
+    stop_point: float = 1.0
+    rate_trace: float = 1.0
+    rate_retrace: float = 1.0
+    rate_dummy: float = 1.0
+    time_per_point: float = 1.0
+    array_from: float = 0.0
+    array_to: float = 1.0
+    array_step: float = 0.1
+    selected_channel_idx: int = 0
+    # SWEEP-type second channel params (adjustable in DoubleSweepWindow)
+    second_sweep_rate: float = 1.0
+    second_use_safety: bool = False
+    second_safety_steps: int = 0
+    second_safety_interval_ms: float = 0.0
+
+
+class MainUIProfile(BaseModel):
+    """Main UI에 등록된 인스턴스화된 항목 전체."""
+    sweep_values: List[InstantiatedSweepValue] = Field(default_factory=list)
+    measurements: List[InstantiatedMeasurement] = Field(default_factory=list)
+    write_cmds: List[InstantiatedWriteCmd] = Field(default_factory=list)
+    second_sweep_channels: List[InstantiatedSecondSweepChannel] = Field(default_factory=list)
+
+
+class FullProfile(BaseModel):
+    """사용자별 프로파일 — 실험 간에 달라지는 모든 설정."""
+    parameter_manager: ParameterManagerProfile = Field(default_factory=ParameterManagerProfile)
+    main_ui: MainUIProfile = Field(default_factory=MainUIProfile)
+    # Sweep parameters
+    sweep_to: float = 0.0
+    sweep_rate: float = 1.0
+    time_per_point: float = 1.0
+    active_sweep_channel_idx: int = -2   # -2 = Time channel
+    # Save settings
+    main_folder: str = ""
+    custom_folder: str = ""
+    custom_word: str = ""
+    include_date: bool = True
+    save_enabled: bool = False
+    # Double sweep
+    double_sweep: DoubleSweepConfig = Field(default_factory=DoubleSweepConfig)
+
+
+# ---------------------------------------------------------------------------
+
+class InstrumentConfig(BaseModel):
+    """
+    Pydantic model for instrument configuration validation.
+    """
+    alias: str = Field(..., description="A unique readable name/alias for the instrument.")
+    class_name: str = Field(..., description="The fully qualified class name for dynamic loading (e.g. core.dummy_instrument.DummyInstrument).")
+    interface_type: Literal["LAN", "GPIB", "RS232", "USB"] = Field(..., description="Hardware communication interface type.")
+    address: str = Field(..., description="Hardware address or VISA resource string.")
+    mac_address: Optional[str] = Field(default="", description="MAC address for auto-tracking dynamic IP environments.")
+    port: Optional[int] = Field(default=None, description="Communication port, if applicable.")
+    extra_params: Dict[str, Any] = Field(default_factory=dict, description="Dictionary to store arbitrary dynamic variables.")

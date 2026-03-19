@@ -1,0 +1,34 @@
+parameter_manager:
+  sweep_values: []
+  measurements: []
+  write_cmds: []
+  second_sweep_channels: []
+main_ui:
+  sweep_values: []
+  measurements: []
+  write_cmds: []
+  second_sweep_channels: []
+sweep_to: 0.0
+sweep_rate: 1.0
+time_per_point: 1.0
+active_sweep_channel_idx: -2
+main_folder: D:/Users
+custom_folder: sdf
+custom_word: sfsf
+include_date: true
+save_enabled: false
+double_sweep:
+  start_point: 0.0
+  stop_point: 1.0
+  rate_trace: 1.0
+  rate_retrace: 1.0
+  rate_dummy: 1.0
+  time_per_point: 1.0
+  array_from: 0.0
+  array_to: 1.0
+  array_step: 0.1
+  selected_channel_idx: 0
+  second_sweep_rate: 1.0
+  second_use_safety: false
+  second_safety_steps: 0
+  second_safety_interval_ms: 0.0

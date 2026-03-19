@@ -1,0 +1,60 @@
+2636A:
+  measurements:
+  - description: read_smua_current
+    cmd_query: print(smua.measure.i())
+    params: {}
+    figure_axis: smua_current
+    unit: A
+  - description: read_smub_current
+    cmd_query: print(smub.measure.i())
+    params: {}
+    figure_axis: smub_current
+    unit: A
+  - description: read_smua_voltage
+    cmd_query: print(smua.measure.v())
+    params: {}
+    figure_axis: smua_voltage
+    unit: V
+  - description: read_smub_voltage
+    cmd_query: print(smub.measure.i())
+    params: {}
+    figure_axis: smub_voltage
+    unit: V
+  sweep_values:
+  - description: write_smua_voltage
+    cmd_set: smua.source.levelv={v}
+    figure_axis: target_smua_voltage
+    unit: V
+    paired_read:
+      description: read_smua_voltage
+      cmd_query: reading=smua.measure.v()print(reading)
+      params: {}
+      figure_axis: smua_voltage
+      unit: V
+  - description: write_smub_voltage
+    cmd_set: smub.source.levelv={v}
+    figure_axis: target_smub_voltage
+    unit: V
+    paired_read:
+      description: read_smub_voltage
+      cmd_query: reading=smub.measure.i()print(reading)
+      params: {}
+      figure_axis: smub_voltage
+      unit: V
+  write_cmds: []
+M81:
+  measurements: []
+  sweep_values: []
+  write_cmds: []
+ITC:
+  measurements: []
+  sweep_values: []
+  write_cmds: []
+IPS:
+  measurements: []
+  sweep_values: []
+  write_cmds: []
+SIGGEN:
+  measurements: []
+  sweep_values: []
+  write_cmds: []

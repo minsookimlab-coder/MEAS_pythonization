@@ -1,0 +1,124 @@
+parameter_manager:
+  sweep_values:
+  - alias: 2636A
+    description: write_smua_voltage
+  - alias: 2636A
+    description: write_smub_voltage
+  measurements:
+  - alias: 2636A
+    description: read_smua_current
+  - alias: 2636A
+    description: read_smub_current
+  - alias: 2636A
+    description: read_smua_voltage
+  - alias: 2636A
+    description: read_smub_voltage
+  write_cmds: []
+  second_sweep_channels:
+  - alias: 2636A
+    description: write_smua_voltage
+  - alias: 2636A
+    description: write_smub_voltage
+main_ui:
+  sweep_values:
+  - alias: 2636A
+    description: write_smua_voltage
+    cmd_set: smua.source.levelv={v}
+    paired_read_cmd: reading=smua.measure.v()print(reading)
+    figure_axis: target_smua_voltage
+    unit: V
+    safety_steps: 10
+    safety_interval_ms: 5.0
+    fill_params:
+      v: '[SWEEP,SAFETY(10,5)]'
+  - alias: 2636A
+    description: write_smub_voltage
+    cmd_set: smub.source.levelv={v}
+    paired_read_cmd: reading=smub.measure.i()print(reading)
+    figure_axis: target_smub_voltage
+    unit: V
+    safety_steps: 10
+    safety_interval_ms: 5.0
+    fill_params:
+      v: '[SWEEP,SAFETY(10,5)]'
+  measurements:
+  - alias: 2636A
+    description: read_smua_current
+    resolved_cmd: print(smua.measure.i())
+    figure_axis: smua_current
+    unit: A
+    fill_params: {}
+  - alias: 2636A
+    description: read_smub_current
+    resolved_cmd: print(smub.measure.i())
+    figure_axis: smub_current
+    unit: A
+    fill_params: {}
+  - alias: 2636A
+    description: read_smua_voltage
+    resolved_cmd: print(smua.measure.v())
+    figure_axis: smua_voltage
+    unit: V
+    fill_params: {}
+  - alias: 2636A
+    description: read_smub_voltage
+    resolved_cmd: print(smub.measure.i())
+    figure_axis: smub_voltage
+    unit: V
+    fill_params: {}
+  write_cmds: []
+  second_sweep_channels:
+  - alias: 2636A
+    description: write_smua_voltage
+    source_type: sweep_value
+    advance_type: sweep
+    cmd_set: smua.source.levelv={v}
+    paired_read_cmd: reading=smua.measure.v()print(reading)
+    sweep_rate: 1.0
+    safety_steps: 0
+    safety_interval_ms: 0.0
+    feedback_read_cmd: ''
+    feedback_poll_interval: 1.0
+    feedback_tolerance_pct: 95.0
+    wait_time: 1.0
+    figure_axis: target_smua_voltage
+    unit: V
+  - alias: 2636A
+    description: write_smub_voltage
+    source_type: sweep_value
+    advance_type: sweep
+    cmd_set: smub.source.levelv={v}
+    paired_read_cmd: reading=smub.measure.i()print(reading)
+    sweep_rate: 1.0
+    safety_steps: 0
+    safety_interval_ms: 0.0
+    feedback_read_cmd: ''
+    feedback_poll_interval: 1.0
+    feedback_tolerance_pct: 95.0
+    wait_time: 1.0
+    figure_axis: target_smub_voltage
+    unit: V
+sweep_to: 0.0
+sweep_rate: 10.0
+time_per_point: 0.5
+active_sweep_channel_idx: 0
+main_folder: D:/Users/SangIl
+custom_folder: '11'
+custom_word: '111'
+include_date: true
+save_enabled: true
+double_sweep:
+  start_point: 0.0
+  stop_point: 1.0
+  rate_trace: 5.0
+  rate_retrace: 5.0
+  rate_dummy: 5.0
+  time_per_point: 0.5
+  array_from: 0.5
+  array_to: 1.0
+  array_step: 0.1
+  selected_channel_idx: 1
+  second_sweep_rate: 1.0
+  second_use_safety: true
+  second_safety_steps: 10
+  second_safety_interval_ms: 5.0
