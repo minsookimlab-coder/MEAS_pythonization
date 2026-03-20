@@ -189,6 +189,12 @@ class DoubleSweepWindow(QDialog):
         self._sweep_timer.setSingleShot(True)
         self._sweep_timer.timeout.connect(self._sweep_tick)
 
+        # Glow animation
+        self._glow_phase = 0.0
+        self._glow_timer = QTimer(self)
+        self._glow_timer.setInterval(30)
+        self._glow_timer.timeout.connect(self._update_glow)
+
         self._build_ui()
         self._load_config()
 
@@ -197,7 +203,16 @@ class DoubleSweepWindow(QDialog):
     # ------------------------------------------------------------------
 
     def _build_ui(self):
-        outer = QVBoxLayout(self)
+        dialog_layout = QVBoxLayout(self)
+        dialog_layout.setContentsMargins(0, 0, 0, 0)
+        self._glow_frame = QFrame()
+        self._glow_frame.setObjectName("dsGlowFrame")
+        self._glow_frame.setStyleSheet(
+            "QFrame#dsGlowFrame { border: 3px solid transparent; border-radius: 6px; }"
+        )
+        dialog_layout.addWidget(self._glow_frame)
+
+        outer = QVBoxLayout(self._glow_frame)
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(8)
 
@@ -248,10 +263,15 @@ class DoubleSweepWindow(QDialog):
         self._sb_rate_d = _dsb(lo=1e-9, hi=1e9, val=1.0, suffix="units/min")
         self._sb_tpp    = _dsb(lo=0.001, hi=3600, dec=3, val=1.0, suffix="sec")
 
+        self._cb_retrace_to_zero = QCheckBox("Retrace to 0")
+        self._cb_retrace_to_zero.setFont(_MONO)
+        self._cb_retrace_to_zero.setToolTip("When checked, RETRACE sweeps to 0 instead of Start Point")
+
         form.addRow("Start Point:", self._sb_start)
         form.addRow("Stop Point:",  self._sb_stop)
         form.addRow("Rate (trace):",    self._sb_rate_t)
         form.addRow("Rate (retrace):",  self._sb_rate_r)
+        form.addRow("",                 self._cb_retrace_to_zero)
         form.addRow("Rate (dummy):",    self._sb_rate_d)
         form.addRow("Time / Point:",    self._sb_tpp)
         outer.addWidget(sp_frame)
@@ -377,16 +397,18 @@ class DoubleSweepWindow(QDialog):
         self._btn_start = QPushButton("Start Double Sweep")
         self._btn_start.setMinimumHeight(40)
         self._btn_start.setStyleSheet(
-            "font-weight: bold; font-size: 13px;"
-            "background-color: #0d6830; color: white; border-radius: 4px;"
+            "QPushButton { font-weight: bold; font-size: 13px;"
+            "background-color: #0d6830; color: white; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #0a2b1a; color: #2d4d35; border-radius: 4px; }"
         )
         self._btn_start.clicked.connect(self._on_start)
 
         self._btn_stop = QPushButton("Stop")
         self._btn_stop.setMinimumHeight(40)
         self._btn_stop.setStyleSheet(
-            "font-weight: bold; font-size: 13px;"
-            "background-color: #c62828; color: white; border-radius: 4px;"
+            "QPushButton { font-weight: bold; font-size: 13px;"
+            "background-color: #c62828; color: white; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #3a1a1a; color: #553d3d; border-radius: 4px; }"
         )
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._on_stop)
@@ -456,6 +478,7 @@ class DoubleSweepWindow(QDialog):
         self._sb_arr_from.setValue(cfg.array_from)
         self._sb_arr_to.setValue(cfg.array_to)
         self._sb_arr_step.setValue(cfg.array_step)
+        self._cb_retrace_to_zero.setChecked(cfg.retrace_to_zero)
         self._sb_second_rate.setValue(cfg.second_sweep_rate)
         self._cb_second_safety.setChecked(cfg.second_use_safety)
         self._sb_second_steps.setValue(cfg.second_safety_steps)
@@ -475,6 +498,7 @@ class DoubleSweepWindow(QDialog):
             array_to=self._sb_arr_to.value(),
             array_step=self._sb_arr_step.value(),
             selected_channel_idx=max(0, self._second_radio_group.checkedId()),
+            retrace_to_zero=self._cb_retrace_to_zero.isChecked(),
             second_sweep_rate=self._sb_second_rate.value(),
             second_use_safety=self._cb_second_safety.isChecked(),
             second_safety_steps=self._sb_second_steps.value(),
@@ -493,6 +517,7 @@ class DoubleSweepWindow(QDialog):
             array_from=self._sb_arr_from.value(),
             array_to=self._sb_arr_to.value(),
             array_step=self._sb_arr_step.value(),
+            retrace_to_zero=self._cb_retrace_to_zero.isChecked(),
         )
 
     def _update_n_points(self):
@@ -527,6 +552,10 @@ class DoubleSweepWindow(QDialog):
                 "Parameter Manager에서 Second Sweep Channel을 등록하세요.")
             return
 
+        # 연결 상태 확인 (second channel 포함) — 실패 시 측정 중단
+        if not self._main_win._run_connection_test(include_second=True, show_success=False):
+            return
+
         self._save_config()
         self._cfg = self._current_cfg()
         self._array = _generate_array(self._cfg)
@@ -540,6 +569,8 @@ class DoubleSweepWindow(QDialog):
 
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
+        self._glow_phase = 0.0
+        self._glow_timer.start()
         self.sweep_started.emit()
 
         # Graph: begin fresh session with the same columns as the sweep context
@@ -574,6 +605,7 @@ class DoubleSweepWindow(QDialog):
         self._lbl_array_progress.setText("—/—")
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        self._stop_glow()
         self.sweep_finished.emit()
         self._main_win._log("Double Sweep stopped.", color="#ce9178")
 
@@ -583,6 +615,7 @@ class DoubleSweepWindow(QDialog):
         self._lbl_array_progress.setText(f"{len(self._array)}/{len(self._array)}")
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        self._stop_glow()
         self.sweep_finished.emit()
         self._main_win._log(
             f"Double Sweep complete. ({len(self._array)} array points)", color="#4ec9b0"
@@ -669,6 +702,23 @@ class DoubleSweepWindow(QDialog):
         self._lbl_second_val.setText(f"{next_val:.4g} {ch.unit}")
         self._lbl_array_progress.setText(f"{self._array_idx + 1}/{len(self._array)}")
         self._set_phase(DoubleSweepPhase.ADVANCING_SECOND)
+
+        # Clear graph and reset derivative buffer when advancing to next array step
+        if prev is not None:
+            self._main_win._deriv_channel.reset()
+            if self._main_win._graph_window is not None:
+                try:
+                    cols = [("__sweep__", self._ctx.sweep_col[0], self._ctx.sweep_col[1])]
+                    for (row, alias, desc, cmd), (fig_ax, unit) in zip(
+                        self._ctx.active_measurements, self._ctx.meas_cols
+                    ):
+                        cols.append((desc, fig_ax, unit))
+                    if self._main_win._deriv_channel._cfg.enabled:
+                        cols.append(self._main_win._deriv_channel.col_info())
+                    self._main_win._graph_window.begin_session(cols)
+                except Exception as _e:
+                    self._main_win._log(f"  [Graph] clear failed: {_e}", color="#f44747")
+
         self.request_advance.emit(SecondChannelRequest(
             channel=ch,
             next_value=next_val,
@@ -748,7 +798,8 @@ class DoubleSweepWindow(QDialog):
             sweep_to, sweep_rate = cfg.stop_point, cfg.rate_trace
             active_meas = ctx.active_measurements
         else:  # RETRACE
-            sweep_to, sweep_rate = cfg.start_point, cfg.rate_retrace
+            sweep_to = 0.0 if cfg.retrace_to_zero else cfg.start_point
+            sweep_rate = cfg.rate_retrace
             active_meas = ctx.active_measurements
 
         t_emit = time.perf_counter()
@@ -807,8 +858,9 @@ class DoubleSweepWindow(QDialog):
                         gvals[desc] = val
                 # Derivative from shared channel (uses main_win's deriv_channel instance)
                 deriv_val = self._main_win._deriv_val_for_step(result, meas_map)
-                if deriv_val is not None:
-                    gvals[_DERIV_KEY] = deriv_val
+                if self._main_win._deriv_channel._cfg.enabled:
+                    # Always append (NaN when not computable) to keep X/Y arrays aligned
+                    gvals[_DERIV_KEY] = deriv_val if deriv_val is not None else float("nan")
                 self._main_win._graph_window.append_point(GraphDataPoint(values=gvals, phase=_phase_str))
             except Exception as _e:
                 self._main_win._log(f"  [Graph] append_point failed: {_e}", color="#f44747")
@@ -829,6 +881,27 @@ class DoubleSweepWindow(QDialog):
         self._on_stop()
 
     # ------------------------------------------------------------------
+    # Glow animation
+    # ------------------------------------------------------------------
+
+    def _update_glow(self):
+        self._glow_phase += 0.07
+        intensity = (math.sin(self._glow_phase) + 1) / 2
+        alpha = int(80 + intensity * 140)
+        green = int(140 + intensity * 80)
+        self._glow_frame.setStyleSheet(
+            f"QFrame#dsGlowFrame {{"
+            f"border: 3px solid rgba(40, {green}, 70, {alpha});"
+            f"border-radius: 6px; }}"
+        )
+
+    def _stop_glow(self):
+        self._glow_timer.stop()
+        self._glow_frame.setStyleSheet(
+            "QFrame#dsGlowFrame { border: 3px solid transparent; border-radius: 6px; }"
+        )
+
+    # ------------------------------------------------------------------
     # Window lifecycle
     # ------------------------------------------------------------------
 
@@ -842,6 +915,19 @@ class DoubleSweepWindow(QDialog):
         if self._phase == DoubleSweepPhase.IDLE:
             self._btn_start.setEnabled(not self._main_win._running)
         super().showEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self._save_config()
+            self.hide()
+            event.accept()
+            return
+        if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                and event.key() == Qt.Key.Key_S):
+            self._save_config()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event):
         if self._phase != DoubleSweepPhase.IDLE:

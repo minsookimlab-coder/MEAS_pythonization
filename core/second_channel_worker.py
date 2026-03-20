@@ -114,13 +114,29 @@ class SecondChannelWorker(QObject):
             )
             # Safety sub-steps
             if ch.safety_steps > 0 and abs(step_v - current) > 1e-11:
-                for i in range(1, ch.safety_steps + 1):
-                    if self._stop_event.is_set():
-                        break
-                    sub_v = current + (step_v - current) * i / ch.safety_steps
-                    sweep_ch.set_value(self._session, sub_v)
-                    if i < ch.safety_steps and ch.safety_interval_ms > 0:
-                        _time.sleep(ch.safety_interval_ms / 1000.0)
+                sub_vs = [
+                    current + (step_v - current) * i / ch.safety_steps
+                    for i in range(1, ch.safety_steps + 1)
+                ]
+                if ch.safety_interval_ms <= 0:
+                    # 배치 최적화: N회 round-trip → 1회
+                    batch_cmd = "\n".join(ch.cmd_set.format(v=v) for v in sub_vs)
+                    if not self._session.is_open(alias):
+                        self._session.open(alias)
+                    self._session.write(alias, batch_cmd)
+                else:
+                    # 인터벌 있음: VISA write 시간 차감 보정 sleep
+                    interval_s = ch.safety_interval_ms / 1000.0
+                    for i, sub_v in enumerate(sub_vs):
+                        if self._stop_event.is_set():
+                            break
+                        t0 = _time.perf_counter()
+                        sweep_ch.set_value(self._session, sub_v)
+                        if i < len(sub_vs) - 1:
+                            elapsed = _time.perf_counter() - t0
+                            remaining = interval_s - elapsed
+                            if remaining > 0:
+                                _time.sleep(remaining)
             else:
                 sweep_ch.set_value(self._session, step_v)
             current = step_v

@@ -103,13 +103,38 @@ class SweepWorker(QObject):
 
             # 3. 쓰기 — safety 여부에 따라 단계적 ramp 또는 직접 write
             if req.safety_steps > 0 and abs(next_v - current) > 1e-11:
-                for i in range(1, req.safety_steps + 1):
-                    if self._stop_event.is_set():
-                        break
-                    sub_v = current + (next_v - current) * i / req.safety_steps
-                    req.sweep_channel.set_value(self._session, sub_v)
-                    if i < req.safety_steps and req.safety_interval_ms > 0:
-                        _time.sleep(req.safety_interval_ms / 1000.0)
+                sub_vs = [
+                    current + (next_v - current) * i / req.safety_steps
+                    for i in range(1, req.safety_steps + 1)
+                ]
+                alias = getattr(req.sweep_channel, "alias", None)
+                cmd_tpl = getattr(
+                    getattr(req.sweep_channel, "parameter", None), "cmd_set", None
+                )
+
+                if cmd_tpl and alias and req.safety_interval_ms <= 0:
+                    # ── 배치 최적화: N회 round-trip → 1회 ──────────────
+                    # TSP 기기는 \n 구분 다중 명령을 펌웨어 속도로 순차 실행.
+                    # SCPI 기기도 대부분 \n 구분 다중 명령을 지원.
+                    batch_cmd = "\n".join(cmd_tpl.format(v=v) for v in sub_vs)
+                    if not self._session.is_open(alias):
+                        self._session.open(alias)
+                    self._session.write(alias, batch_cmd)
+                else:
+                    # ── 인터벌 있음: write 소요 시간을 차감한 보정 sleep ──
+                    # interval은 step 사이 최소 시간(물리적 settling)을 의미하므로
+                    # VISA write에 걸린 시간만큼 sleep을 줄여 총 시간을 맞춤.
+                    interval_s = req.safety_interval_ms / 1000.0
+                    for i, sub_v in enumerate(sub_vs):
+                        if self._stop_event.is_set():
+                            break
+                        t0 = _time.perf_counter()
+                        req.sweep_channel.set_value(self._session, sub_v)
+                        if i < len(sub_vs) - 1 and interval_s > 0:
+                            elapsed = _time.perf_counter() - t0
+                            remaining = interval_s - elapsed
+                            if remaining > 0:
+                                _time.sleep(remaining)
             else:
                 req.sweep_channel.set_value(self._session, next_v)
             timing.t_write_done = _time.perf_counter()

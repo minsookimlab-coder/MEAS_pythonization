@@ -1,12 +1,12 @@
-import re
 from typing import List, Optional, Tuple, Union
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QMessageBox, QInputDialog, QFrame, QWidget
+    QMessageBox, QInputDialog, QFrame
 )
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont
 
@@ -26,7 +26,7 @@ _COL_WRITE = QColor("#e3b341")
 
 class MeasurementParamDialog(QDialog):
     """Measurement parameter 추가/편집 다이얼로그.
-    cmd_query에 {m} 같은 플레이스홀더가 있으면 파라미터 입력 필드를 동적으로 생성합니다.
+    Description, cmd_query, Figure Axis, Unit 필드만 포함합니다.
     """
 
     def __init__(self, parent=None, entry: Optional[MeasurementParamDef] = None):
@@ -37,43 +37,30 @@ class MeasurementParamDialog(QDialog):
         self._outer = QVBoxLayout(self)
         self._outer.setSpacing(10)
 
-        # 기본 필드
         form = QFormLayout()
         form.setHorizontalSpacing(12)
         self._le_desc  = QLineEdit()
+        self._le_desc.setPlaceholderText("e.g. meas_smua_{ch}_current")
         self._le_query = QLineEdit()
         self._le_query.setFont(_MONO)
         self._le_query.setPlaceholderText(
-            '예: print(smua.measure.i())  또는  FETCh:SENSe{m}:LIA:X?'
+            'e.g. print(smua.measure.i())  or  FETCh:SENSe{m}:LIA:X?'
         )
         self._le_axis  = QLineEdit()
+        self._le_axis.setPlaceholderText("e.g. smua_{ch}_current  (supports {p})")
         self._le_unit  = QLineEdit()
+        self._le_unit.setPlaceholderText("e.g. A")
         form.addRow("Description:", self._le_desc)
         form.addRow("cmd_query:", self._le_query)
         form.addRow("Figure Axis:", self._le_axis)
         form.addRow("Unit:", self._le_unit)
         self._outer.addLayout(form)
 
-        # 파라미터 섹션 (동적)
-        self._param_widget = QWidget()
-        self._param_layout = QFormLayout(self._param_widget)
-        self._param_layout.setHorizontalSpacing(12)
-        self._param_fields: Dict[str, QLineEdit] = {}
-        self._outer.addWidget(self._param_widget)
-        self._param_widget.setVisible(False)
-
-        # cmd_query 변경 시 파라미터 필드 갱신
-        self._le_query.textChanged.connect(self._refresh_params)
-
         if entry:
             self._le_desc.setText(entry.description)
-            self._le_query.setText(entry.cmd_query)   # textChanged → _refresh_params 호출
+            self._le_query.setText(entry.cmd_query)
             self._le_axis.setText(entry.figure_axis)
             self._le_unit.setText(entry.unit)
-            # 저장된 param 값 채우기
-            for k, v in entry.params.items():
-                if k in self._param_fields:
-                    self._param_fields[k].setText(v)
 
         btn_row = QHBoxLayout()
         btn_ok = QPushButton("OK")
@@ -85,49 +72,19 @@ class MeasurementParamDialog(QDialog):
         btn_row.addWidget(btn_cancel)
         self._outer.addLayout(btn_row)
 
-    def _refresh_params(self, text: str):
-        """cmd_query의 플레이스홀더를 감지해 파라미터 입력 필드를 갱신합니다."""
-        placeholders = re.findall(r"\{(\w+)\}", text)
-        # 기존 필드 제거
-        while self._param_layout.rowCount():
-            self._param_layout.removeRow(0)
-        self._param_fields.clear()
-
-        if placeholders:
-            self._param_widget.setVisible(True)
-            sep_lbl = QLabel("Parameters")
-            sep_lbl.setStyleSheet("font-weight: bold; color: #e3b341;")
-            self._param_layout.addRow(sep_lbl)
-            for ph in dict.fromkeys(placeholders):  # 순서 유지, 중복 제거
-                le = QLineEdit()
-                le.setFont(_MONO)
-                le.setPlaceholderText(f"{{{ph}}} 에 들어갈 고정값")
-                self._param_layout.addRow(f"{{{ph}}}:", le)
-                self._param_fields[ph] = le
-        else:
-            self._param_widget.setVisible(False)
-
-        self.adjustSize()
-
     def _on_ok(self):
         if not self._le_desc.text().strip():
-            QMessageBox.warning(self, "Validation", "Description은 필수입니다.")
+            QMessageBox.warning(self, "Validation", "Description is required.")
             return
         if not self._le_query.text().strip():
-            QMessageBox.warning(self, "Validation", "cmd_query는 필수입니다.")
+            QMessageBox.warning(self, "Validation", "cmd_query is required.")
             return
-        for ph, le in self._param_fields.items():
-            if not le.text().strip():
-                QMessageBox.warning(self, "Validation",
-                    f"파라미터 {{{ph}}} 값을 입력하세요.")
-                return
         self.accept()
 
     def get_entry(self) -> MeasurementParamDef:
         return MeasurementParamDef(
             description=self._le_desc.text().strip(),
             cmd_query=self._le_query.text().strip(),
-            params={k: v.text().strip() for k, v in self._param_fields.items()},
             figure_axis=self._le_axis.text().strip(),
             unit=self._le_unit.text().strip(),
         )
@@ -135,83 +92,47 @@ class MeasurementParamDialog(QDialog):
 
 class SweepValueDialog(QDialog):
     """Sweep value 추가/편집 다이얼로그.
-    Paired measurement parameter는 라이브러리에 등록된 기존 항목 중에서 선택합니다.
+    paired_read_cmd는 직접 입력하는 텍스트 필드로 처리합니다.
     """
 
     def __init__(
         self,
-        existing_measurements: List[MeasurementParamDef],
         parent=None,
         entry: Optional[SweepValueDef] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Sweep Value")
         self.setMinimumWidth(520)
-        self._measurements = existing_measurements
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
-        # --- Sweep Value section ---
-        sweep_lbl = QLabel("Sweep Value")
-        sweep_lbl.setStyleSheet("font-weight: bold; font-size: 12px; color: #79c0ff;")
-        layout.addWidget(sweep_lbl)
-
-        sweep_form = QFormLayout()
-        sweep_form.setHorizontalSpacing(12)
+        form = QFormLayout()
+        form.setHorizontalSpacing(12)
         self._le_w_desc  = QLineEdit()
+        self._le_w_desc.setPlaceholderText("e.g. sweep_smua_{ch}_voltage")
         self._le_cmd_set = QLineEdit()
         self._le_cmd_set.setFont(_MONO)
-        self._le_cmd_set.setPlaceholderText("예: smua.source.levelv = {v}")
+        self._le_cmd_set.setPlaceholderText("e.g. smua.source.levelv = {v}")
+        self._le_paired  = QLineEdit()
+        self._le_paired.setFont(_MONO)
+        self._le_paired.setPlaceholderText("e.g. print(smua.measure.i())")
         self._le_w_axis  = QLineEdit()
+        self._le_w_axis.setPlaceholderText("e.g. smua_{ch}_voltage  (supports {p})")
         self._le_w_unit  = QLineEdit()
-        sweep_form.addRow("Description:", self._le_w_desc)
-        sweep_form.addRow("cmd_set:", self._le_cmd_set)
-        sweep_form.addRow("Figure Axis:", self._le_w_axis)
-        sweep_form.addRow("Unit:", self._le_w_unit)
-        layout.addLayout(sweep_form)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #30363d;")
-        layout.addWidget(sep)
-
-        # --- Paired Measurement Parameter section ---
-        meas_lbl = QLabel("Paired Measurement Parameter — 기존 항목에서 선택 (필수)")
-        meas_lbl.setStyleSheet("font-weight: bold; font-size: 12px; color: #56d364;")
-        layout.addWidget(meas_lbl)
-
-        self._combo_meas = QComboBox()
-        self._combo_meas.setFont(_MONO)
-        for r in existing_measurements:
-            label = f"{r.description}  [{r.resolved_cmd()}]"
-            self._combo_meas.addItem(label)
-
-        self._lbl_preview = QLabel("—")
-        self._lbl_preview.setFont(_MONO)
-        self._lbl_preview.setStyleSheet("color: #888888; padding: 2px 4px;")
-        self._lbl_preview.setWordWrap(True)
-        self._combo_meas.currentIndexChanged.connect(self._update_preview)
-
-        meas_form = QFormLayout()
-        meas_form.setHorizontalSpacing(12)
-        meas_form.addRow("Select:", self._combo_meas)
-        meas_form.addRow("Preview:", self._lbl_preview)
-        layout.addLayout(meas_form)
-
-        if existing_measurements:
-            self._update_preview(0)
+        form.addRow("Description:", self._le_w_desc)
+        form.addRow("cmd_set:", self._le_cmd_set)
+        form.addRow("paired_read_cmd:", self._le_paired)
+        form.addRow("Figure Axis:", self._le_w_axis)
+        form.addRow("Unit:", self._le_w_unit)
+        layout.addLayout(form)
 
         if entry:
             self._le_w_desc.setText(entry.description)
             self._le_cmd_set.setText(entry.cmd_set)
+            self._le_paired.setText(entry.paired_read_cmd)
             self._le_w_axis.setText(entry.figure_axis)
             self._le_w_unit.setText(entry.unit)
-            # 현재 paired_read와 일치하는 항목을 콤보에서 선택
-            for i, r in enumerate(existing_measurements):
-                if r.description == entry.paired_read.description:
-                    self._combo_meas.setCurrentIndex(i)
-                    break
 
         btn_row = QHBoxLayout()
         btn_ok = QPushButton("OK")
@@ -223,36 +144,22 @@ class SweepValueDialog(QDialog):
         btn_row.addWidget(btn_cancel)
         layout.addLayout(btn_row)
 
-    def _update_preview(self, idx: int):
-        if 0 <= idx < len(self._measurements):
-            r = self._measurements[idx]
-            self._lbl_preview.setText(r.resolved_cmd())
-
     def _on_ok(self):
-        cmd_set = self._le_cmd_set.text().strip()
-        placeholders = re.findall(r"\{(\w+)\}", cmd_set)
-
         if not self._le_w_desc.text().strip():
-            QMessageBox.warning(self, "Validation", "Description은 필수입니다.")
+            QMessageBox.warning(self, "Validation", "Description is required.")
             return
-        if not placeholders:
-            QMessageBox.warning(self, "Validation",
-                "cmd_set에 {param} 플레이스홀더가 필요합니다. (예: {v}, {i}, {a})")
-            return
-        if not self._measurements:
-            QMessageBox.warning(self, "Validation",
-                "먼저 Measurement Parameter를 등록해야 합니다.")
+        if not self._le_cmd_set.text().strip():
+            QMessageBox.warning(self, "Validation", "cmd_set is required.")
             return
         self.accept()
 
     def get_entry(self) -> SweepValueDef:
-        paired = self._measurements[self._combo_meas.currentIndex()]
         return SweepValueDef(
             description=self._le_w_desc.text().strip(),
             cmd_set=self._le_cmd_set.text().strip(),
+            paired_read_cmd=self._le_paired.text().strip(),
             figure_axis=self._le_w_axis.text().strip(),
             unit=self._le_w_unit.text().strip(),
-            paired_read=paired,
         )
 
 
@@ -270,6 +177,7 @@ class WriteCmdDialog(QDialog):
         form = QFormLayout()
         form.setHorizontalSpacing(12)
         self._le_desc    = QLineEdit()
+        self._le_desc.setPlaceholderText("e.g. write_smua_{ch}_output")
         self._le_cmd_set = QLineEdit()
         self._le_cmd_set.setFont(_MONO)
         self._le_cmd_set.setPlaceholderText("예: smua.source.output = smua.OUTPUT_ON")
@@ -459,7 +367,25 @@ class VisaLibraryWindow(QDialog):
     # Table population
     # ------------------------------------------------------------------
 
+    def _save_current_silent(self):
+        """Save the current instrument's entries to the registry (no dialog)."""
+        if not self._current_alias:
+            return
+        measurements = [e for t, e in self._entries if t == "measurement"]
+        sweep_values = [e for t, e in self._entries if t == "sweep value"]
+        write_cmds   = [e for t, e in self._entries if t == "write"]
+        self._lib_reg.set_library(
+            self._current_alias,
+            InstrumentCmdLibrary(
+                measurements=measurements,
+                sweep_values=sweep_values,
+                write_cmds=write_cmds,
+            )
+        )
+        self._lib_reg.save()
+
     def _on_instrument_changed(self, alias: str):
+        self._save_current_silent()   # save previous instrument first
         self._current_alias = alias
         lib = self._lib_reg.get_library(alias)
         self._entries = (
@@ -474,14 +400,13 @@ class VisaLibraryWindow(QDialog):
         for row, (typ, entry) in enumerate(self._entries):
             if typ == "measurement":
                 e: MeasurementParamDef = entry
-                cmd_display = e.resolved_cmd() if e.params else e.cmd_query
-                self._set_row(row, e.description, cmd_display,
+                self._set_row(row, e.description, e.cmd_query,
                               e.figure_axis, e.unit, "measurement", "—")
             elif typ == "sweep value":
                 e: SweepValueDef = entry
+                paired_display = e.paired_read_cmd[:60] + ("…" if len(e.paired_read_cmd) > 60 else "")
                 self._set_row(row, e.description, e.cmd_set,
-                              e.figure_axis, e.unit, "sweep value",
-                              e.paired_read.description or e.paired_read.cmd_query)
+                              e.figure_axis, e.unit, "sweep value", paired_display)
             else:
                 e: WriteCmdDef = entry
                 self._set_row(row, e.description, e.cmd_set,
@@ -517,12 +442,7 @@ class VisaLibraryWindow(QDialog):
     def _add_sweep_value(self):
         if not self._current_alias:
             return
-        measurements = self._current_measurements()
-        if not measurements:
-            QMessageBox.warning(self, "No Measurements",
-                "먼저 Measurement Parameter를 등록해야 Sweep Value를 추가할 수 있습니다.")
-            return
-        dlg = SweepValueDialog(measurements, self)
+        dlg = SweepValueDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._entries.append(("sweep value", dlg.get_entry()))
             self._populate_table()
@@ -545,8 +465,7 @@ class VisaLibraryWindow(QDialog):
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 self._entries[row] = ("measurement", dlg.get_entry())
         elif typ == "sweep value":
-            measurements = self._current_measurements()
-            dlg = SweepValueDialog(measurements, self, entry)
+            dlg = SweepValueDialog(self, entry)
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 self._entries[row] = ("sweep value", dlg.get_entry())
         else:
@@ -595,6 +514,19 @@ class VisaLibraryWindow(QDialog):
 
     def _current_measurements(self) -> List[MeasurementParamDef]:
         return [e for t, e in self._entries if t == "measurement"]
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self._save_current_silent()
+            self.hide()
+            event.accept()
+            return
+        if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                and event.key() == Qt.Key.Key_S):
+            self._save()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event):
         if self._current_alias:

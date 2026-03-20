@@ -1,7 +1,7 @@
 import re
 from enum import Enum
 from typing import Dict, Any, Literal, Optional, List
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def cast_extra_params(params: dict) -> dict:
@@ -67,36 +67,38 @@ class InstrumentCommandProfile(BaseModel):
 # ---------------------------------------------------------------------------
 
 class MeasurementParamDef(BaseModel):
-    """Measurement parameter 정의 (읽기 전용)."""
+    """Measurement parameter 정의 (읽기 전용) — VISA 명령어 템플릿 카탈로그."""
+    model_config = ConfigDict(extra='ignore')
+
     description: str = ""
     cmd_query: str                          # 템플릿 (예: "FETCh:SENSe{m}:LIA:X?")
-    params: Dict[str, str] = Field(default_factory=dict)  # 설정 시 고정값 (예: {"m": "1"})
     figure_axis: str = ""
     unit: str = ""
-
-    def resolved_cmd(self) -> str:
-        """params를 적용한 완성 쿼리 명령어를 반환합니다."""
-        if not self.params:
-            return self.cmd_query
-        try:
-            return self.cmd_query.format(**self.params)
-        except KeyError as e:
-            raise ValueError(f"cmd_query 파라미터 누락: {e}") from e
 
 
 class SweepValueDef(BaseModel):
-    """Sweep value 정의 — cmd_set에 {placeholder} 포함, paired_read 필수."""
+    """Sweep value 정의 — cmd_set과 paired_read_cmd를 plain 문자열로 저장."""
     description: str = ""
     cmd_set: str            # "smua.source.levelv = {v}"
+    paired_read_cmd: str = ""   # paired read query template, e.g. "print(smua.measure.i())"
     figure_axis: str = ""
     unit: str = ""
-    paired_read: MeasurementParamDef
 
-    @field_validator("cmd_set")
+    @model_validator(mode='before')
     @classmethod
-    def has_placeholder(cls, v: str) -> str:
-        if not re.search(r"\{(\w+)\}", v):
-            raise ValueError("cmd_set must contain at least one {param} placeholder, e.g. {v}")
+    def _migrate_paired_read(cls, v):
+        if isinstance(v, dict) and 'paired_read' in v and isinstance(v['paired_read'], dict):
+            old = v['paired_read']
+            cmd = old.get('cmd_query', '')
+            params = old.get('params', {})
+            if params:
+                try:
+                    v['paired_read_cmd'] = cmd.format(**params)
+                except Exception:
+                    v['paired_read_cmd'] = cmd
+            else:
+                v['paired_read_cmd'] = cmd
+            v.pop('paired_read', None)
         return v
 
 
@@ -214,6 +216,7 @@ class DoubleSweepConfig(BaseModel):
     array_to: float = 1.0
     array_step: float = 0.1
     selected_channel_idx: int = 0
+    retrace_to_zero: bool = False  # if True, RETRACE sweeps to 0 instead of start_point
     # SWEEP-type second channel params (adjustable in DoubleSweepWindow)
     second_sweep_rate: float = 1.0
     second_use_safety: bool = False

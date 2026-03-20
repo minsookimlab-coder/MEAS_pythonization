@@ -1,7 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \":*)"
+      "Bash(python -c \":*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/Main/Desktop/pythonization/gui/main_window.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''config/config_models.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''config_models OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/visa_library_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''visa_library_window OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''core/profile_registry.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''profile_registry OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/main_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''main_window OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/parameter_manager_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''parameter_manager_window OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/parameter_manager_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''parameter_manager_window.py: OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/visa_library_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''visa_library_window.py: OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/graph_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''graph_window.py: OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/main_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''main_window.py: OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/debug_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''debug_window.py: OK''\\)\")"
     ]
   }
 }

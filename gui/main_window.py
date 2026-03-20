@@ -56,7 +56,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Measurement System")
-        self.resize(860, 560)
+        self.resize(1120, 660)
 
         self._settings_window = None
         self._visa_lib_window = None
@@ -201,11 +201,15 @@ class MainWindow(QMainWindow):
         btn_dup = QPushButton("Copy")
         btn_dup.setFixedWidth(46)
         btn_dup.clicked.connect(self._profile_duplicate)
+        btn_ren = QPushButton("Rename")
+        btn_ren.setFixedWidth(60)
+        btn_ren.clicked.connect(self._profile_rename)
         btn_del = QPushButton("Delete")
         btn_del.setFixedWidth(52)
         btn_del.clicked.connect(self._profile_delete)
         row.addWidget(btn_add)
         row.addWidget(btn_dup)
+        row.addWidget(btn_ren)
         row.addWidget(btn_del)
 
         self._refresh_profile_combo()
@@ -252,6 +256,19 @@ class MainWindow(QMainWindow):
         self._combo_profile.setCurrentText(new_name)
         self._combo_profile.blockSignals(False)
 
+    def _profile_rename(self):
+        old = self._param_manager_reg.active_name
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Profile", "새 이름:", text=old
+        )
+        if not ok or not new_name.strip() or new_name.strip() == old:
+            return
+        actual = self._param_manager_reg.rename_profile(old, new_name.strip())
+        self._refresh_profile_combo()
+        self._combo_profile.blockSignals(True)
+        self._combo_profile.setCurrentText(actual)
+        self._combo_profile.blockSignals(False)
+
     def _profile_delete(self):
         name = self._param_manager_reg.active_name
         reply = QMessageBox.question(
@@ -291,10 +308,9 @@ class MainWindow(QMainWindow):
         self._loading_profile = True
         try:
             fp = self._param_manager_reg.get_active_profile()
-            rebuilt = self._param_manager_reg.rebuild_main_ui_from_library(self._visa_lib_registry)
-            if rebuilt.sweep_values or rebuilt.measurements or rebuilt.write_cmds:
-                self._param_manager_reg.save_main_ui(rebuilt)
-                self._on_selection_applied(rebuilt)
+            mui = fp.main_ui
+            if mui.sweep_values or mui.measurements or mui.write_cmds:
+                self._on_selection_applied(mui)
             else:
                 self._rebuild_sweep_channel_panel([])
             # Apply sweep params (block signals to avoid recursive saves)
@@ -333,7 +349,9 @@ class MainWindow(QMainWindow):
 
     def _build_sequence_panel(self) -> QWidget:
         panel = QWidget()
-        layout = QVBoxLayout(panel)
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
 
         # --- 제목 + 창 열기 버튼 ---
         title_row = QHBoxLayout()
@@ -349,7 +367,21 @@ class MainWindow(QMainWindow):
         btn_array.clicked.connect(lambda: self._sweep_status_window.show())
         title_row.addWidget(btn_debug)
         title_row.addWidget(btn_array)
-        layout.addLayout(title_row)
+        outer.addLayout(title_row)
+
+        # ── 2-column content layout ────────────────────────────────────────
+        content_row = QHBoxLayout()
+        content_row.setSpacing(10)
+        outer.addLayout(content_row, stretch=1)
+
+        # ── LEFT COLUMN ──────────────────────────────────────────────────
+        left_widget = QWidget()
+        left_widget.setMinimumWidth(320)
+        left_widget.setMaximumWidth(420)
+        layout = QVBoxLayout(left_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        content_row.addWidget(left_widget)
 
         # --- Sweep Parameters ---
         sweep_box = QFrame()
@@ -414,57 +446,25 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(sweep_box)
 
-        # --- Sweep Channel panel (radio buttons, populated by profile) ---
-        self._sweep_channel_panel = QFrame()
-        self._sweep_channel_panel.setFrameShape(QFrame.Shape.StyledPanel)
-        sc_outer = QVBoxLayout(self._sweep_channel_panel)
-        sc_outer.setContentsMargins(8, 6, 8, 6)
-        sc_outer.setSpacing(4)
-        sc_title = QLabel("Sweep Channel")
-        sc_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #79c0ff;")
-        sc_outer.addWidget(sc_title)
-        self._sweep_ch_scroll = QScrollArea()
-        self._sweep_ch_scroll.setWidgetResizable(True)
-        self._sweep_ch_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self._sweep_ch_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._sweep_ch_scroll.setMaximumHeight(150)
-        self._sweep_ch_scroll.setStyleSheet("background: transparent;")
-        sc_outer.addWidget(self._sweep_ch_scroll)
-        self._sweep_radio_group = QButtonGroup(self)
-        self._sweep_radio_group.setExclusive(True)
-        self._sweep_radio_group.idToggled.connect(self._on_sweep_radio_toggled)
-        self._sweep_channel_panel.setVisible(False)
-        layout.addWidget(self._sweep_channel_panel)
-
-        # --- Active Measurements panel (checkboxes + suffix) ---
-        self._meas_panel = QFrame()
-        self._meas_panel.setFrameShape(QFrame.Shape.StyledPanel)
-        meas_outer = QVBoxLayout(self._meas_panel)
-        meas_outer.setContentsMargins(8, 6, 8, 6)
-        meas_outer.setSpacing(4)
-        m_title = QLabel("Active Measurements")
-        m_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #56d364;")
-        meas_outer.addWidget(m_title)
-        self._meas_scroll = QScrollArea()
-        self._meas_scroll.setWidgetResizable(True)
-        self._meas_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self._meas_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._meas_scroll.setMaximumHeight(180)
-        self._meas_scroll.setStyleSheet("background: transparent;")
-        meas_outer.addWidget(self._meas_scroll)
-        self._meas_panel.setVisible(False)
-        layout.addWidget(self._meas_panel)
-
-        # --- Write Commands panel ---
-        self._write_panel = QFrame()
-        self._write_panel.setFrameShape(QFrame.Shape.StyledPanel)
-        self._write_layout = QVBoxLayout(self._write_panel)
-        self._write_layout.setContentsMargins(8, 6, 8, 6)
-        w_title = QLabel("Write Commands")
-        w_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #e3b341;")
-        self._write_layout.addWidget(w_title)
-        self._write_panel.setVisible(False)
-        layout.addWidget(self._write_panel)
+        # --- Quick-access buttons: Graph / Double Sweep / Connection Test ---
+        quick_row = QHBoxLayout()
+        quick_row.setSpacing(4)
+        btn_quick_graph = QPushButton("Graph")
+        btn_quick_graph.setToolTip("Open Graph window")
+        btn_quick_graph.clicked.connect(self._open_graph_window)
+        btn_quick_ds = QPushButton("Double Sweep")
+        btn_quick_ds.setToolTip("Open Double Sweep window")
+        btn_quick_ds.clicked.connect(self._open_double_sweep)
+        btn_quick_conn = QPushButton("Connection Test")
+        btn_quick_conn.setToolTip(
+            "Test *IDN? on all active instruments\n"
+            "(sweep channel + active measurements + second channel if DS open)"
+        )
+        btn_quick_conn.clicked.connect(self._on_connection_test)
+        quick_row.addWidget(btn_quick_graph)
+        quick_row.addWidget(btn_quick_ds)
+        quick_row.addWidget(btn_quick_conn)
+        layout.addLayout(quick_row)
 
         # --- Save Settings panel ---
         save_box = QFrame()
@@ -563,6 +563,64 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
 
         layout.addStretch()
+
+        # ── RIGHT COLUMN ─────────────────────────────────────────────────
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        content_row.addWidget(right_widget, stretch=1)
+
+        # --- Sweep Channel panel ---
+        self._sweep_channel_panel = QFrame()
+        self._sweep_channel_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        sc_outer = QVBoxLayout(self._sweep_channel_panel)
+        sc_outer.setContentsMargins(8, 6, 8, 6)
+        sc_outer.setSpacing(4)
+        sc_title = QLabel("Sweep Channel")
+        sc_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #79c0ff;")
+        sc_outer.addWidget(sc_title)
+        self._sweep_ch_scroll = QScrollArea()
+        self._sweep_ch_scroll.setWidgetResizable(True)
+        self._sweep_ch_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._sweep_ch_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._sweep_ch_scroll.setStyleSheet("background: transparent;")
+        sc_outer.addWidget(self._sweep_ch_scroll, stretch=1)
+        self._sweep_radio_group = QButtonGroup(self)
+        self._sweep_radio_group.setExclusive(True)
+        self._sweep_radio_group.idToggled.connect(self._on_sweep_radio_toggled)
+        self._sweep_channel_panel.setVisible(False)
+        right_layout.addWidget(self._sweep_channel_panel, stretch=1)
+
+        # --- Active Measurements panel ---
+        self._meas_panel = QFrame()
+        self._meas_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        meas_outer = QVBoxLayout(self._meas_panel)
+        meas_outer.setContentsMargins(8, 6, 8, 6)
+        meas_outer.setSpacing(4)
+        m_title = QLabel("Active Measurements")
+        m_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #56d364;")
+        meas_outer.addWidget(m_title)
+        self._meas_scroll = QScrollArea()
+        self._meas_scroll.setWidgetResizable(True)
+        self._meas_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._meas_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._meas_scroll.setStyleSheet("background: transparent;")
+        meas_outer.addWidget(self._meas_scroll, stretch=1)
+        self._meas_panel.setVisible(False)
+        right_layout.addWidget(self._meas_panel, stretch=2)
+
+        # --- Write Commands panel (hidden, kept for compatibility) ---
+        self._write_panel = QFrame()
+        self._write_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        self._write_layout = QVBoxLayout(self._write_panel)
+        self._write_layout.setContentsMargins(8, 6, 8, 6)
+        w_title = QLabel("Write Commands")
+        w_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #e3b341;")
+        self._write_layout.addWidget(w_title)
+        self._write_panel.setVisible(False)
+        right_layout.addWidget(self._write_panel)
+
         return panel
 
     # ------------------------------------------------------------------
@@ -646,6 +704,83 @@ class MainWindow(QMainWindow):
         """Double sweep 종료 → main UI Start 복원 (single sweep 실행 중이 아닐 때만)."""
         if not self._running:
             self._btn_start.setEnabled(True)
+
+    # ------------------------------------------------------------------
+    # Connection Test
+    # ------------------------------------------------------------------
+
+    def collect_active_aliases(self, include_second: bool = False) -> list:
+        """활성 기기(alias)를 중복 없이 순서대로 반환.
+
+        include_second=True이면 Double Sweep 창이 열려 있을 때
+        second_sweep_channels의 alias도 포함합니다.
+        """
+        seen: set = set()
+        aliases: list = []
+
+        def _add(alias: str):
+            if alias and alias not in seen:
+                seen.add(alias)
+                aliases.append(alias)
+
+        # Sweep channel
+        sv_id = self._sweep_radio_group.checkedId()
+        if sv_id != self._TIME_ID and 0 <= sv_id < len(self._active_profile.sweep_values):
+            _add(self._active_profile.sweep_values[sv_id].alias)
+
+        # Active measurement checkboxes
+        for m, cb in zip(self._active_profile.measurements, self._meas_checkboxes):
+            if cb.isChecked():
+                _add(m.alias)
+
+        # Second sweep channels (only if double sweep window is open)
+        if include_second and self._double_sweep_window is not None and \
+                self._double_sweep_window.isVisible():
+            for ch in self._active_profile.second_sweep_channels:
+                _add(ch.alias)
+
+        return aliases
+
+    def _run_connection_test(self, include_second: bool = False,
+                             show_success: bool = True) -> bool:
+        """각 기기에 *IDN? 쿼리를 보내 연결 상태를 확인합니다.
+
+        show_success=False이면 오류가 있을 때만 다이얼로그를 표시합니다.
+        반환값: 모두 성공이면 True, 하나라도 실패하면 False.
+        """
+        aliases = self.collect_active_aliases(include_second=include_second)
+        if not aliases:
+            if show_success:
+                QMessageBox.information(self, "Connection Test", "활성화된 기기가 없습니다.")
+            return True
+
+        results: dict = {}  # alias → (ok: bool, message: str)
+        for alias in aliases:
+            try:
+                idn = self._session.query_once(alias, "*IDN?")
+                results[alias] = (True, idn.strip())
+            except Exception as exc:
+                results[alias] = (False, str(exc))
+
+        all_ok = all(ok for ok, _ in results.values())
+
+        if not all_ok or show_success:
+            lines = []
+            for alias, (ok, msg) in results.items():
+                icon = "✓" if ok else "✗"
+                short = msg[:100] + ("…" if len(msg) > 100 else "")
+                lines.append(f"{icon}  {alias}\n    {short}")
+            body = "\n\n".join(lines)
+            if all_ok:
+                QMessageBox.information(self, "Connection Test — OK", body)
+            else:
+                QMessageBox.critical(self, "Connection Test — 실패", body)
+
+        return all_ok
+
+    def _on_connection_test(self):
+        """Connection Test 버튼 핸들러 — 항상 요약 창 표시."""
+        self._run_connection_test(include_second=True, show_success=True)
 
     # ------------------------------------------------------------------
     # Derivative Channel UI
@@ -804,9 +939,20 @@ class MainWindow(QMainWindow):
         return self._deriv_channel.push(a1, a2)
 
     def _on_selection_applied(self, profile: MainUIProfile):
+        # 기존 체크박스 상태를 (alias, description) 키로 보존
+        prev_checked: dict = {}
+        prev_suffix: dict = {}
+        if self._active_profile is not None:
+            for m, cb in zip(self._active_profile.measurements, self._meas_checkboxes):
+                key = (m.alias, m.description)
+                prev_checked[key] = cb.isChecked()
+            for m, le in zip(self._active_profile.measurements, self._meas_suffix_edits):
+                key = (m.alias, m.description)
+                prev_suffix[key] = le.text()
+
         self._active_profile = profile
         self._rebuild_sweep_channel_panel(profile.sweep_values)
-        self._rebuild_meas_panel(profile.measurements)
+        self._rebuild_meas_panel(profile.measurements, prev_checked, prev_suffix)
         self._rebuild_write_panel(profile.write_cmds)
         self._rebuild_deriv_combos()
 
@@ -875,7 +1021,9 @@ class MainWindow(QMainWindow):
             self._sweep_channel = sweep_channel_from_instantiated(svs[btn_id])
             self._sync_data_window_columns()
 
-    def _rebuild_meas_panel(self, measurements: list):
+    def _rebuild_meas_panel(self, measurements: list,
+                             prev_checked: dict = None,
+                             prev_suffix: dict = None):
         content = QWidget()
         content.setStyleSheet("background: transparent;")
         cl = QVBoxLayout(content)
@@ -895,7 +1043,8 @@ class MainWindow(QMainWindow):
             cb = QCheckBox(f"[{m.alias}]  {m.description}  ({m.unit})")
             cb.setFont(_MONO)
             cb.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
-            cb.setChecked(True)
+            key = (m.alias, m.description)
+            cb.setChecked(prev_checked.get(key, True) if prev_checked else True)
             self._meas_checkboxes.append(cb)
             row_h.addWidget(cb)
 
@@ -903,7 +1052,9 @@ class MainWindow(QMainWindow):
             le_suffix.setFont(_MONO)
             le_suffix.setFixedWidth(110)
             le_suffix.setPlaceholderText("suffix")
-            le_suffix.setText(m.axis_suffix)
+            le_suffix.setText(
+                prev_suffix.get(key, m.axis_suffix) if prev_suffix else m.axis_suffix
+            )
             le_suffix.setToolTip("Data column suffix: e.g. 'port10' → smua_current_port10")
             le_suffix.textChanged.connect(self._sync_data_window_columns)
             self._meas_suffix_edits.append(le_suffix)
@@ -999,6 +1150,9 @@ class MainWindow(QMainWindow):
         if self._sweep_channel is None:
             QMessageBox.warning(self, "No Sweep Channel",
                 "Parameter Manager에서 Sweep Value를 선택하세요.")
+            return
+        # 연결 상태 확인 — 실패 시 측정 중단
+        if not self._run_connection_test(include_second=False, show_success=False):
             return
         self._running = True
         self._sweep_step_count = 0
@@ -1136,8 +1290,9 @@ class MainWindow(QMainWindow):
                 val = meas_map.get(idx)
                 if val is not None:
                     gvals[self._active_profile.measurements[idx].description] = val
-            if deriv_val is not None:
-                gvals[_DERIV_KEY] = deriv_val
+            if self._deriv_channel._cfg.enabled:
+                # Always append (NaN when not computable) to keep X/Y arrays aligned
+                gvals[_DERIV_KEY] = deriv_val if deriv_val is not None else float("nan")
             self._graph_window.append_point(GraphDataPoint(values=gvals, phase=""))
 
         next_display = None if result.is_done else calculate_next_step(
@@ -1342,6 +1497,14 @@ class MainWindow(QMainWindow):
     def _log(self, text: str, color: str = "#d4d4d4"):
         self._debug_window.log_console(text, color)
 
+    def keyPressEvent(self, event):
+        if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                and event.key() == Qt.Key.Key_S):
+            self._save_current_to_active_profile()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def closeEvent(self, event):
         if self._running:
             reply = QMessageBox.question(
@@ -1364,8 +1527,23 @@ class MainWindow(QMainWindow):
             self._double_sweep_window._second_thread.quit()
             self._double_sweep_window._second_thread.wait()
         self._session.shutdown()
+
+        # 모든 하위 창 닫기
+        for win in (
+            self._graph_window,
+            self._double_sweep_window,
+            self._param_manager_window,
+            self._visa_lib_window,
+            self._settings_window,
+        ):
+            if win is not None:
+                win.hide()
+
         self._debug_window.deleteLater()
         self._sweep_status_window.deleteLater()
         self._timing_window.deleteLater()
         self._data_window.deleteLater()
+
+        from PySide6.QtWidgets import QApplication
+        QApplication.quit()
         super().closeEvent(event)

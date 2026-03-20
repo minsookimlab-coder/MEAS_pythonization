@@ -108,6 +108,13 @@ class DataWindow(QDialog):
 
     # ------------------------------------------------------------------
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def closeEvent(self, event):
         event.ignore()
         self.hide()

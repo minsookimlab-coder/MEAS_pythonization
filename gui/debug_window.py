@@ -155,6 +155,13 @@ class DebugWindow(QDialog):
         widget.insertHtml(f'<span style="color:{color}; white-space:pre;">{safe}</span><br>')
         widget.moveCursor(QTextCursor.MoveOperation.End)
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def closeEvent(self, event):
         event.ignore()
         self.hide()

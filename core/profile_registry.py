@@ -174,6 +174,33 @@ class ProfileRegistry:
             if remaining:
                 self.set_active(remaining[0])
 
+    def rename_profile(self, old_name: str, new_name: str) -> str:
+        """프로파일 이름 변경. 실제 파일명 변경 후 캐시 갱신.
+
+        충돌 시 _2, _3, ... 를 붙여 고유 이름을 반환합니다.
+        """
+        base = self._sanitize(new_name)
+        actual = base
+        counter = 2
+        while self._profile_path(actual).exists() and actual != old_name:
+            actual = f"{base}_{counter}"
+            counter += 1
+
+        profile = self.get_profile(old_name)
+        self.save_profile(actual, profile)
+
+        # 기존 파일 삭제 (이름이 달라진 경우)
+        if actual != old_name:
+            old_path = self._profile_path(old_name)
+            if old_path.exists():
+                old_path.unlink()
+            self._cache.pop(old_name, None)
+
+        if self._active_name == old_name:
+            self.set_active(actual)
+
+        return actual
+
     def duplicate_profile(self, name: str) -> str:
         """프로파일 복제. 새 이름은 name_2, name_3, ... 순."""
         source = self.get_profile(name)
@@ -248,7 +275,7 @@ class ProfileRegistry:
                 new_measurements.append(InstantiatedMeasurement(
                     alias=s.alias,
                     description=entry.description,
-                    resolved_cmd=entry.resolved_cmd(),
+                    resolved_cmd=entry.cmd_query,
                     figure_axis=entry.figure_axis,
                     unit=entry.unit,
                     fill_params=old.fill_params if old else {},
@@ -263,7 +290,7 @@ class ProfileRegistry:
             entry = next((e for e in lib.sweep_values if e.description == s.description), None)
             old = old_sweep.get((s.alias, s.description))
             if entry:
-                paired_cmd = entry.paired_read.resolved_cmd()
+                paired_cmd = entry.paired_read_cmd
                 lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
                 if len(lib_phs) == 1:
                     new_cmd_set = entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}")
@@ -325,7 +352,7 @@ class ProfileRegistry:
                     sv_entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}") if len(lib_phs) == 1
                     else (old.cmd_set if old else sv_entry.cmd_set)
                 )
-                paired_cmd = sv_entry.paired_read.resolved_cmd()
+                paired_cmd = sv_entry.paired_read_cmd
                 if old and old.source_type == "sweep_value":
                     new_second.append(old.model_copy(update={
                         "cmd_set": new_cmd_set,

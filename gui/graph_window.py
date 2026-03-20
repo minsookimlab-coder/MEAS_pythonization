@@ -277,6 +277,11 @@ class GraphPanel(QFrame):
         self._act_regression.triggered.connect(self._toggle_regression)
         vb.menu.addAction(self._act_regression)
 
+        vb.menu.addSeparator()
+        self._act_save_img = QAction("Save Panel Image…", vb.menu)
+        self._act_save_img.triggered.connect(self._save_panel_image)
+        vb.menu.addAction(self._act_save_img)
+
         # ── Auto-hold on manual zoom / pan ───────────────────────────────────
         vb.sigRangeChangedManually.connect(self._on_manual_range_change)
 
@@ -333,11 +338,15 @@ class GraphPanel(QFrame):
         """Lazily create a PlotDataItem for each unseen phase."""
         for phase in phases:
             if phase not in self._curves:
+                color, _ = _PHASE_STYLE.get(phase, ("#888888", Qt.PenStyle.SolidLine))
                 item = pg.PlotDataItem(
                     [], [],
                     pen=_make_pen(phase),
                     name=_PHASE_LABEL.get(phase, phase),
-                    symbol=None,
+                    symbol='o',
+                    symbolSize=5,
+                    symbolBrush=pg.mkBrush(color),
+                    symbolPen=None,
                     antialias=True,
                 )
                 self._pi.addItem(item)
@@ -562,6 +571,20 @@ class GraphPanel(QFrame):
         if self._regression_active and self._lr_region is not None:
             self._update_regression()
 
+    def _save_panel_image(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            None, "Save Panel Image", "", "PNG Image (*.png);;All Files (*)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        pixmap = self._pw.grab()
+        if not pixmap.save(path, "PNG"):
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(None, "Save Failed", f"Could not save image to:\n{path}")
+
     def clear_curves(self) -> None:
         self._stop_regression()
         for curve in self._curves.values():
@@ -634,8 +657,12 @@ class GraphWindow(QWidget):
         btn_clear = QPushButton("Clear Data")
         btn_clear.setToolTip("Clear all stored data (does not stop sweep)")
         btn_clear.clicked.connect(self._clear_data)
+        btn_save_img = QPushButton("Save Image…")
+        btn_save_img.setToolTip("Save the current graph as a PNG image (Ctrl+S)")
+        btn_save_img.clicked.connect(self._save_image)
         bar.addWidget(btn_add)
         bar.addWidget(btn_clear)
+        bar.addWidget(btn_save_img)
         bar.addStretch()
         root.addLayout(bar)
 
@@ -709,3 +736,36 @@ class GraphWindow(QWidget):
     def _redraw_all(self) -> None:
         for panel in self._panels:
             panel.redraw()
+
+    def _save_image(self) -> None:
+        """Export all visible panels to a PNG file."""
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Graph Image", "", "PNG Image (*.png);;All Files (*)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+
+        # Grab the scroll content widget as a pixmap
+        from PySide6.QtGui import QPixmap
+        pixmap = self._scroll_content.grab()
+        if pixmap.save(path, "PNG"):
+            pass  # success — no dialog needed
+        else:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Save Failed", f"Could not save image to:\n{path}")
+
+    def keyPressEvent(self, event) -> None:
+        if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                and event.key() == Qt.Key.Key_S):
+            self._save_image()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
