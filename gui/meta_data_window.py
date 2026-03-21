@@ -114,6 +114,7 @@ class MetaDataConfigWindow(QDialog):
         btn_row = QHBoxLayout()
         btn_save = QPushButton("Save && Close")
         btn_save.clicked.connect(self._on_save)
+        self._btn_save = btn_save
         btn_row.addStretch()
         btn_row.addWidget(btn_save)
         lay.addLayout(btn_row)
@@ -270,6 +271,12 @@ class MetaDataConfigWindow(QDialog):
     def closeEvent(self, event):
         event.ignore()
         self.hide()
+
+    def lock_ui(self, locked: bool) -> None:
+        """측정 중 UI 잠금/해제."""
+        self._cb_enable.setEnabled(not locked)
+        self._scroll.setEnabled(not locked)
+        self._btn_save.setEnabled(not locked)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:

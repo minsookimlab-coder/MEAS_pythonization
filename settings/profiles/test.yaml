@@ -51,6 +51,8 @@ main_ui:
     unit: A
     fill_params: {}
     axis_suffix: ''
+    meas_type: none
+    checked: true
   - alias: 2636A
     description: read_smub_current
     resolved_cmd: print(smub.measure.i())
@@ -58,6 +60,8 @@ main_ui:
     unit: A
     fill_params: {}
     axis_suffix: ''
+    meas_type: none
+    checked: false
   - alias: 2636A
     description: read_smua_voltage
     resolved_cmd: print(smua.measure.v())
@@ -65,6 +69,8 @@ main_ui:
     unit: V
     fill_params: {}
     axis_suffix: ''
+    meas_type: none
+    checked: true
   - alias: 2636A
     description: read_smub_voltage
     resolved_cmd: print(smub.measure.i())
@@ -72,6 +78,8 @@ main_ui:
     unit: V
     fill_params: {}
     axis_suffix: ''
+    meas_type: none
+    checked: false
   - alias: IPS
     description: read_z_magnetic_field
     resolved_cmd: READ:DEV:GRPZ:PSU:SIG:FLD
@@ -79,6 +87,8 @@ main_ui:
     unit: T
     fill_params: {}
     axis_suffix: ''
+    meas_type: bfield
+    checked: false
   write_cmds: []
   second_sweep_channels:
   - alias: 2636A
@@ -93,6 +103,9 @@ main_ui:
     feedback_read_cmd: ''
     feedback_poll_interval: 1.0
     feedback_tolerance_pct: 95.0
+    feedback_std_window: 0
+    feedback_noisefloor: 0.0
+    feedback_std_threshold: 0.01
     wait_time: 1.0
     figure_axis: target_smua_voltage
     unit: V
@@ -108,9 +121,14 @@ main_ui:
     feedback_read_cmd: ''
     feedback_poll_interval: 1.0
     feedback_tolerance_pct: 95.0
+    feedback_std_window: 0
+    feedback_noisefloor: 0.0
+    feedback_std_threshold: 0.01
     wait_time: 1.0
     figure_axis: target_smub_voltage
     unit: V
+  alarm_measurements: []
+  meta_data_measurements: []
 sweep_to: 1.0
 sweep_rate: 4.0
 time_per_point: 0.5
@@ -136,3 +154,21 @@ double_sweep:
   second_use_safety: true
   second_safety_steps: 10
   second_safety_interval_ms: 5.0
+  alarm:
+    enabled: false
+    use_sound: true
+    use_email: false
+    email_to: ''
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    smtp_user: ''
+    smtp_password: ''
+    use_telegram: false
+    telegram_bot_token: ''
+    telegram_chat_id: ''
+    telegram_contacts: []
+    fire_on_complete: false
+    triggers: []
+meta_data:
+  enabled: false
+  entries: []

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from config.config_models import InstrumentConfig, cast_extra_params
-import core
+import driver
 from core.instrument_base import BaseInstrument
 from core.network_utils import find_mac_for_ip
 
@@ -195,25 +195,25 @@ class InstrumentSettingsUI(QMainWindow):
         찾아낸 클래스들은 콤보박스(cb_driver)에 이름으로 등록되어 인스턴스화 될 때 사용됩니다.
         """
         drivers = {}
-        # Iterate over all modules defined in the 'core' package folder
-        for _, module_name, _ in pkgutil.iter_modules(core.__path__):
+        # Iterate over all modules defined in the 'driver' package folder
+        for _, module_name, _ in pkgutil.iter_modules(driver.__path__):
             try:
                 # Dynamically import module
-                module = importlib.import_module(f"core.{module_name}")
+                module = importlib.import_module(f"driver.{module_name}")
                 # Inspect all objects within the module to find BaseInstrument subclasses
                 for name, obj in inspect.getmembers(module, inspect.isclass):
                     # Check if it's a genuine subclass and not BaseInstrument itself
                     if issubclass(obj, BaseInstrument) and obj is not BaseInstrument:
                         # Extract the first line of the docstring as a short description, if available
                         doc = obj.__doc__.strip().split('\n')[0].strip() if obj.__doc__ else name
-                        
+
                         # Generate a readable display name and a fully qualified package path
                         display_name = f"{name} ({doc})" if obj.__doc__ else f"{name} ({module_name})"
-                        class_path = f"core.{module_name}.{name}"
+                        class_path = f"driver.{module_name}.{name}"
                         drivers[display_name] = class_path
             except Exception as e:
                 # Silently ignore broken modules during auto-discovery
-                print(f"Failed to load module 'core.{module_name}': {e}")
+                print(f"Failed to load module 'driver.{module_name}': {e}")
                 pass
         
         # Sort alphabetically for convenience
@@ -460,7 +460,7 @@ class InstrumentSettingsUI(QMainWindow):
         new_alias = f"New_Instrument_{len(self.instruments_data) + 1}"
         self.instruments_data[new_alias] = {
             "alias": new_alias,
-            "class_name": "core.m81.M81Instrument", # Default back to valid M81 class
+            "class_name": "driver.m81.M81Instrument", # Default back to valid M81 class
             "interface_type": "LAN",
             "address": "192.168.0.1",
             "mac_address": "",

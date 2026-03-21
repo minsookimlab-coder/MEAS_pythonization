@@ -44,6 +44,32 @@ _ALIAS_PALETTE = [
 ]
 
 
+class _WhaleBgFrame(QFrame):
+    """배경에 이미지를 반투명하게 채워 그리는 QFrame."""
+    def __init__(self, image_path: str, opacity: float = 0.3, parent=None):
+        super().__init__(parent)
+        from PySide6.QtGui import QPixmap
+        self._pixmap = QPixmap(image_path)
+        self._opacity = opacity  # 0.0 ~ 1.0
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._pixmap.isNull():
+            return
+        from PySide6.QtGui import QPainter
+        painter = QPainter(self)
+        painter.setOpacity(self._opacity)
+        scaled = self._pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = (self.width()  - scaled.width())  // 2
+        y = (self.height() - scaled.height()) // 2
+        painter.drawPixmap(x, y, scaled)
+        painter.end()
+
+
 class MainWindow(QMainWindow):
     """
     메인 애플리케이션 윈도우.
@@ -401,7 +427,11 @@ class MainWindow(QMainWindow):
         content_row.addWidget(left_widget)
 
         # --- Sweep Parameters ---
-        sweep_box = QFrame()
+        import os as _os
+        sweep_box = _WhaleBgFrame(
+            _os.path.join(_os.path.dirname(__file__), "whale.png"),
+            opacity=0.3,
+        )
         sweep_box.setFrameShape(QFrame.Shape.StyledPanel)
         sweep_layout = QVBoxLayout(sweep_box)
 
@@ -414,9 +444,18 @@ class MainWindow(QMainWindow):
         form.setHorizontalSpacing(12)
         sweep_layout.addLayout(form)
 
+        _SWEEP_LE_STYLE = (
+            "QLineEdit { background-color: rgba(255, 255, 255, 179);"
+            " color: #000000; border: 1px solid #aaa; border-radius: 3px; }"
+            "QLineEdit:focus { border: 1px solid #1a73e8; }"
+        )
+
         self._le_source_value = QLineEdit("—")
         self._le_source_value.setReadOnly(True)
-        self._le_source_value.setStyleSheet("color: #888888;")
+        self._le_source_value.setStyleSheet(
+            "QLineEdit { background-color: transparent;"
+            " color: #444444; border: none; }"
+        )
         self._le_source_value.setFixedWidth(120)
         form.addRow("Source Value:", self._le_source_value)
 
@@ -424,6 +463,7 @@ class MainWindow(QMainWindow):
             le = QLineEdit(placeholder)
             le.setFont(_MONO)
             le.setMinimumWidth(280)
+            le.setStyleSheet(_SWEEP_LE_STYLE)
             from PySide6.QtGui import QDoubleValidator
             le.setValidator(QDoubleValidator(-1e18, 1e18, 10, le))
             return le
@@ -518,6 +558,7 @@ class MainWindow(QMainWindow):
 
         # --- Save Settings panel ---
         save_box = QFrame()
+        self._save_settings_frame = save_box
         save_box.setFrameShape(QFrame.Shape.StyledPanel)
         save_layout = QVBoxLayout(save_box)
         save_layout.setContentsMargins(8, 6, 8, 6)
@@ -1330,9 +1371,16 @@ class MainWindow(QMainWindow):
             if cb.isChecked()
         ]
         self._sync_data_window_columns()
-        # sweep channel / measurement 컨트롤 비활성화
+        # sweep channel / measurement / save 컨트롤 비활성화
         self._sweep_channel_panel.setEnabled(False)
         self._meas_panel.setEnabled(False)
+        self._save_settings_frame.setEnabled(False)
+        # Double Sweep window UI 잠금
+        if self._double_sweep_window is not None:
+            self._double_sweep_window.lock_ui(True)
+        # Meta Data Config window UI 잠금
+        if self._meta_data_window is not None:
+            self._meta_data_window.lock_ui(True)
         self._update_save_preview()
         filepath = self._data_saver.start_session()
         self._data_window.clear_values()
@@ -1383,7 +1431,24 @@ class MainWindow(QMainWindow):
             f"tpp={self._sweep_config.time_per_point:.3g}s",
             color="#4ec9b0",
         )
-        self._sweep_step_timer.start(0)
+        # 초기 상태 측정 (이동 없이 현재 위치에서 measurement만)
+        import time as _t
+        active_init = [
+            (row, self._active_profile.measurements[row].alias,
+             self._active_profile.measurements[row].description,
+             self._active_profile.measurements[row].resolved_cmd)
+            for row in self._active_meas_indices
+        ]
+        self.request_step.emit(StepRequest(
+            sweep_channel=self._sweep_channel,
+            sweep_to=self._sweep_config.sweep_to,
+            sweep_rate=self._sweep_config.sweep_rate,
+            time_per_point=self._sweep_config.time_per_point,
+            t_emit=_t.perf_counter(),
+            last_write_value=None,
+            active_measurements=active_init,
+            measure_only=True,
+        ))
 
     def _on_stop(self):
         if not self._running:
@@ -1396,11 +1461,15 @@ class MainWindow(QMainWindow):
         self._btn_stop.setEnabled(False)
         self._sweep_channel_panel.setEnabled(True)
         self._meas_panel.setEnabled(True)
+        self._save_settings_frame.setEnabled(True)
         # re-enable Double Sweep if it's not actively running
         if self._double_sweep_window is not None:
             from gui.double_sweep_window import DoubleSweepPhase
             if self._double_sweep_window._phase == DoubleSweepPhase.IDLE:
                 self._double_sweep_window._btn_start.setEnabled(True)
+                self._double_sweep_window.lock_ui(False)
+        if self._meta_data_window is not None:
+            self._meta_data_window.lock_ui(False)
         # Re-enable derivative settings
         for suffix in ("", "2", "3"):
             cb = getattr(self, f"_cb_deriv{suffix}_enable")
@@ -1467,6 +1536,22 @@ class MainWindow(QMainWindow):
         t_recv = time.perf_counter()
 
         if not self._running:
+            return
+
+        # is_done=True without measurements → already at target, no data to record
+        if result.is_done and not result.meas_results:
+            self._lbl_idle.setText("—")
+            self._lbl_remaining.setText("—")
+            self._log(f"Sweep complete. ({self._sweep_step_count} steps)", color="#4ec9b0")
+            self._log_sweep(
+                f"★ Sweep complete — {self._sweep_step_count} steps",
+                color="#4ec9b0",
+            )
+            self._meta_manager.save(
+                self._param_manager_reg.meta_data_config,
+                self._data_saver.get_filepath(),
+            )
+            self._on_stop()
             return
 
         self.set_source_value(result.current)
@@ -1589,6 +1674,9 @@ class MainWindow(QMainWindow):
                 self._data_saver.get_filepath(),
             )
             self._on_stop()
+        elif result.measure_only:
+            # 초기 상태 측정 완료 → 즉시 sweep 타이머 시작
+            self._sweep_step_timer.start(0)
         else:
             # t_ui_done을 타이머 직전에 다시 찍어 모든 처리 시간 반영
             t_before_timer = time.perf_counter()

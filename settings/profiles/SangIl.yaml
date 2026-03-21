@@ -298,13 +298,22 @@ main_ui:
     axis_suffix: ''
     meas_type: none
     checked: true
+  - alias: 2636A
+    description: read_smua_current
+    resolved_cmd: print(smua.measure.i())
+    figure_axis: smua_current
+    unit: A
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: none
+    checked: true
 sweep_to: 0.0
 sweep_rate: 5.0
 time_per_point: 0.5
 active_sweep_channel_idx: 0
 main_folder: D:/Users/SangIl
-custom_folder: test23
-custom_word: ''
+custom_folder: test233
+custom_word: '1'
 include_date: true
 save_enabled: true
 double_sweep:
@@ -335,7 +344,9 @@ double_sweep:
     use_telegram: true
     telegram_bot_token: 8455510788:AAF8xF5l2RuTatNeSRuzOkVjN_aTorGEAqQ
     telegram_chat_id: '7681063541'
-    telegram_contacts: []
+    telegram_contacts:
+    - name: sangil
+      chat_id: '7681063541'
     fire_on_complete: true
     triggers:
     - enabled: true
@@ -349,7 +360,7 @@ double_sweep:
       operator: '>'
       threshold: 0.0
 meta_data:
-  enabled: false
+  enabled: true
   entries:
   - alias: IPS
     description: read_IPS_z_magnetic_field
@@ -392,4 +403,11 @@ meta_data:
     figure_axis: probe_TEMP
     unit: K
     enabled: false
+    meas_type: none
+  - alias: 2636A
+    description: read_smua_current
+    resolved_cmd: print(smua.measure.i())
+    figure_axis: smua_current
+    unit: A
+    enabled: true
     meas_type: none

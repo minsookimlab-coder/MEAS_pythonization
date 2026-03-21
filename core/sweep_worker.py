@@ -43,6 +43,8 @@ class StepRequest:
     safety_interval_ms: float = 0.0 # sub-step 사이 대기 시간 (ms)
     # 체크된 measurement 행: (table row index, alias, description, resolved_cmd)
     active_measurements: List[Tuple[int, str, str, str]] = field(default_factory=list)
+    # 초기 상태 측정 전용 — write 없이 현재 위치에서 바로 measurement만 수행
+    measure_only: bool = False
 
 
 @dataclass
@@ -53,6 +55,7 @@ class StepResult:
     timing: StepTiming = field(default_factory=StepTiming)
     # 읽은 값: (table row index, value)  value=None 이면 read 실패
     meas_results: List[Tuple[int, Optional[float]]] = field(default_factory=list)
+    measure_only: bool = False
 
 
 class SweepWorker(QObject):
@@ -77,6 +80,42 @@ class SweepWorker(QObject):
         """메인 스레드에서 호출 — safety ramp 루프를 중단시킵니다."""
         self._stop_event.set()
 
+    def _do_measurements(
+        self, active_measurements: List[Tuple[int, str, str, str]]
+    ) -> List[Tuple[int, Optional[float]]]:
+        """active_measurements 목록을 읽어 (row, value) 리스트로 반환."""
+        meas_results: List[Tuple[int, Optional[float]]] = []
+        groups: Dict[str, List[Tuple[int, str, str]]] = defaultdict(list)
+        for row, alias, desc, cmd in active_measurements:
+            groups[alias].append((row, desc, cmd))
+        for alias, entries in groups.items():
+            exprs = [_TSP_PRINT_RE.match(cmd) for _, _, cmd in entries]
+            if all(m is not None for m in exprs):
+                batched = "print(" + ", ".join(m.group(1).strip() for m in exprs) + ")"
+                try:
+                    if not self._session.is_open(alias):
+                        self._session.open(alias)
+                    raw = self._session.query(alias, batched).strip()
+                    parts = raw.split("\t")
+                    for i, (row, _, _) in enumerate(entries):
+                        try:
+                            meas_results.append((row, float(parts[i])))
+                        except (IndexError, ValueError):
+                            meas_results.append((row, None))
+                except Exception:
+                    for row, _, _ in entries:
+                        meas_results.append((row, None))
+            else:
+                for row, desc, cmd in entries:
+                    try:
+                        val = MeasurementParameter(name=desc, cmd_query=cmd).read(
+                            self._session, alias
+                        )
+                        meas_results.append((row, val))
+                    except Exception:
+                        meas_results.append((row, None))
+        return meas_results
+
     @Slot(object)
     def run_step(self, req: StepRequest) -> None:
         self._stop_event.clear()
@@ -96,10 +135,30 @@ class SweepWorker(QObject):
                 current = req.last_write_value
             timing.t_source_read = _time.perf_counter()
 
+            # 초기 상태 측정 전용: write 없이 현재 위치에서 measurement만 수행
+            if req.measure_only:
+                meas_results = self._do_measurements(req.active_measurements)
+                timing.t_write_done = timing.t_source_read
+                timing.t_meas_done = _time.perf_counter()
+                self.step_done.emit(StepResult(
+                    current=current, next_v=current, is_done=False,
+                    timing=timing, meas_results=meas_results, measure_only=True,
+                ))
+                return
+
             # 2. 다음 스텝 계산
             next_v, is_done = calculate_next_step(
                 current, req.sweep_to, req.sweep_rate, req.time_per_point
             )
+
+            # 이미 목표 도달 — write/measure 생략 (이전 스텝에서 이미 기록됨)
+            if is_done:
+                timing.t_write_done = _time.perf_counter()
+                timing.t_meas_done = timing.t_write_done
+                self.step_done.emit(StepResult(
+                    current=current, next_v=next_v, is_done=True, timing=timing,
+                ))
+                return
 
             # 3. 쓰기 — safety 여부에 따라 단계적 ramp 또는 직접 write
             if req.safety_steps > 0 and abs(next_v - current) > 1e-11:
@@ -140,40 +199,7 @@ class SweepWorker(QObject):
             timing.t_write_done = _time.perf_counter()
 
             # 4. 체크된 Measurement 읽기 (write 이후 → 새 출력값에 대한 응답 측정)
-            # 같은 alias의 TSP print() 명령어는 하나의 쿼리로 배치
-            meas_results: List[Tuple[int, Optional[float]]] = []
-            groups: Dict[str, List[Tuple[int, str, str]]] = defaultdict(list)
-            for row, alias, desc, cmd in req.active_measurements:
-                groups[alias].append((row, desc, cmd))
-
-            for alias, entries in groups.items():
-                exprs = [_TSP_PRINT_RE.match(cmd) for _, _, cmd in entries]
-                if all(m is not None for m in exprs):
-                    # TSP 배치: print(expr1, expr2, ...)
-                    batched = "print(" + ", ".join(m.group(1).strip() for m in exprs) + ")"
-                    try:
-                        if not self._session.is_open(alias):
-                            self._session.open(alias)
-                        raw = self._session.query(alias, batched).strip()
-                        parts = raw.split("\t")
-                        for i, (row, _, _) in enumerate(entries):
-                            try:
-                                meas_results.append((row, float(parts[i])))
-                            except (IndexError, ValueError):
-                                meas_results.append((row, None))
-                    except Exception:
-                        for row, _, _ in entries:
-                            meas_results.append((row, None))
-                else:
-                    # 비TSP: 개별 쿼리 (기존 방식)
-                    for row, desc, cmd in entries:
-                        try:
-                            val = MeasurementParameter(name=desc, cmd_query=cmd).read(
-                                self._session, alias
-                            )
-                            meas_results.append((row, val))
-                        except Exception:
-                            meas_results.append((row, None))
+            meas_results = self._do_measurements(req.active_measurements)
             timing.t_meas_done = _time.perf_counter()
 
             self.step_done.emit(StepResult(

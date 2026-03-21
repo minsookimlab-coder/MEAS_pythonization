@@ -617,6 +617,7 @@ class DoubleSweepWindow(QDialog):
         self._last_write_value: Optional[float] = None
         self._second_channel: Optional[InstantiatedSecondSweepChannel] = None
         self._ctx: Optional[DoubleSweepContext] = None   # set at sweep start
+        self._cfg: Optional[DoubleSweepConfig] = None   # set at sweep start
         self._last_meas_values: dict = {}  # {description: float} 최신 측정값 캐시
         self._trace_filepath = None        # TRACE 파일 경로 (meta data JSON 저장용)
         self._alarm_manager = AlarmManager()
@@ -696,6 +697,7 @@ class DoubleSweepWindow(QDialog):
         right_scroll.setMaximumWidth(320)
         self._alarm_panel = AlarmPanel()
         right_scroll.setWidget(self._alarm_panel)
+        self._right_alarm_scroll = right_scroll
         glow_h.addWidget(right_scroll)
 
         # 우측 패널 (TelegramPanel)
@@ -706,6 +708,7 @@ class DoubleSweepWindow(QDialog):
         tg_scroll.setMaximumWidth(260)
         self._telegram_panel = TelegramPanel(self._alarm_manager)
         tg_scroll.setWidget(self._telegram_panel)
+        self._right_tg_scroll = tg_scroll
         glow_h.addWidget(tg_scroll)
 
         # Second Channel selector
@@ -721,6 +724,7 @@ class DoubleSweepWindow(QDialog):
         self._second_radio_group = QButtonGroup(self)
         self._second_radio_group.setExclusive(True)
         self._second_radio_group.idToggled.connect(self._on_second_radio_toggled)
+        self._ch_frame = ch_frame
         outer.addWidget(ch_frame)
 
         # Sweep Parameters
@@ -777,6 +781,7 @@ class DoubleSweepWindow(QDialog):
         form.addRow("",                 self._cb_retrace_to_zero)
         form.addRow("Rate (dummy):",    cnt_rate_d)
         form.addRow("Time / Point:",    cnt_tpp)
+        self._sp_frame = sp_frame
         outer.addWidget(sp_frame)
 
         # SWEEP Channel Settings (only visible when second channel advance_type == SWEEP)
@@ -859,6 +864,7 @@ class DoubleSweepWindow(QDialog):
         self._lbl_n_points.setStyleSheet("color: #888888;")
         arr_row.addWidget(self._lbl_n_points)
         arr_layout.addLayout(arr_row)
+        self._arr_frame = arr_frame
         outer.addWidget(arr_frame)
 
         # Connect array inputs to point count update
@@ -1049,7 +1055,9 @@ class DoubleSweepWindow(QDialog):
 
     def _build_alarm_config(self) -> AlarmConfig:
         from config.config_models import TelegramContact
-        base = self._alarm_panel.get_config().model_dump()
+        _TG_KEYS = {"use_telegram", "telegram_bot_token", "telegram_chat_id", "telegram_contacts"}
+        base = {k: v for k, v in self._alarm_panel.get_config().model_dump().items()
+                if k not in _TG_KEYS}
         tg = self._telegram_panel.get_config()
         contacts = [TelegramContact(**c) for c in tg.pop("telegram_contacts", [])]
         return AlarmConfig(**base, **tg, telegram_contacts=contacts)
@@ -1144,6 +1152,31 @@ class DoubleSweepWindow(QDialog):
     # Start / Stop
     # ------------------------------------------------------------------
 
+    def lock_ui(self, locked: bool) -> None:
+        """측정 중 설정 UI 잠금/해제 (Start/Stop 버튼 제외)."""
+        self._ch_frame.setEnabled(not locked)
+        self._sp_frame.setEnabled(not locked)
+        self._arr_frame.setEnabled(not locked)
+        self._sweep_ch_frame.setEnabled(not locked)
+        self._right_alarm_scroll.setEnabled(not locked)
+        self._right_tg_scroll.setEnabled(not locked)
+
+    def _unlock_main_ui(self) -> None:
+        """Double Sweep 종료 시 Main Window UI 복원."""
+        self.lock_ui(False)
+        mw = self._main_win
+        mw._btn_start.setEnabled(True)
+        mw._sweep_channel_panel.setEnabled(True)
+        mw._meas_panel.setEnabled(True)
+        mw._save_settings_frame.setEnabled(True)
+        for _sfx in ("", "2", "3"):
+            cb = getattr(mw, f"_cb_deriv{_sfx}_enable")
+            cb.setEnabled(True)
+            for _w in getattr(mw, f"_deriv{_sfx}_setting_widgets"):
+                _w.setEnabled(cb.isChecked())
+        if mw._meta_data_window is not None:
+            mw._meta_data_window.lock_ui(False)
+
     def _on_start(self):
         if self._phase != DoubleSweepPhase.IDLE:
             return
@@ -1193,6 +1226,19 @@ class DoubleSweepWindow(QDialog):
         self._glow_phase = 0.0
         self._glow_timer.start()
         self.sweep_started.emit()
+        # Lock own settings UI and main window panels
+        self.lock_ui(True)
+        mw = self._main_win
+        mw._btn_start.setEnabled(False)
+        mw._sweep_channel_panel.setEnabled(False)
+        mw._meas_panel.setEnabled(False)
+        mw._save_settings_frame.setEnabled(False)
+        for _sfx in ("", "2", "3"):
+            getattr(mw, f"_cb_deriv{_sfx}_enable").setEnabled(False)
+            for _w in getattr(mw, f"_deriv{_sfx}_setting_widgets"):
+                _w.setEnabled(False)
+        if mw._meta_data_window is not None:
+            mw._meta_data_window.lock_ui(True)
 
         # DataWindow 컬럼 동기화 (double sweep 측정값을 main DataWindow에 표시)
         ctx = self._ctx
@@ -1251,6 +1297,7 @@ class DoubleSweepWindow(QDialog):
         self._stop_glow()
         self.sweep_finished.emit()
         self._main_win._log("Double Sweep stopped.", color="#ce9178")
+        self._unlock_main_ui()
 
     def _finish(self):
         # 모든 측정 완료 알람
@@ -1265,6 +1312,7 @@ class DoubleSweepWindow(QDialog):
         self._main_win._log(
             f"Double Sweep complete. ({len(self._array)} array points)", color="#4ec9b0"
         )
+        self._unlock_main_ui()
 
     # ------------------------------------------------------------------
     # Context snapshot
@@ -1392,7 +1440,19 @@ class DoubleSweepWindow(QDialog):
     def _start_sweep_phase(self, phase: DoubleSweepPhase):
         self._set_phase(phase)
         self._setup_datasaver_for_phase(phase.name.lower())
-        self._sweep_timer.start(0)
+        # 각 페이즈 시작 시 초기 상태 측정 (이동 없이 현재 위치에서 measurement만)
+        ctx = self._ctx
+        cfg = self._cfg
+        self.request_step.emit(StepRequest(
+            sweep_channel=ctx.sweep_channel,
+            sweep_to=0.0,
+            sweep_rate=1.0,
+            time_per_point=cfg.time_per_point,
+            t_emit=time.perf_counter(),
+            last_write_value=self._last_write_value,
+            active_measurements=ctx.active_measurements,
+            measure_only=True,
+        ))
 
     def _advance_phase(self):
         if self._phase == DoubleSweepPhase.DUMMY:
@@ -1518,6 +1578,11 @@ class DoubleSweepWindow(QDialog):
                                DoubleSweepPhase.RETRACE):
             return
 
+        # is_done=True without measurements → already at target, advance phase
+        if result.is_done and not result.meas_results:
+            self._advance_phase()
+            return
+
         t_recv = time.perf_counter()
 
         # Append to data saver
@@ -1611,6 +1676,9 @@ class DoubleSweepWindow(QDialog):
 
         if result.is_done:
             self._advance_phase()
+        elif result.measure_only:
+            # 초기 상태 측정 완료 → 즉시 sweep 타이머 시작
+            self._sweep_timer.start(0)
         else:
             t_before_timer = time.perf_counter()
             elapsed_ms = int((t_before_timer - result.timing.t_emit) * 1000)
@@ -1708,9 +1776,8 @@ class DoubleSweepWindow(QDialog):
 
         # Second channel 정보
         channels = self._param_reg.main_ui_profile.second_sweep_channels
-        ch = channels[self._cfg.selected_channel_idx] if (
-            0 <= self._cfg.selected_channel_idx < len(channels)
-        ) else None
+        cfg_idx = self._cfg.selected_channel_idx if self._cfg is not None else max(0, self._second_radio_group.checkedId())
+        ch = channels[cfg_idx] if (0 <= cfg_idx < len(channels)) else None
         fig_ax = (ch.figure_axis or "").strip() if ch else ""
 
         # 경로 조립
