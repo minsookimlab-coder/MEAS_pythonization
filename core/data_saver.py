@@ -20,6 +20,7 @@ class DataSaver:
         self._rows: List[List[str]] = []
         self._filepath: Optional[Path] = None
         self._error_callback: Optional[Callable[[str], None]] = None
+        self._fixed_name: Optional[str] = None     # double sweep: overrides X{N:03d} suffix
 
     def set_error_callback(self, cb: Callable[[str], None]):
         self._error_callback = cb
@@ -33,11 +34,12 @@ class DataSaver:
     # Configuration setters
     # ------------------------------------------------------------------
 
-    def set_main_folder(self, v: str):    self._main_folder = v
-    def set_custom_folder(self, v: str):  self._custom_folder = v
-    def set_custom_word(self, v: str):    self._custom_word = v
-    def set_include_date(self, v: bool):  self._include_date = v
-    def set_enabled(self, v: bool):       self._enabled = v
+    def set_main_folder(self, v: str):      self._main_folder = v
+    def set_custom_folder(self, v: str):    self._custom_folder = v
+    def set_custom_word(self, v: str):      self._custom_word = v
+    def set_include_date(self, v: bool):    self._include_date = v
+    def set_enabled(self, v: bool):         self._enabled = v
+    def set_fixed_name(self, v: Optional[str]): self._fixed_name = v
 
     def set_columns(self, columns: List[Tuple[str, str]]):
         """(figure_axis, unit) 목록으로 컬럼 헤더 설정."""
@@ -79,6 +81,10 @@ class DataSaver:
     # Path helpers
     # ------------------------------------------------------------------
 
+    def get_filepath(self) -> Optional[Path]:
+        """현재 세션의 파일 경로를 반환합니다. 세션이 없으면 None."""
+        return self._filepath
+
     def preview_path(self) -> str:
         """현재 설정으로 생성될 파일 경로 미리보기."""
         if not self._main_folder.strip():
@@ -118,6 +124,8 @@ class DataSaver:
 
     def _resolve_filepath(self) -> Path:
         d = self._target_dir()
+        if self._fixed_name:
+            return d / self._fixed_name
         stem = self._stem()
         n = self._next_number(d, stem)
         return d / f"{stem}X{n:03d}.dat"

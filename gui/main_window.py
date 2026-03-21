@@ -4,7 +4,7 @@ import time
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton,
-    QDoubleSpinBox, QFormLayout, QFrame, QMessageBox,
+    QFormLayout, QFrame, QMessageBox,
     QButtonGroup, QRadioButton, QCheckBox, QFileDialog,
     QComboBox, QInputDialog, QScrollArea,
 )
@@ -12,7 +12,11 @@ from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QAction, QFont
 
 from core.data_saver import DataSaver
-from core.derivative_channel import DerivativeChannel, DerivativeConfig, OUTPUT_KEY as _DERIV_KEY
+from core.derivative_channel import (
+    DerivativeChannel, DerivativeConfig,
+    OUTPUT_KEY as _DERIV_KEY, OUTPUT_KEY_2 as _DERIV2_KEY, OUTPUT_KEY_3 as _DERIV3_KEY,
+)
+from core.meta_data_manager import MetaDataManager
 from core.instrument_registry import InstrumentRegistry
 from core.instrument_session import InstrumentSession
 from core.sweep import SweepConfig, calculate_next_step
@@ -77,14 +81,20 @@ class MainWindow(QMainWindow):
         self._loading_profile = False
         self._alias_color_map: dict = {}
         self._meas_suffix_edits: list = []
-        self._deriv_channel: DerivativeChannel = DerivativeChannel(DerivativeConfig())
+        self._meas_type_combos: list = []
+        self._deriv_channel:  DerivativeChannel = DerivativeChannel(DerivativeConfig(order=1))
+        self._deriv_channel2: DerivativeChannel = DerivativeChannel(DerivativeConfig(order=2))
+        self._deriv_channel3: DerivativeChannel = DerivativeChannel(DerivativeConfig(order=3))
         self._sweep_step_count = 0
         self._tick_start: float = 0.0
         self._last_write_value: "float | None" = None
+        self._step_context: str = ""   # 마지막 sweep tick 컨텍스트 (오류 시 참조)
         self._data_saver = DataSaver()
         self._data_saver.set_error_callback(
             lambda msg: self._log(f"  [DataSaver] {msg}", color="#f44747")
         )
+        self._meta_manager = MetaDataManager(self._session)
+        self._meta_data_window = None
 
         # Worker 스레드 셋업
         self._worker = SweepWorker()
@@ -169,6 +179,9 @@ class MainWindow(QMainWindow):
         act_double = QAction("Double Sweep...", self)
         act_double.triggered.connect(self._open_double_sweep)
         view_menu.addAction(act_double)
+        act_meta = QAction("Meta Data Config...", self)
+        act_meta.triggered.connect(self._open_meta_data_config)
+        view_menu.addAction(act_meta)
 
     def _setup_ui(self):
         self._glow_frame = QFrame()
@@ -314,14 +327,14 @@ class MainWindow(QMainWindow):
             else:
                 self._rebuild_sweep_channel_panel([])
             # Apply sweep params (block signals to avoid recursive saves)
-            for sb, val in [
-                (self._sb_sweep_to,       fp.sweep_to),
-                (self._sb_sweep_rate,     fp.sweep_rate),
-                (self._sb_time_per_point, fp.time_per_point),
+            for le, val in [
+                (self._le_sweep_to,       fp.sweep_to),
+                (self._le_sweep_rate,     fp.sweep_rate),
+                (self._le_time_per_point, fp.time_per_point),
             ]:
-                sb.blockSignals(True)
-                sb.setValue(val)
-                sb.blockSignals(False)
+                le.blockSignals(True)
+                le.setText(f"{val:g}")
+                le.blockSignals(False)
             self._sweep_config.sweep_to       = fp.sweep_to
             self._sweep_config.sweep_rate     = fp.sweep_rate
             self._sweep_config.time_per_point = fp.time_per_point
@@ -403,34 +416,42 @@ class MainWindow(QMainWindow):
         self._le_source_value.setFixedWidth(120)
         form.addRow("Source Value:", self._le_source_value)
 
-        self._sb_sweep_to = QDoubleSpinBox()
-        self._sb_sweep_to.setRange(-1e9, 1e9)
-        self._sb_sweep_to.setDecimals(4)
-        self._sb_sweep_to.setValue(0.0)
-        self._sb_sweep_to.setFixedWidth(140)
-        self._sb_sweep_to.valueChanged.connect(self._update_step_size_label)
-        self._sb_sweep_to.editingFinished.connect(self._on_sweep_params_confirmed)
-        form.addRow("Sweep To:", self._sb_sweep_to)
+        def _sweep_le(placeholder: str) -> QLineEdit:
+            le = QLineEdit(placeholder)
+            le.setFont(_MONO)
+            le.setMinimumWidth(280)
+            from PySide6.QtGui import QDoubleValidator
+            le.setValidator(QDoubleValidator(-1e18, 1e18, 10, le))
+            return le
 
-        self._sb_sweep_rate = QDoubleSpinBox()
-        self._sb_sweep_rate.setRange(1e-6, 1e9)
-        self._sb_sweep_rate.setDecimals(4)
-        self._sb_sweep_rate.setValue(1.0)
-        self._sb_sweep_rate.setSuffix("  units/min")
-        self._sb_sweep_rate.setFixedWidth(180)
-        self._sb_sweep_rate.valueChanged.connect(self._update_step_size_label)
-        self._sb_sweep_rate.editingFinished.connect(self._on_sweep_params_confirmed)
-        form.addRow("Sweep Rate:", self._sb_sweep_rate)
+        self._le_sweep_to = _sweep_le("0")
+        self._le_sweep_to.textChanged.connect(self._update_step_size_label)
+        self._le_sweep_to.editingFinished.connect(self._on_sweep_params_confirmed)
+        self._lbl_sweep_to_unit = QLabel("")
+        _st_row = QWidget(); _st_h = QHBoxLayout(_st_row)
+        _st_h.setContentsMargins(0, 0, 0, 0); _st_h.setSpacing(4)
+        _st_h.addWidget(self._le_sweep_to); _st_h.addWidget(self._lbl_sweep_to_unit)
+        _st_h.addStretch()
+        form.addRow("Sweep To:", _st_row)
 
-        self._sb_time_per_point = QDoubleSpinBox()
-        self._sb_time_per_point.setRange(0.001, 3600)
-        self._sb_time_per_point.setDecimals(3)
-        self._sb_time_per_point.setValue(1.0)
-        self._sb_time_per_point.setSuffix("  sec")
-        self._sb_time_per_point.setFixedWidth(180)
-        self._sb_time_per_point.valueChanged.connect(self._update_step_size_label)
-        self._sb_time_per_point.editingFinished.connect(self._on_sweep_params_confirmed)
-        form.addRow("Time / Point:", self._sb_time_per_point)
+        self._le_sweep_rate = _sweep_le("1")
+        self._le_sweep_rate.textChanged.connect(self._update_step_size_label)
+        self._le_sweep_rate.editingFinished.connect(self._on_sweep_params_confirmed)
+        self._lbl_sweep_rate_unit = QLabel("units/min")
+        _sr_row = QWidget(); _sr_h = QHBoxLayout(_sr_row)
+        _sr_h.setContentsMargins(0, 0, 0, 0); _sr_h.setSpacing(4)
+        _sr_h.addWidget(self._le_sweep_rate); _sr_h.addWidget(self._lbl_sweep_rate_unit)
+        _sr_h.addStretch()
+        form.addRow("Sweep Rate:", _sr_row)
+
+        self._le_time_per_point = _sweep_le("1")
+        self._le_time_per_point.textChanged.connect(self._update_step_size_label)
+        self._le_time_per_point.editingFinished.connect(self._on_sweep_params_confirmed)
+        _tp_row = QWidget(); _tp_h = QHBoxLayout(_tp_row)
+        _tp_h.setContentsMargins(0, 0, 0, 0); _tp_h.setSpacing(4)
+        _tp_h.addWidget(self._le_time_per_point); _tp_h.addWidget(QLabel("sec"))
+        _tp_h.addStretch()
+        form.addRow("Time / Point:", _tp_row)
 
         self._lbl_step_size = QLabel("—")
         self._lbl_step_size.setStyleSheet("color: #555555;")
@@ -445,6 +466,31 @@ class MainWindow(QMainWindow):
         form.addRow("Remaining:", self._lbl_remaining)
 
         layout.addWidget(sweep_box)
+
+        # --- Start / Stop ---
+        btn_row = QHBoxLayout()
+        self._btn_start = QPushButton("Start")
+        self._btn_start.setMinimumHeight(44)
+        self._btn_start.setStyleSheet(
+            "QPushButton { font-weight: bold; font-size: 14px;"
+            "background-color: #2e7d32; color: white; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #1a3a1a; color: #3d553d; border-radius: 4px; }"
+        )
+        self._btn_start.clicked.connect(self._on_start)
+
+        self._btn_stop = QPushButton("Stop")
+        self._btn_stop.setMinimumHeight(44)
+        self._btn_stop.setStyleSheet(
+            "QPushButton { font-weight: bold; font-size: 14px;"
+            "background-color: #c62828; color: white; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #3a1a1a; color: #553d3d; border-radius: 4px; }"
+        )
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.clicked.connect(self._on_stop)
+
+        btn_row.addWidget(self._btn_start)
+        btn_row.addWidget(self._btn_stop)
+        layout.addLayout(btn_row)
 
         # --- Quick-access buttons: Graph / Double Sweep / Connection Test ---
         quick_row = QHBoxLayout()
@@ -524,9 +570,14 @@ class MainWindow(QMainWindow):
         btn_copy_path.setFixedHeight(20)
         btn_copy_path.setFont(QFont("Consolas", 8))
         btn_copy_path.clicked.connect(self._copy_save_path)
+        btn_open_folder = QPushButton("Open Folder")
+        btn_open_folder.setFixedHeight(20)
+        btn_open_folder.setFont(QFont("Consolas", 8))
+        btn_open_folder.clicked.connect(self._open_save_folder)
         preview_row.addWidget(QLabel("→"))
         preview_row.addWidget(self._lbl_save_preview, stretch=1)
         preview_row.addWidget(btn_copy_path)
+        preview_row.addWidget(btn_open_folder)
         save_layout.addLayout(preview_row)
 
         self._cb_save_enable = QCheckBox("Auto-save 활성화")
@@ -535,32 +586,9 @@ class MainWindow(QMainWindow):
         save_layout.addWidget(self._cb_save_enable)
 
         layout.addWidget(save_box)
-        layout.addWidget(self._build_deriv_panel())
-
-        # --- Start / Stop ---
-        btn_row = QHBoxLayout()
-        self._btn_start = QPushButton("Start")
-        self._btn_start.setMinimumHeight(44)
-        self._btn_start.setStyleSheet(
-            "QPushButton { font-weight: bold; font-size: 14px;"
-            "background-color: #2e7d32; color: white; border-radius: 4px; }"
-            "QPushButton:disabled { background-color: #1a3a1a; color: #3d553d; border-radius: 4px; }"
-        )
-        self._btn_start.clicked.connect(self._on_start)
-
-        self._btn_stop = QPushButton("Stop")
-        self._btn_stop.setMinimumHeight(44)
-        self._btn_stop.setStyleSheet(
-            "QPushButton { font-weight: bold; font-size: 14px;"
-            "background-color: #c62828; color: white; border-radius: 4px; }"
-            "QPushButton:disabled { background-color: #3a1a1a; color: #553d3d; border-radius: 4px; }"
-        )
-        self._btn_stop.setEnabled(False)
-        self._btn_stop.clicked.connect(self._on_stop)
-
-        btn_row.addWidget(self._btn_start)
-        btn_row.addWidget(self._btn_stop)
-        layout.addLayout(btn_row)
+        layout.addWidget(self._build_deriv_panel(1))
+        layout.addWidget(self._build_deriv_panel(2))
+        layout.addWidget(self._build_deriv_panel(3))
 
         layout.addStretch()
 
@@ -682,10 +710,18 @@ class MainWindow(QMainWindow):
             cols.append(("__sweep__", "target", ""))
         for idx in self._active_meas_indices:
             m = profile.measurements[idx]
-            cols.append((m.description, m.figure_axis or m.description, m.unit))
-        if self._deriv_channel._cfg.enabled:
-            cols.append(self._deriv_channel.col_info())
+            cols.append((m.description, self._meas_label_for(idx, m), m.unit))
+        for ch in (self._deriv_channel, self._deriv_channel2, self._deriv_channel3):
+            if ch._cfg.enabled:
+                cols.append(ch.col_info())
         return cols
+
+    def _open_meta_data_config(self):
+        from gui.meta_data_window import MetaDataConfigWindow
+        if self._meta_data_window is None:
+            self._meta_data_window = MetaDataConfigWindow(self)
+        self._meta_data_window.show()
+        self._meta_data_window.raise_()
 
     def _open_double_sweep(self):
         from gui.double_sweep_window import DoubleSweepWindow
@@ -786,8 +822,14 @@ class MainWindow(QMainWindow):
     # Derivative Channel UI
     # ------------------------------------------------------------------
 
-    def _build_deriv_panel(self) -> QWidget:
-        """dA1/dA2 실시간 파생 채널 설정 패널 (측정 중 비활성화)."""
+    def _build_deriv_panel(self, order: int) -> QWidget:
+        """d^n A1/dA2^n 실시간 파생 채널 설정 패널 (order = 1/2/3)."""
+        from PySide6.QtWidgets import QSpinBox
+
+        sup = {1: "", 2: "²", 3: "³"}
+        pre = {1: "d", 2: "d²", 3: "d³"}
+        title_text = f"{pre[order]}A\u2081/{pre[order]}A\u2082{sup[order]}"
+
         box = QFrame()
         box.setFrameShape(QFrame.Shape.StyledPanel)
         vbox = QVBoxLayout(box)
@@ -796,86 +838,100 @@ class MainWindow(QMainWindow):
 
         # Title + enable toggle
         title_row = QHBoxLayout()
-        lbl = QLabel("Derivative  dA\u2081/dA\u2082")
+        lbl = QLabel(f"Derivative  {title_text}")
         lbl.setStyleSheet("font-weight: bold; font-size: 12px;")
         title_row.addWidget(lbl)
         title_row.addStretch()
-        self._cb_deriv_enable = QCheckBox("Enable")
-        self._cb_deriv_enable.toggled.connect(self._on_deriv_enable_toggled)
-        title_row.addWidget(self._cb_deriv_enable)
+        cb_enable = QCheckBox("Enable")
+        title_row.addWidget(cb_enable)
         vbox.addLayout(title_row)
 
         # A1 / A2 selectors
-        self._deriv_controls = QWidget()
-        form = QFormLayout(self._deriv_controls)
+        controls_widget = QWidget()
+        form = QFormLayout(controls_widget)
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(10)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        self._cmb_deriv_a1 = QComboBox()
-        self._cmb_deriv_a1.setFont(_MONO)
-        self._cmb_deriv_a1.setMinimumWidth(160)
-        form.addRow("A\u2081 (numerator):", self._cmb_deriv_a1)
+        cmb_a1 = QComboBox()
+        cmb_a1.setFont(_MONO)
+        cmb_a1.setMinimumWidth(160)
+        form.addRow("A\u2081 (numerator):", cmb_a1)
 
-        self._cmb_deriv_a2 = QComboBox()
-        self._cmb_deriv_a2.setFont(_MONO)
-        self._cmb_deriv_a2.setMinimumWidth(160)
-        form.addRow("A\u2082 (denominator):", self._cmb_deriv_a2)
+        cmb_a2 = QComboBox()
+        cmb_a2.setFont(_MONO)
+        cmb_a2.setMinimumWidth(160)
+        form.addRow("A\u2082 (denominator):", cmb_a2)
 
         # Label / Unit
         label_row = QHBoxLayout()
-        self._le_deriv_label = QLineEdit()
-        self._le_deriv_label.setPlaceholderText("e.g. dV/dI")
-        self._le_deriv_label.setFixedWidth(100)
-        self._le_deriv_unit = QLineEdit()
-        self._le_deriv_unit.setPlaceholderText("unit e.g. \u03a9")
-        self._le_deriv_unit.setFixedWidth(70)
+        le_label = QLineEdit()
+        le_label.setPlaceholderText(f"e.g. {title_text}")
+        le_label.setFixedWidth(100)
+        le_unit = QLineEdit()
+        le_unit.setPlaceholderText("unit")
+        le_unit.setFixedWidth(70)
         label_row.addWidget(QLabel("Label:"))
-        label_row.addWidget(self._le_deriv_label)
+        label_row.addWidget(le_label)
         label_row.addSpacing(8)
         label_row.addWidget(QLabel("Unit:"))
-        label_row.addWidget(self._le_deriv_unit)
+        label_row.addWidget(le_unit)
         label_row.addStretch()
 
-        # Window / Method
+        # Window / Method / Min delta
         wm_row = QHBoxLayout()
-        from PySide6.QtWidgets import QSpinBox
-        self._sb_deriv_window = QSpinBox()
-        self._sb_deriv_window.setRange(3, 50)
-        self._sb_deriv_window.setValue(10)
-        self._sb_deriv_window.setFixedWidth(60)
-        self._cmb_deriv_method = QComboBox()
-        self._cmb_deriv_method.addItems(["Linear Regression", "Savitzky-Golay"])
-        self._le_deriv_min_delta = QLineEdit("1e-10")
-        self._le_deriv_min_delta.setFixedWidth(80)
-        self._le_deriv_min_delta.setFont(_MONO)
+        sb_window = QSpinBox()
+        sb_window.setRange(3, 50)
+        sb_window.setValue(10)
+        sb_window.setFixedWidth(60)
+        cmb_method = QComboBox()
+        cmb_method.addItems(["Linear Regression", "Savitzky-Golay"])
+        if order > 1:
+            cmb_method.setEnabled(False)  # savgol only for order==1
+            cmb_method.setToolTip("Savitzky-Golay는 1차 미분 전용; 고차 미분은 Polynomial Fit 사용")
+        le_min_delta = QLineEdit("1e-10")
+        le_min_delta.setFixedWidth(80)
+        le_min_delta.setFont(_MONO)
         wm_row.addWidget(QLabel("Window:"))
-        wm_row.addWidget(self._sb_deriv_window)
+        wm_row.addWidget(sb_window)
         wm_row.addSpacing(8)
         wm_row.addWidget(QLabel("Method:"))
-        wm_row.addWidget(self._cmb_deriv_method)
+        wm_row.addWidget(cmb_method)
         wm_row.addSpacing(8)
         wm_row.addWidget(QLabel("Min |ΔA\u2082|:"))
-        wm_row.addWidget(self._le_deriv_min_delta)
+        wm_row.addWidget(le_min_delta)
         wm_row.addStretch()
 
         ctrl_vbox = QVBoxLayout()
         ctrl_vbox.setSpacing(3)
-        ctrl_vbox.addWidget(self._deriv_controls)
+        ctrl_vbox.addWidget(controls_widget)
         ctrl_vbox.addLayout(label_row)
         ctrl_vbox.addLayout(wm_row)
         vbox.addLayout(ctrl_vbox)
 
-        self._deriv_setting_widgets = [
-            self._cmb_deriv_a1, self._cmb_deriv_a2,
-            self._le_deriv_label, self._le_deriv_unit,
-            self._sb_deriv_window, self._cmb_deriv_method,
-            self._le_deriv_min_delta,
-        ]
+        setting_widgets = [cmb_a1, cmb_a2, le_label, le_unit, sb_window, le_min_delta]
+        if order == 1:
+            setting_widgets.append(cmb_method)
+
+        # Store widget refs on self using order-suffixed names
+        suffix = "" if order == 1 else str(order)
+        setattr(self, f"_cb_deriv{suffix}_enable",       cb_enable)
+        setattr(self, f"_cmb_deriv{suffix}_a1",          cmb_a1)
+        setattr(self, f"_cmb_deriv{suffix}_a2",          cmb_a2)
+        setattr(self, f"_le_deriv{suffix}_label",         le_label)
+        setattr(self, f"_le_deriv{suffix}_unit",          le_unit)
+        setattr(self, f"_sb_deriv{suffix}_window",        sb_window)
+        setattr(self, f"_cmb_deriv{suffix}_method",       cmb_method)
+        setattr(self, f"_le_deriv{suffix}_min_delta",     le_min_delta)
+        setattr(self, f"_deriv{suffix}_setting_widgets",  setting_widgets)
+
+        cb_enable.toggled.connect(
+            lambda checked, s=setting_widgets: self._on_deriv_enable_toggled_widgets(checked, s)
+        )
         return box
 
     def _rebuild_deriv_combos(self):
-        """파라미터가 변경될 때 A1/A2 콤보박스 재구성."""
+        """파라미터가 변경될 때 모든 파생 채널 A1/A2 콤보박스 재구성."""
         if not hasattr(self, "_cmb_deriv_a1"):
             return
         profile = self._active_profile
@@ -883,43 +939,60 @@ class MainWindow(QMainWindow):
         for m in profile.measurements:
             items.append((m.description, f"{m.figure_axis or m.description} [{m.unit}]"))
 
-        prev_a1 = self._cmb_deriv_a1.currentData()
-        prev_a2 = self._cmb_deriv_a2.currentData()
+        for suffix in ("", "2", "3"):
+            cmb_a1 = getattr(self, f"_cmb_deriv{suffix}_a1")
+            cmb_a2 = getattr(self, f"_cmb_deriv{suffix}_a2")
+            for cmb in (cmb_a1, cmb_a2):
+                prev = cmb.currentData()
+                cmb.blockSignals(True)
+                cmb.clear()
+                for key, display in items:
+                    cmb.addItem(display, userData=key)
+                idx = cmb.findData(prev)
+                cmb.setCurrentIndex(idx if idx >= 0 else 0)
+                cmb.blockSignals(False)
 
-        for cmb, prev in [(self._cmb_deriv_a1, prev_a1), (self._cmb_deriv_a2, prev_a2)]:
-            cmb.blockSignals(True)
-            cmb.clear()
-            for key, display in items:
-                cmb.addItem(display, userData=key)
-            idx = cmb.findData(prev)
-            cmb.setCurrentIndex(idx if idx >= 0 else 0)
-            cmb.blockSignals(False)
-
-    def _on_deriv_enable_toggled(self, checked: bool):
-        for w in self._deriv_setting_widgets:
+    def _on_deriv_enable_toggled_widgets(self, checked: bool, widgets: list):
+        for w in widgets:
             w.setEnabled(checked and not self._running)
 
-    def _build_deriv_config(self) -> DerivativeConfig:
-        """현재 UI 상태에서 DerivativeConfig 생성."""
+    def _build_deriv_config(self, order: int = 1) -> DerivativeConfig:
+        """현재 UI 상태에서 DerivativeConfig 생성 (order = 1/2/3)."""
+        suffix = "" if order == 1 else str(order)
         method_map = {0: "linear", 1: "savgol"}
         try:
-            min_delta = float(self._le_deriv_min_delta.text())
+            min_delta = float(getattr(self, f"_le_deriv{suffix}_min_delta").text())
         except ValueError:
             min_delta = 1e-10
+        cmb_method = getattr(self, f"_cmb_deriv{suffix}_method")
+        method = method_map.get(cmb_method.currentIndex(), "linear") if order == 1 else "linear"
         return DerivativeConfig(
-            enabled=self._cb_deriv_enable.isChecked(),
-            numerator_key=self._cmb_deriv_a1.currentData() or "",
-            denominator_key=self._cmb_deriv_a2.currentData() or "",
-            output_label=self._le_deriv_label.text().strip(),
-            output_unit=self._le_deriv_unit.text().strip(),
-            window_size=self._sb_deriv_window.value(),
-            method=method_map.get(self._cmb_deriv_method.currentIndex(), "linear"),
+            enabled=getattr(self, f"_cb_deriv{suffix}_enable").isChecked(),
+            order=order,
+            numerator_key=getattr(self, f"_cmb_deriv{suffix}_a1").currentData() or "",
+            denominator_key=getattr(self, f"_cmb_deriv{suffix}_a2").currentData() or "",
+            output_label=getattr(self, f"_le_deriv{suffix}_label").text().strip(),
+            output_unit=getattr(self, f"_le_deriv{suffix}_unit").text().strip(),
+            window_size=getattr(self, f"_sb_deriv{suffix}_window").value(),
+            method=method,
             min_delta=min_delta,
         )
 
     def _deriv_val_for_step(self, result, meas_map: dict) -> "float | None":
-        """현재 스텝에서 A1/A2 값을 추출하고 파생값 계산. None이면 비활성."""
-        cfg = self._deriv_channel._cfg
+        """현재 스텝에서 1차 미분값 계산."""
+        return self._deriv_val_for_order(result, meas_map, self._deriv_channel)
+
+    def _deriv_val_for_step2(self, result, meas_map: dict) -> "float | None":
+        """현재 스텝에서 2차 미분값 계산."""
+        return self._deriv_val_for_order(result, meas_map, self._deriv_channel2)
+
+    def _deriv_val_for_step3(self, result, meas_map: dict) -> "float | None":
+        """현재 스텝에서 3차 미분값 계산."""
+        return self._deriv_val_for_order(result, meas_map, self._deriv_channel3)
+
+    def _deriv_val_for_order(self, result, meas_map: dict, channel: DerivativeChannel) -> "float | None":
+        """공통: A1/A2 값 추출 후 채널에 push."""
+        cfg = channel._cfg
         if not cfg.enabled:
             return None
 
@@ -928,33 +1001,42 @@ class MainWindow(QMainWindow):
                 return result.next_v
             for idx in self._active_meas_indices:
                 if self._active_profile.measurements[idx].description == key:
-                    v = meas_map.get(idx)
-                    return v
+                    return meas_map.get(idx)
             return None
 
         a1 = _get(cfg.numerator_key)
         a2 = _get(cfg.denominator_key)
         if a1 is None or a2 is None:
             return None
-        return self._deriv_channel.push(a1, a2)
+        return channel.push(a1, a2)
 
-    def _on_selection_applied(self, profile: MainUIProfile):
-        # 기존 체크박스 상태를 (alias, description) 키로 보존
+    def _collect_meas_ui_state(self) -> tuple:
+        """현재 UI 위젯에서 (prev_checked, prev_suffix, prev_type) 딕셔너리를 수집."""
         prev_checked: dict = {}
         prev_suffix: dict = {}
-        if self._active_profile is not None:
-            for m, cb in zip(self._active_profile.measurements, self._meas_checkboxes):
-                key = (m.alias, m.description)
-                prev_checked[key] = cb.isChecked()
-            for m, le in zip(self._active_profile.measurements, self._meas_suffix_edits):
-                key = (m.alias, m.description)
-                prev_suffix[key] = le.text()
+        prev_type: dict = {}
+        if self._active_profile is None:
+            return prev_checked, prev_suffix, prev_type
+        for m, cb in zip(self._active_profile.measurements, self._meas_checkboxes):
+            key = (m.alias, m.description)
+            prev_checked[key] = cb.isChecked()
+        for m, le in zip(self._active_profile.measurements, self._meas_suffix_edits):
+            key = (m.alias, m.description)
+            prev_suffix[key] = le.text()
+        for m, ct in zip(self._active_profile.measurements, self._meas_type_combos):
+            key = (m.alias, m.description)
+            prev_type[key] = ct.currentData()
+        return prev_checked, prev_suffix, prev_type
 
+    def _on_selection_applied(self, profile: MainUIProfile):
+        prev_checked, prev_suffix, prev_type = self._collect_meas_ui_state()
         self._active_profile = profile
         self._rebuild_sweep_channel_panel(profile.sweep_values)
-        self._rebuild_meas_panel(profile.measurements, prev_checked, prev_suffix)
+        self._rebuild_meas_panel(profile.measurements, prev_checked, prev_suffix, prev_type)
         self._rebuild_write_panel(profile.write_cmds)
         self._rebuild_deriv_combos()
+        if self._double_sweep_window is not None:
+            self._double_sweep_window._rebuild_second_channel_radios()
 
     _TIME_ID = -2   # QButtonGroup ID for the fixed Time channel
 
@@ -966,13 +1048,23 @@ class MainWindow(QMainWindow):
         return self._alias_color_map[alias]
 
     def _meas_label_for(self, idx: int, m) -> str:
-        """Return figure_axis + user suffix for data-file column header."""
-        base = m.figure_axis or m.description
+        """Return column header for data-file.
+
+        contact type → base = "contact" (suffix completely replaces figure_axis).
+        other types  → base = figure_axis (suffix appended as before).
+        """
+        from config.config_models import MeasType
+        suffix = ""
         if idx < len(self._meas_suffix_edits):
             suffix = self._meas_suffix_edits[idx].text().strip()
-            if suffix:
-                return f"{base}_{suffix}"
-        return base
+        meas_type_val = MeasType.NONE.value
+        if idx < len(self._meas_type_combos):
+            meas_type_val = self._meas_type_combos[idx].currentData() or MeasType.NONE.value
+        if meas_type_val == MeasType.CONTACT.value:
+            base = "contact"
+        else:
+            base = m.figure_axis or m.description
+        return f"{base}_{suffix}" if suffix else base
 
     def _rebuild_sweep_channel_panel(self, sweep_values: list):
         for btn in self._sweep_radio_group.buttons():
@@ -1014,16 +1106,24 @@ class MainWindow(QMainWindow):
             return
         if btn_id == self._TIME_ID:
             self._sweep_channel = TIME_CHANNEL
+            self._update_sweep_unit_labels("sec")
             self._sync_data_window_columns()
             return
         svs = self._active_profile.sweep_values
         if 0 <= btn_id < len(svs):
             self._sweep_channel = sweep_channel_from_instantiated(svs[btn_id])
+            self._update_sweep_unit_labels(svs[btn_id].unit)
             self._sync_data_window_columns()
+
+    def _update_sweep_unit_labels(self, unit: str):
+        self._lbl_sweep_to_unit.setText(unit)
+        self._lbl_sweep_rate_unit.setText(f"{unit}/min" if unit else "units/min")
 
     def _rebuild_meas_panel(self, measurements: list,
                              prev_checked: dict = None,
-                             prev_suffix: dict = None):
+                             prev_suffix: dict = None,
+                             prev_type: dict = None):
+        from config.config_models import MeasType
         content = QWidget()
         content.setStyleSheet("background: transparent;")
         cl = QVBoxLayout(content)
@@ -1032,6 +1132,7 @@ class MainWindow(QMainWindow):
 
         self._meas_checkboxes = []
         self._meas_suffix_edits = []
+        self._meas_type_combos = []
 
         for m in measurements:
             color = self._get_alias_color(m.alias)
@@ -1040,23 +1141,71 @@ class MainWindow(QMainWindow):
             row_h.setContentsMargins(0, 0, 0, 0)
             row_h.setSpacing(6)
 
+            key = (m.alias, m.description)
+
+            # ── Checkbox ──────────────────────────────────────────────
             cb = QCheckBox(f"[{m.alias}]  {m.description}  ({m.unit})")
             cb.setFont(_MONO)
             cb.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
-            key = (m.alias, m.description)
-            cb.setChecked(prev_checked.get(key, True) if prev_checked else True)
+            init_checked = prev_checked.get(key, m.checked) if prev_checked else m.checked
+            cb.setChecked(init_checked)
+            m.checked = init_checked  # write-back: 프로파일과 동기화
+
+            def _make_cb_wb(meas, _cb):
+                def _wb():
+                    meas.checked = _cb.isChecked()
+                    self._refresh_meta_data_preview()
+                return _wb
+            cb.stateChanged.connect(_make_cb_wb(m, cb))
             self._meas_checkboxes.append(cb)
             row_h.addWidget(cb)
 
+            # ── Type selector ─────────────────────────────────────────
+            cb_type = QComboBox()
+            cb_type.setFont(_MONO)
+            cb_type.setFixedWidth(88)
+            for t in MeasType:
+                cb_type.addItem(t.value, t.value)
+            init_type = prev_type.get(key, m.meas_type.value) if prev_type else m.meas_type.value
+            idx_t = cb_type.findData(init_type)
+            if idx_t >= 0:
+                cb_type.setCurrentIndex(idx_t)
+            try:
+                m.meas_type = MeasType(init_type)  # write-back
+            except Exception:
+                pass
+
+            def _make_type_wb(meas, widget):
+                def _wb():
+                    try:
+                        meas.meas_type = MeasType(widget.currentData())
+                    except Exception:
+                        pass
+                    self._on_meas_type_changed()
+                return _wb
+            cb_type.currentIndexChanged.connect(_make_type_wb(m, cb_type))
+            self._meas_type_combos.append(cb_type)
+            row_h.addWidget(cb_type)
+
+            # ── Suffix edit ───────────────────────────────────────────
             le_suffix = QLineEdit()
             le_suffix.setFont(_MONO)
             le_suffix.setFixedWidth(110)
             le_suffix.setPlaceholderText("suffix")
-            le_suffix.setText(
-                prev_suffix.get(key, m.axis_suffix) if prev_suffix else m.axis_suffix
+            init_suffix = prev_suffix.get(key, m.axis_suffix) if prev_suffix else m.axis_suffix
+            le_suffix.setText(init_suffix)
+            m.axis_suffix = init_suffix  # write-back
+
+            def _make_suffix_wb(meas, widget):
+                def _wb(text):
+                    meas.axis_suffix = text
+                    self._sync_data_window_columns()
+                return _wb
+            le_suffix.textChanged.connect(_make_suffix_wb(m, le_suffix))
+            le_suffix.setToolTip(
+                "contact: 컬럼명 = contact_{suffix}\n"
+                "기타 type: 컬럼명 = {figure_axis}_{suffix}"
             )
-            le_suffix.setToolTip("Data column suffix: e.g. 'port10' → smua_current_port10")
-            le_suffix.textChanged.connect(self._sync_data_window_columns)
             self._meas_suffix_edits.append(le_suffix)
             row_h.addWidget(le_suffix)
             row_h.addStretch()
@@ -1184,18 +1333,45 @@ class MainWindow(QMainWindow):
         # disable Double Sweep while single sweep is running
         if self._double_sweep_window is not None:
             self._double_sweep_window._btn_start.setEnabled(False)
-        # Derivative channel — reconfigure and reset buffer
-        deriv_cfg = self._build_deriv_config()
-        self._deriv_channel.reconfigure(deriv_cfg)
-        self._deriv_channel.reset()
+        # Derivative channels — reconfigure and reset buffers
+        for order, ch in [(1, self._deriv_channel), (2, self._deriv_channel2), (3, self._deriv_channel3)]:
+            ch.reconfigure(self._build_deriv_config(order))
+            ch.reset()
         # Disable derivative settings while running
-        for w in self._deriv_setting_widgets:
-            w.setEnabled(False)
-        self._cb_deriv_enable.setEnabled(False)
+        for suffix in ("", "2", "3"):
+            getattr(self, f"_cb_deriv{suffix}_enable").setEnabled(False)
+            for w in getattr(self, f"_deriv{suffix}_setting_widgets"):
+                w.setEnabled(False)
 
         if self._graph_window is not None:
             self._graph_window.begin_session(self._build_graph_columns())
+        # MetaDataManager: configure T/B buffer for this sweep
+        _meas_labels = [
+            self._meas_label_for(idx, self._active_profile.measurements[idx])
+            for idx in self._active_meas_indices
+        ]
+        from config.config_models import MeasType
+        _meas_type_overrides = {}
+        for idx in self._active_meas_indices:
+            if idx < len(self._meas_type_combos):
+                val = self._meas_type_combos[idx].currentData()
+                try:
+                    _meas_type_overrides[idx] = MeasType(val)
+                except Exception:
+                    pass
+        self._meta_manager.configure(
+            self._active_meas_indices,
+            self._active_profile.measurements,
+            _meas_labels,
+            meas_type_overrides=_meas_type_overrides,
+        )
         self._log("Sweep started.", color="#4ec9b0")
+        self._log_sweep(
+            f"━━ Sweep started  target={self._sweep_config.sweep_to:.4g}  "
+            f"rate={self._sweep_config.sweep_rate:.4g}  "
+            f"tpp={self._sweep_config.time_per_point:.3g}s",
+            color="#4ec9b0",
+        )
         self._sweep_step_timer.start(0)
 
     def _on_stop(self):
@@ -1215,12 +1391,18 @@ class MainWindow(QMainWindow):
             if self._double_sweep_window._phase == DoubleSweepPhase.IDLE:
                 self._double_sweep_window._btn_start.setEnabled(True)
         # Re-enable derivative settings
-        self._cb_deriv_enable.setEnabled(True)
-        enabled = self._cb_deriv_enable.isChecked()
-        for w in self._deriv_setting_widgets:
-            w.setEnabled(enabled)
+        for suffix in ("", "2", "3"):
+            cb = getattr(self, f"_cb_deriv{suffix}_enable")
+            cb.setEnabled(True)
+            enabled = cb.isChecked()
+            for w in getattr(self, f"_deriv{suffix}_setting_widgets"):
+                w.setEnabled(enabled)
         self._stop_glow()
         self._log("Sweep stopped.", color="#ce9178")
+
+    def _log_sweep(self, text: str, color: str = "#c9d1d9", verbose: bool = False):
+        """Sweep Log 패널에 기록. verbose=True 항목은 Verbose 체크 시에만 표시."""
+        self._debug_window.log_sweep(text, color=color, verbose=verbose)
 
     def _sweep_tick(self):
         """메인 스레드: VISA 작업을 worker에 위임하고 즉시 리턴합니다."""
@@ -1237,6 +1419,18 @@ class MainWindow(QMainWindow):
             )
             if cb.isChecked()
         ]
+
+        # Sweep Log: 단계 컨텍스트 저장 (오류 발생 시 참조용) + verbose 로그
+        meas_names = ", ".join(desc for _, _, desc, _ in active) or "—"
+        self._step_context = (
+            f"step#{self._sweep_step_count + 1}  "
+            f"target={self._sweep_config.sweep_to:.4g}  "
+            f"meas=[{meas_names}]"
+        )
+        self._log_sweep(
+            f"→ {self._step_context}",
+            color="#555555", verbose=True,
+        )
 
 
         sv = self._active_profile.sweep_values[
@@ -1270,17 +1464,58 @@ class MainWindow(QMainWindow):
         # DataWindow 갱신: next_v + 체크된 measurement 값만
         meas_map = {row: val for row, val in result.meas_results}
         row_vals = [f"{result.next_v:.6g}"]
+        has_err = False
         for idx in self._active_meas_indices:
             val = meas_map.get(idx)
+            if val is None:
+                has_err = True
             row_vals.append(f"{val:.6g}" if val is not None else "ERR")
 
+        if has_err:
+            err_descs = [
+                self._active_profile.measurements[idx].description
+                for idx in self._active_meas_indices
+                if meas_map.get(idx) is None
+            ]
+            err_msg = (
+                f"✗ ERR @ {self._step_context}\n"
+                f"실패 채널: {', '.join(err_descs)}"
+            )
+            self._log_sweep(f"  {err_msg}", color="#f44747")
+            self._on_stop()
+            QMessageBox.critical(self, "Measurement Error", err_msg)
+            return
+        else:
+            # verbose: 측정값 요약
+            val_summary = "  ".join(
+                f"{self._active_profile.measurements[idx].description}="
+                f"{meas_map[idx]:.4g}"
+                for idx in self._active_meas_indices
+                if meas_map.get(idx) is not None
+            )
+            if val_summary:
+                self._log_sweep(
+                    f"  ✓ v={result.next_v:.4g}  {val_summary}",
+                    color="#888888", verbose=True,
+                )
+
         # Derivative channel computation (numpy on ≤50 points — GUI thread safe)
-        deriv_val = self._deriv_val_for_step(result, meas_map)
-        if self._deriv_channel._cfg.enabled:
-            row_vals.append(f"{deriv_val:.6g}" if deriv_val is not None else "—")
+        deriv_val  = self._deriv_val_for_step(result, meas_map)
+        deriv_val2 = self._deriv_val_for_step2(result, meas_map)
+        deriv_val3 = self._deriv_val_for_step3(result, meas_map)
+        for ch, val in [
+            (self._deriv_channel,  deriv_val),
+            (self._deriv_channel2, deriv_val2),
+            (self._deriv_channel3, deriv_val3),
+        ]:
+            if ch._cfg.enabled:
+                row_vals.append(f"{val:.6g}" if val is not None else "—")
 
         self._data_window.update_values(row_vals)
         self._data_saver.append_row(row_vals)
+
+        # MetaDataManager: T/B 버퍼에 이번 스텝 값 누적
+        self._meta_manager.record_step(result.meas_results)
 
         # Graph update
         if self._graph_window is not None:
@@ -1290,9 +1525,13 @@ class MainWindow(QMainWindow):
                 val = meas_map.get(idx)
                 if val is not None:
                     gvals[self._active_profile.measurements[idx].description] = val
-            if self._deriv_channel._cfg.enabled:
-                # Always append (NaN when not computable) to keep X/Y arrays aligned
-                gvals[_DERIV_KEY] = deriv_val if deriv_val is not None else float("nan")
+            for ch, key, val in [
+                (self._deriv_channel,  _DERIV_KEY,  deriv_val),
+                (self._deriv_channel2, _DERIV2_KEY, deriv_val2),
+                (self._deriv_channel3, _DERIV3_KEY, deriv_val3),
+            ]:
+                if ch._cfg.enabled:
+                    gvals[key] = val if val is not None else float("nan")
             self._graph_window.append_point(GraphDataPoint(values=gvals, phase=""))
 
         next_display = None if result.is_done else calculate_next_step(
@@ -1329,6 +1568,15 @@ class MainWindow(QMainWindow):
             self._lbl_idle.setText("—")
             self._lbl_remaining.setText("—")
             self._log(f"Sweep complete. ({self._sweep_step_count} steps)", color="#4ec9b0")
+            self._log_sweep(
+                f"★ Sweep complete — {self._sweep_step_count} steps",
+                color="#4ec9b0",
+            )
+            # MetaData 저장 (sweep worker 완료 후이므로 VISA 안전)
+            self._meta_manager.save(
+                self._param_manager_reg.meta_data_config,
+                self._data_saver.get_filepath(),
+            )
             self._on_stop()
         else:
             # t_ui_done을 타이머 직전에 다시 찍어 모든 처리 시간 반영
@@ -1346,7 +1594,12 @@ class MainWindow(QMainWindow):
 
     def _on_step_error(self, msg: str):
         """Worker에서 예외 발생 시 메인 스레드에서 처리."""
+        ctx = getattr(self, "_step_context", "unknown step")
         self._log(f"  ERROR (sweep tick): {msg}", color="#f44747")
+        self._log_sweep(
+            f"  ✗ EXCEPTION @ {ctx}\n    {msg}",
+            color="#f44747",
+        )
         self._on_stop()
 
     def _browse_save_folder(self):
@@ -1362,6 +1615,22 @@ class MainWindow(QMainWindow):
             from PySide6.QtWidgets import QApplication
             QApplication.clipboard().setText(path)
 
+    def _open_save_folder(self):
+        import subprocess, os
+        path = self._lbl_save_preview.text()
+        if not path or path == "—" or path.startswith("("):
+            return
+        folder = os.path.dirname(path)
+        if not os.path.isdir(folder):
+            # 아직 생성 안 됐으면 상위 폴더로 올라가기
+            from pathlib import Path
+            p = Path(folder)
+            while p and not p.is_dir():
+                p = p.parent
+            folder = str(p) if p and p.is_dir() else ""
+        if folder:
+            subprocess.Popen(f'explorer "{folder}"')
+
     def _update_save_preview(self):
         self._data_saver.set_main_folder(self._le_main_folder.text())
         self._data_saver.set_custom_folder(self._le_custom_folder.text())
@@ -1369,6 +1638,14 @@ class MainWindow(QMainWindow):
         self._data_saver.set_include_date(self._cb_save_date.isChecked())
         self._data_saver.set_enabled(self._cb_save_enable.isChecked())
         self._lbl_save_preview.setText(self._data_saver.preview_path())
+
+    def _on_meas_type_changed(self):
+        self._sync_data_window_columns()
+        self._refresh_meta_data_preview()
+
+    def _refresh_meta_data_preview(self):
+        if self._meta_data_window and self._meta_data_window.isVisible():
+            self._meta_data_window._refresh_preview()
 
     def _sync_data_window_columns(self):
         """선택된 sweep channel + 체크된 measurements로 DataWindow 컬럼 설정."""
@@ -1387,29 +1664,37 @@ class MainWindow(QMainWindow):
         if self._running:
             for idx in self._active_meas_indices:
                 m = profile.measurements[idx]
-                columns.append((m.figure_axis or m.description, m.unit))
+                columns.append((self._meas_label_for(idx, m), m.unit))
         else:
             for i, m in enumerate(profile.measurements):
                 cb = self._meas_checkboxes[i] if i < len(self._meas_checkboxes) else None
                 if cb is None or cb.isChecked():
-                    columns.append((m.figure_axis or m.description, m.unit))
-        if self._deriv_channel._cfg.enabled:
-            _, lbl, unit = self._deriv_channel.col_info()
-            columns.append((lbl, unit))
+                    columns.append((self._meas_label_for(i, m), m.unit))
+        for ch in (self._deriv_channel, self._deriv_channel2, self._deriv_channel3):
+            if ch._cfg.enabled:
+                _, lbl, unit = ch.col_info()
+                columns.append((lbl, unit))
         self._data_window.configure_columns(columns)
         self._data_saver.set_columns(columns)
 
+    @staticmethod
+    def _parse_sweep_float(text: str, default: float) -> float:
+        try:
+            return float(text)
+        except (ValueError, TypeError):
+            return default
+
     def _update_step_size_label(self):
         tmp = SweepConfig(
-            sweep_rate=self._sb_sweep_rate.value(),
-            time_per_point=self._sb_time_per_point.value(),
+            sweep_rate=self._parse_sweep_float(self._le_sweep_rate.text(), 1.0),
+            time_per_point=self._parse_sweep_float(self._le_time_per_point.text(), 1.0),
         )
         self._lbl_step_size.setText(f"{tmp.step_size():.6g}  units/step")
 
     def _on_sweep_params_confirmed(self):
-        self._sweep_config.sweep_to = self._sb_sweep_to.value()
-        self._sweep_config.sweep_rate = self._sb_sweep_rate.value()
-        self._sweep_config.time_per_point = self._sb_time_per_point.value()
+        self._sweep_config.sweep_to       = self._parse_sweep_float(self._le_sweep_to.text(), 0.0)
+        self._sweep_config.sweep_rate     = self._parse_sweep_float(self._le_sweep_rate.text(), 1.0)
+        self._sweep_config.time_per_point = self._parse_sweep_float(self._le_time_per_point.text(), 1.0)
         self._timing_window.set_time_per_point(self._sweep_config.time_per_point)
         self._last_write_value = None  # 다음 스텝에서 VISA readback으로 재초기화
         self._log("  Sweep params updated.", color="#888888")

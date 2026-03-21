@@ -37,3 +37,9 @@
   address: 192.168.0.20
   mac_address: 00-30-64-01-78-0A
   extra_params: {}
+- alias: SR830
+  class_name: core.m81.M81Instrument
+  interface_type: LAN
+  address: 192.168.0.xx
+  mac_address: ''
+  extra_params: {}

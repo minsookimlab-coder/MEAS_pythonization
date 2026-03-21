@@ -12,7 +12,7 @@ import yaml
 from config.config_models import (
     ParameterManagerProfile, MainUIProfile, FullProfile, DoubleSweepConfig,
     InstantiatedMeasurement, InstantiatedSweepValue, InstantiatedWriteCmd,
-    InstantiatedSecondSweepChannel,
+    InstantiatedSecondSweepChannel, MetaDataConfig,
 )
 
 if TYPE_CHECKING:
@@ -242,6 +242,15 @@ class ProfileRegistry:
     def save_double_sweep_config(self, cfg: DoubleSweepConfig):
         profile = self.get_active_profile()
         profile.double_sweep = cfg
+        self.save_active_profile(profile)
+
+    @property
+    def meta_data_config(self) -> MetaDataConfig:
+        return self.get_active_profile().meta_data
+
+    def save_meta_data_config(self, cfg: MetaDataConfig):
+        profile = self.get_active_profile()
+        profile.meta_data = cfg
         self.save_active_profile(profile)
 
     # ------------------------------------------------------------------

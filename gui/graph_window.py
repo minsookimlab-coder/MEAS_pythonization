@@ -11,21 +11,26 @@ GraphWindow: 실시간 측정 그래프 창.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -53,6 +58,123 @@ _PHASE_LABEL: Dict[str, str] = {
 def _make_pen(phase: str) -> pg.mkPen:
     color, style = _PHASE_STYLE.get(phase, ("#888888", Qt.PenStyle.SolidLine))
     return pg.mkPen(color=color, width=2, style=style)
+
+
+# ──────────────────────────────────────────────────────────
+# 2D Map colormaps  (Origin-style + common scientific)
+# ──────────────────────────────────────────────────────────
+
+def _make_cm(pos, colors) -> pg.ColorMap:
+    return pg.ColorMap(
+        pos=np.array(pos, dtype=np.float64),
+        color=np.array(colors, dtype=np.uint8),
+    )
+
+_CMAPS: Dict[str, pg.ColorMap] = {
+    # Origin "Warming": Blue → White → Red  (diverging, 빨강-흰색-파랑)
+    "Warming":  _make_cm(
+        [0.0,           0.5,              1.0],
+        [[0, 0, 200, 255], [255, 255, 255, 255], [200, 0, 0, 255]],
+    ),
+    # Jet / Rainbow
+    "Jet":      _make_cm(
+        [0.0,               0.25,              0.5,             0.75,              1.0],
+        [[0, 0, 255, 255], [0, 255, 255, 255], [0, 255, 0, 255], [255, 255, 0, 255], [255, 0, 0, 255]],
+    ),
+    # Viridis (approximation)
+    "Viridis":  _make_cm(
+        [0.0,                  0.25,                  0.5,                   0.75,                  1.0],
+        [[68, 1, 84, 255], [59, 82, 139, 255], [33, 145, 140, 255], [94, 201, 98, 255], [253, 231, 37, 255]],
+    ),
+    # Inferno (approximation)
+    "Inferno":  _make_cm(
+        [0.0,              0.25,                  0.5,                   0.75,                   1.0],
+        [[0, 0, 4, 255], [87, 16, 110, 255], [188, 55, 84, 255], [249, 142, 9, 255], [252, 255, 164, 255]],
+    ),
+    # Grayscale
+    "Gray":     _make_cm([0.0, 1.0], [[0, 0, 0, 255], [255, 255, 255, 255]]),
+    # RdBu diverging (Red → White → Blue)
+    "RdBu":     _make_cm(
+        [0.0,                    0.25,                      0.5,                      0.75,                       1.0],
+        [[178, 24, 43, 255], [239, 138, 98, 255], [255, 255, 255, 255], [103, 169, 207, 255], [33, 102, 172, 255]],
+    ),
+}
+_CMAP_NAMES = list(_CMAPS.keys())
+
+def _get_lut(name: str) -> np.ndarray:
+    cm = _CMAPS.get(name, _CMAPS["Warming"])
+    return cm.getLookupTable(nPts=512, alpha=False)
+
+
+# ──────────────────────────────────────────────────────────
+# .dat file reader  (shared utility)
+# ──────────────────────────────────────────────────────────
+
+def _read_dat_file(path: Path):
+    """Return (col_names: list[str], rows: list[list[float]]).
+    Line 1 = column names, Line 2 = units (skipped), Line 3+ = data.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+        if len(lines) < 3:
+            return [], []
+        names = lines[0].rstrip("\n").split("\t")
+        rows = []
+        for line in lines[2:]:
+            parts = line.rstrip("\n").split("\t")
+            if not any(parts):
+                continue
+            try:
+                row = [float(p) for p in parts]
+                if len(row) == len(names):
+                    rows.append(row)
+            except ValueError:
+                pass
+        return names, rows
+    except Exception:
+        return [], []
+
+
+# ──────────────────────────────────────────────────────────
+# Background file-load worker
+# ──────────────────────────────────────────────────────────
+
+class _MapLoadWorker(QObject):
+    """Scans a folder for .dat files and loads them in a background thread."""
+    finished = Signal(dict)   # {"col_names": [...], "files": [(fname, rows), ...]}
+    error    = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, folder: str):
+        super().__init__()
+        self._folder = folder
+
+    @Slot()
+    def run(self):
+        try:
+            result = self._load()
+            self.finished.emit(result)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+    def _load(self) -> dict:
+        folder = Path(self._folder)
+        files = sorted(folder.rglob("*.dat"))
+        if not files:
+            raise ValueError(f"No .dat files found in:\n{folder}")
+        col_names = None
+        file_data = []
+        for fpath in files:
+            names, rows = _read_dat_file(fpath)
+            if not names or not rows:
+                continue
+            if col_names is None:
+                col_names = names
+            file_data.append((fpath.name, rows))
+        if not col_names:
+            raise ValueError("Valid .dat files not found (check format).")
+        return {"col_names": col_names, "files": file_data}
 
 
 # ──────────────────────────────────────────────────────────
@@ -608,6 +730,418 @@ class GraphPanel(QFrame):
 
 
 # ──────────────────────────────────────────────────────────
+# MapPanel  — 2D colour-map from saved .dat files
+# ──────────────────────────────────────────────────────────
+
+class MapPanel(QFrame):
+    """Right panel: 2D colour-map loaded from saved .dat files.
+
+    Workflow:
+      1. Browse to a folder containing .dat files (e.g. trace/YYYY-MM-DD/).
+      2. Select X / Y / Z columns.
+      3. Adjust range / colormap.
+      4. Click "Plot" — background thread loads files, UI renders.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self._col_names: List[str] = []
+        self._worker: Optional[_MapLoadWorker] = None
+        self._worker_thread: Optional[QThread] = None
+        self._build_ui()
+
+    # ── UI ────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
+
+        # ── Base folder row ──────────────────────────────
+        base_row = QHBoxLayout()
+        base_row.addWidget(QLabel("Base:"))
+        self._le_base = QLineEdit()
+        self._le_base.setFont(_MONO)
+        self._le_base.setPlaceholderText("main_folder/custom_folder 경로")
+        self._le_base.textChanged.connect(self._on_base_changed)
+        base_row.addWidget(self._le_base)
+        btn_browse = QPushButton("…")
+        btn_browse.setFixedWidth(28)
+        btn_browse.clicked.connect(self._browse_base)
+        base_row.addWidget(btn_browse)
+        root.addLayout(base_row)
+
+        # ── Phase / Date row ─────────────────────────────
+        phase_row = QHBoxLayout()
+        phase_row.addWidget(QLabel("Phase:"))
+        self._cb_phase = QComboBox()
+        self._cb_phase.setFont(_MONO)
+        self._cb_phase.setMinimumWidth(90)
+        self._cb_phase.currentTextChanged.connect(self._on_phase_changed)
+        phase_row.addWidget(self._cb_phase)
+        phase_row.addSpacing(8)
+        phase_row.addWidget(QLabel("Date:"))
+        self._cb_date = QComboBox()
+        self._cb_date.setFont(_MONO)
+        self._cb_date.setMinimumWidth(110)
+        phase_row.addWidget(self._cb_date)
+        btn_refresh = QPushButton("↻")
+        btn_refresh.setFixedWidth(28)
+        btn_refresh.setToolTip("폴더 다시 스캔")
+        btn_refresh.clicked.connect(lambda: self._on_base_changed(self._le_base.text()))
+        phase_row.addWidget(btn_refresh)
+        phase_row.addStretch()
+        root.addLayout(phase_row)
+
+        # ── Column selectors ────────────────────────────
+        col_row = QHBoxLayout()
+        col_row.addWidget(QLabel("X:"))
+        self._cb_x = QComboBox(); self._cb_x.setFont(_MONO); self._cb_x.setMinimumWidth(100)
+        col_row.addWidget(self._cb_x)
+        col_row.addSpacing(8)
+        col_row.addWidget(QLabel("Y:"))
+        self._cb_y = QComboBox(); self._cb_y.setFont(_MONO); self._cb_y.setMinimumWidth(100)
+        col_row.addWidget(self._cb_y)
+        col_row.addSpacing(8)
+        col_row.addWidget(QLabel("Z:"))
+        self._cb_z = QComboBox(); self._cb_z.setFont(_MONO); self._cb_z.setMinimumWidth(100)
+        col_row.addWidget(self._cb_z)
+        col_row.addStretch()
+        root.addLayout(col_row)
+
+        # ── Range / colormap controls ────────────────────
+        ctrl_row = QHBoxLayout()
+
+        ctrl_row.addWidget(QLabel("Z min:"))
+        self._le_zmin = QLineEdit(); self._le_zmin.setFont(_MONO); self._le_zmin.setFixedWidth(72)
+        ctrl_row.addWidget(self._le_zmin)
+        ctrl_row.addWidget(QLabel("max:"))
+        self._le_zmax = QLineEdit(); self._le_zmax.setFont(_MONO); self._le_zmax.setFixedWidth(72)
+        ctrl_row.addWidget(self._le_zmax)
+        self._cb_auto_z = QCheckBox("Auto Z")
+        self._cb_auto_z.setFont(_MONO)
+        self._cb_auto_z.setChecked(True)
+        self._cb_auto_z.stateChanged.connect(self._on_auto_z_changed)
+        ctrl_row.addWidget(self._cb_auto_z)
+
+        ctrl_row.addSpacing(12)
+        ctrl_row.addWidget(QLabel("Colormap:"))
+        self._cb_cmap = QComboBox()
+        self._cb_cmap.setFont(_MONO)
+        for name in _CMAP_NAMES:
+            self._cb_cmap.addItem(name)
+        ctrl_row.addWidget(self._cb_cmap)
+
+        ctrl_row.addStretch()
+        root.addLayout(ctrl_row)
+
+        # ── Action row ──────────────────────────────────
+        act_row = QHBoxLayout()
+        self._btn_plot = QPushButton("Plot")
+        self._btn_plot.setFont(_MONO)
+        self._btn_plot.setFixedWidth(80)
+        self._btn_plot.clicked.connect(self._on_plot)
+        act_row.addWidget(self._btn_plot)
+        self._lbl_status = QLabel("—")
+        self._lbl_status.setFont(_MONO)
+        self._lbl_status.setStyleSheet("color: #888888;")
+        act_row.addWidget(self._lbl_status)
+        act_row.addStretch()
+        btn_save = QPushButton("Save Image…")
+        btn_save.setFont(_MONO)
+        btn_save.clicked.connect(self._save_image)
+        act_row.addWidget(btn_save)
+        root.addLayout(act_row)
+
+        # ── pyqtgraph display ───────────────────────────
+        self._gv = pg.GraphicsLayoutWidget()
+        self._gv.setBackground("#0d1117")
+        root.addWidget(self._gv, stretch=1)
+
+        self._plot = self._gv.addPlot(row=0, col=0)
+        self._plot.setDefaultPadding(0.02)
+        self._img = pg.ImageItem()
+        self._plot.addItem(self._img)
+
+        self._cbar = pg.ColorBarItem(
+            colorMap=_CMAPS["Warming"],
+            label="",
+            interactive=True,
+        )
+        self._cbar.setImageItem(self._img, insert_in=self._plot)
+
+        # Initial state
+        self._on_auto_z_changed()
+
+    # ── Helpers ───────────────────────────────────────────
+
+    def _on_auto_z_changed(self) -> None:
+        manual = not self._cb_auto_z.isChecked()
+        self._le_zmin.setEnabled(manual)
+        self._le_zmax.setEnabled(manual)
+
+    def _browse_base(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Base 폴더 선택 (main_folder/custom_folder)", self._le_base.text() or ""
+        )
+        if folder:
+            self._le_base.setText(folder)
+
+    def set_base_folder(self, base: str) -> None:
+        """외부(DoubleSweepWindow)에서 base 경로 자동 설정."""
+        if base:
+            self._le_base.setText(base)
+
+    def _on_base_changed(self, text: str) -> None:
+        """Base 폴더가 바뀌면 phase 콤보박스를 재스캔."""
+        base = Path(text.strip()) if text.strip() else None
+        self._cb_phase.blockSignals(True)
+        self._cb_phase.clear()
+        if base and base.is_dir():
+            for name in ("trace", "retrace", "dummy"):
+                if (base / name).is_dir():
+                    self._cb_phase.addItem(name)
+        if self._cb_phase.count() == 0:
+            self._cb_phase.addItem("(없음)")
+        self._cb_phase.blockSignals(False)
+        self._on_phase_changed(self._cb_phase.currentText())
+
+    def _on_phase_changed(self, phase: str) -> None:
+        """Phase 콤보박스가 바뀌면 date 서브폴더를 재스캔."""
+        base = Path(self._le_base.text().strip())
+        phase_dir = base / phase if base and base.is_dir() else None
+        self._cb_date.blockSignals(True)
+        prev_date = self._cb_date.currentText()
+        self._cb_date.clear()
+        if phase_dir and phase_dir.is_dir():
+            date_dirs = sorted(
+                [d.name for d in phase_dir.iterdir() if d.is_dir()],
+                reverse=True,   # 최신 날짜 먼저
+            )
+            for d in date_dirs:
+                self._cb_date.addItem(d)
+        if self._cb_date.count() == 0:
+            self._cb_date.addItem("(없음)")
+        # Restore previous selection if still available
+        idx = self._cb_date.findText(prev_date)
+        if idx >= 0:
+            self._cb_date.setCurrentIndex(idx)
+        self._cb_date.blockSignals(False)
+
+    def _get_target_folder(self) -> str:
+        """현재 선택된 base/phase/date로부터 실제 .dat 폴더 경로 반환."""
+        base = self._le_base.text().strip()
+        phase = self._cb_phase.currentText()
+        date = self._cb_date.currentText()
+        if not base or phase.startswith("(") or date.startswith("("):
+            return ""
+        return str(Path(base) / phase / date)
+
+    def _update_column_combos(self, col_names: List[str]) -> None:
+        if col_names == self._col_names:
+            return
+        self._col_names = col_names
+        prev = {
+            "x": self._cb_x.currentText(),
+            "y": self._cb_y.currentText(),
+            "z": self._cb_z.currentText(),
+        }
+        for cb in (self._cb_x, self._cb_y, self._cb_z):
+            cb.blockSignals(True)
+            cb.clear()
+            for name in col_names:
+                cb.addItem(name)
+            cb.blockSignals(False)
+        # Restore or smart-default
+        def _restore(cb, prev_val, default_idx):
+            idx = cb.findText(prev_val)
+            cb.setCurrentIndex(idx if idx >= 0 else min(default_idx, cb.count() - 1))
+        _restore(self._cb_x, prev["x"], 0)
+        _restore(self._cb_y, prev["y"], 1 if len(col_names) > 1 else 0)
+        _restore(self._cb_z, prev["z"], len(col_names) - 1)
+
+    # ── Plot action ───────────────────────────────────────
+
+    def _on_plot(self) -> None:
+        folder = self._get_target_folder()
+        if not folder:
+            self._lbl_status.setText("Base 폴더 / Phase / Date를 선택하세요.")
+            return
+
+        # Stop any running worker
+        if self._worker_thread and self._worker_thread.isRunning():
+            self._worker_thread.quit()
+            self._worker_thread.wait()
+
+        self._btn_plot.setEnabled(False)
+        self._lbl_status.setText("Loading files…")
+
+        self._worker = _MapLoadWorker(folder)
+        self._worker_thread = QThread()
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._on_data_loaded)
+        self._worker.error.connect(self._on_load_error)
+        self._worker_thread.start()
+
+    @Slot(dict)
+    def _on_data_loaded(self, data: dict) -> None:
+        if self._worker_thread:
+            self._worker_thread.quit()
+        self._btn_plot.setEnabled(True)
+
+        col_names: List[str] = data["col_names"]
+        file_data = data["files"]   # [(fname, rows), ...]
+
+        self._update_column_combos(col_names)
+
+        x_col = self._cb_x.currentText()
+        y_col = self._cb_y.currentText()
+        z_col = self._cb_z.currentText()
+
+        for col in (x_col, y_col, z_col):
+            if col not in col_names:
+                self._lbl_status.setText(f"Column '{col}' not found.")
+                return
+
+        xi = col_names.index(x_col)
+        yi = col_names.index(y_col)
+        zi = col_names.index(z_col)
+
+        # Build per-file arrays; sort files by mean-Y
+        file_rows = []
+        for fname, rows in file_data:
+            if not rows:
+                continue
+            arr = np.array(rows, dtype=np.float64)   # (n_pts, n_cols)
+            file_rows.append((float(np.mean(arr[:, yi])), arr[:, xi], arr[:, zi]))
+
+        if not file_rows:
+            self._lbl_status.setText("데이터 없음.")
+            return
+
+        file_rows.sort(key=lambda t: t[0])  # sort by Y value
+
+        # Use the longest x array as the common grid
+        x_ref = max(file_rows, key=lambda t: len(t[1]))[1]
+        x_ref = np.sort(x_ref)
+
+        rows_2d = []
+        y_vals = []
+        for y_val, x_arr, z_arr in file_rows:
+            sort_i = np.argsort(x_arr)
+            z_interp = np.interp(x_ref, x_arr[sort_i], z_arr[sort_i],
+                                 left=np.nan, right=np.nan)
+            rows_2d.append(z_interp)
+            y_vals.append(y_val)
+
+        img = np.array(rows_2d, dtype=np.float64)   # (n_y, n_x)
+        y_arr = np.array(y_vals, dtype=np.float64)
+
+        self._render_image(img, x_ref, y_arr, x_col, y_col, z_col)
+
+    @Slot(str)
+    def _on_load_error(self, msg: str) -> None:
+        if self._worker_thread:
+            self._worker_thread.quit()
+        self._btn_plot.setEnabled(True)
+        self._lbl_status.setText(f"Error: {msg}")
+
+    # ── Rendering ─────────────────────────────────────────
+
+    def _render_image(
+        self,
+        img: np.ndarray,
+        x_vals: np.ndarray,
+        y_vals: np.ndarray,
+        x_col: str,
+        y_col: str,
+        z_col: str,
+    ) -> None:
+        finite = img[np.isfinite(img)]
+        if finite.size == 0:
+            self._lbl_status.setText("유한한 데이터 없음.")
+            return
+
+        # Z range
+        if self._cb_auto_z.isChecked():
+            z_min, z_max = float(finite.min()), float(finite.max())
+        else:
+            try:
+                z_min = float(self._le_zmin.text())
+                z_max = float(self._le_zmax.text())
+            except ValueError:
+                z_min, z_max = float(finite.min()), float(finite.max())
+        if z_min == z_max:
+            z_max = z_min + 1.0
+
+        # Update manual range fields
+        self._le_zmin.setText(f"{z_min:.5g}")
+        self._le_zmax.setText(f"{z_max:.5g}")
+
+        # Apply colormap LUT
+        lut = _get_lut(self._cb_cmap.currentText())
+        self._img.setLookupTable(lut)
+        self._cbar.setColorMap(_CMAPS.get(self._cb_cmap.currentText(), _CMAPS["Warming"]))
+
+        # Scale image to [0, 255] for LUT
+        img_disp = np.where(np.isfinite(img), img, z_min)
+        img_scaled = ((img_disp - z_min) / (z_max - z_min) * 255).clip(0, 255).astype(np.float32)
+
+        # img shape: (n_y, n_x) — ImageItem expects (width, height) = (n_x, n_y)
+        self._img.setImage(img_scaled.T, autoLevels=False, levels=(0, 255))
+
+        # Physical extent
+        n_y, n_x = img.shape
+        if n_x > 1:
+            x0, x1 = float(x_vals[0]), float(x_vals[-1])
+            dx = (x1 - x0) / (n_x - 1)
+        else:
+            x0, dx = float(x_vals[0]) if len(x_vals) else 0.0, 1.0
+        if n_y > 1:
+            y0, y1 = float(y_vals[0]), float(y_vals[-1])
+            dy = (y1 - y0) / (n_y - 1)
+        else:
+            y0, dy = float(y_vals[0]) if len(y_vals) else 0.0, 1.0
+
+        self._img.setRect(
+            x0 - dx / 2, y0 - dy / 2,
+            n_x * dx, n_y * dy,
+        )
+
+        self._plot.setLabel("bottom", x_col)
+        self._plot.setLabel("left", y_col)
+        self._cbar.setLevels((z_min, z_max))
+        self._cbar.setLabel("right", z_col)
+
+        self._lbl_status.setText(
+            f"{n_y} 파일 × {n_x} 포인트 | Z [{z_min:.4g}, {z_max:.4g}]"
+        )
+
+    # ── Save image ────────────────────────────────────────
+
+    def _save_image(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Map Image", "", "PNG Image (*.png);;All Files (*)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        pixmap = self._gv.grab()
+        if not pixmap.save(path, "PNG"):
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Save Failed", f"Could not save:\n{path}")
+
+    def closeEvent(self, event) -> None:
+        if self._worker_thread and self._worker_thread.isRunning():
+            self._worker_thread.quit()
+            self._worker_thread.wait()
+        super().closeEvent(event)
+
+
+# ──────────────────────────────────────────────────────────
 # GraphWindow
 # ──────────────────────────────────────────────────────────
 
@@ -649,10 +1183,10 @@ class GraphWindow(QWidget):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        # Toolbar
+        # ── Toolbar ──────────────────────────────────────
         bar = QHBoxLayout()
         btn_add = QPushButton("＋ Add Graph")
-        btn_add.setToolTip("Add a new graph panel")
+        btn_add.setToolTip("Add a new XY graph panel (left side)")
         btn_add.clicked.connect(self._add_panel)
         btn_clear = QPushButton("Clear Data")
         btn_clear.setToolTip("Clear all stored data (does not stop sweep)")
@@ -662,20 +1196,43 @@ class GraphWindow(QWidget):
         btn_save_img.clicked.connect(self._save_image)
         bar.addWidget(btn_add)
         bar.addWidget(btn_clear)
-        bar.addWidget(btn_save_img)
+        bar.addSpacing(12)
+        self._btn_map = QPushButton("2D Map")
+        self._btn_map.setCheckable(True)
+        self._btn_map.setToolTip("오른쪽 패널을 2D colour-map 모드로 전환")
+        self._btn_map.toggled.connect(self._toggle_map)
+        bar.addWidget(self._btn_map)
         bar.addStretch()
+        bar.addWidget(btn_save_img)
         root.addLayout(bar)
 
-        # Scrollable panel container
+        # ── Splitter: left (XY panels) | right (MapPanel) ──
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Left side: scrollable XY panels
+        left_w = QWidget()
+        left_lay = QVBoxLayout(left_w)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(0)
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll_content = QWidget()
         self._panel_layout = QVBoxLayout(self._scroll_content)
         self._panel_layout.setSpacing(6)
         self._panel_layout.setContentsMargins(0, 0, 0, 0)
-        self._panel_layout.addStretch()     # keeps panels top-aligned
+        self._panel_layout.addStretch()
         self._scroll.setWidget(self._scroll_content)
-        root.addWidget(self._scroll)
+        left_lay.addWidget(self._scroll)
+        self._splitter.addWidget(left_w)
+
+        # Right side: MapPanel (hidden by default)
+        self._map_panel = MapPanel()
+        self._map_panel.setVisible(False)
+        self._splitter.addWidget(self._map_panel)
+
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 0)
+        root.addWidget(self._splitter)
 
     # Session -----------------------------------------------------------------
 
@@ -705,6 +1262,10 @@ class GraphWindow(QWidget):
             panel.ensure_phases([phase])   # idempotent: no-op if curve exists
             panel.mark_dirty()
 
+    def update_map_base(self, base_folder: str) -> None:
+        """Double Sweep 시작 시 2D Map 패널의 base 폴더 자동 설정."""
+        self._map_panel.set_base_folder(base_folder)
+
     # Panel management --------------------------------------------------------
 
     def _add_panel(self) -> None:
@@ -731,6 +1292,14 @@ class GraphWindow(QWidget):
             panel.reset_phases()
             panel.ensure_phases(["_"])
 
+    def _toggle_map(self, checked: bool) -> None:
+        self._map_panel.setVisible(checked)
+        if checked:
+            w = self.width()
+            self._splitter.setSizes([w * 55 // 100, w * 45 // 100])
+        else:
+            self._splitter.setSizes([self.width(), 0])
+
     # Redraw ------------------------------------------------------------------
 
     def _redraw_all(self) -> None:
@@ -738,9 +1307,7 @@ class GraphWindow(QWidget):
             panel.redraw()
 
     def _save_image(self) -> None:
-        """Export all visible panels to a PNG file."""
-        from PySide6.QtWidgets import QFileDialog
-
+        """Export visible panels to a PNG file."""
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Graph Image", "", "PNG Image (*.png);;All Files (*)"
         )
@@ -749,12 +1316,8 @@ class GraphWindow(QWidget):
         if not path.lower().endswith(".png"):
             path += ".png"
 
-        # Grab the scroll content widget as a pixmap
-        from PySide6.QtGui import QPixmap
-        pixmap = self._scroll_content.grab()
-        if pixmap.save(path, "PNG"):
-            pass  # success — no dialog needed
-        else:
+        pixmap = self._splitter.grab()
+        if not pixmap.save(path, "PNG"):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Save Failed", f"Could not save image to:\n{path}")
 

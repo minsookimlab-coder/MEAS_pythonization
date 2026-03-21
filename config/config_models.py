@@ -1,6 +1,6 @@
 import re
 from enum import Enum
-from typing import Dict, Any, Literal, Optional, List
+from typing import Dict, Any, Literal, Optional, List, Tuple
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -141,6 +141,14 @@ class ParameterManagerProfile(BaseModel):
 # Main UI Profile — 파라미터가 채워진 인스턴스화된 항목
 # ---------------------------------------------------------------------------
 
+class MeasType(str, Enum):
+    """측정 채널 종류 — 데이터 저장 컬럼 이름 규칙에 영향."""
+    NONE        = "none"
+    CONTACT     = "contact"
+    TEMPERATURE = "temperature"
+    BFIELD      = "bfield"
+
+
 class InstantiatedMeasurement(BaseModel):
     """파라미터가 모두 채워진 측정 항목."""
     alias: str
@@ -150,6 +158,8 @@ class InstantiatedMeasurement(BaseModel):
     unit: str = ""
     fill_params: Dict[str, str] = Field(default_factory=dict)  # 원본 입력값 (재편집용)
     axis_suffix: str = ""   # user-defined suffix appended to figure_axis in data files
+    meas_type: MeasType = MeasType.NONE  # contact → column = "contact_{suffix}"
+    checked: bool = True    # main UI 체크박스 상태 — 프로파일에 저장됨
 
 
 class InstantiatedSweepValue(BaseModel):
@@ -198,10 +208,66 @@ class InstantiatedSecondSweepChannel(BaseModel):
     feedback_read_cmd: str = ""
     feedback_poll_interval: float = 1.0   # seconds
     feedback_tolerance_pct: float = 95.0  # %: |V_read-V_prev|/|V_next-V_prev| >= pct/100
+    # FEEDBACK stability check: after reaching tolerance, keep polling and require
+    # stability metric = SD / (max(|mean|, |next_v|) + noisefloor) < std_threshold
+    feedback_std_window: int = 0          # 0 = disabled; N > 0 activates stability check
+    feedback_noisefloor: float = 0.0      # same units as measurement; prevents /0 near zero
+    feedback_std_threshold: float = 0.01  # dimensionless; e.g. 0.01 = 1 %
     # WAIT_FOR_TIME type
     wait_time: float = 1.0
     figure_axis: str = ""
     unit: str = ""
+
+
+class AlarmOperator(str, Enum):
+    """측정값 비교 연산자."""
+    GT  = ">"
+    LT  = "<"
+    GTE = ">="
+    LTE = "<="
+    EQ  = "=="
+    NEQ = "!="
+
+
+class AlarmTrigger(BaseModel):
+    """알람 트리거 조건 하나."""
+    enabled: bool = True
+    kind: Literal["measurement", "comm_error", "meas_error"] = "comm_error"
+    # kind == "measurement" 일 때만 사용
+    meas_description: str = ""
+    operator: AlarmOperator = AlarmOperator.GT
+    threshold: float = 0.0
+
+
+class AlarmConfig(BaseModel):
+    """알람 전체 설정 (Double Sweep 전용)."""
+    enabled: bool = False
+    use_sound: bool = True
+    use_email: bool = False
+    email_to: str = ""
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    fire_on_complete: bool = False   # 모든 array 완료 시 알람
+    triggers: List[AlarmTrigger] = Field(default_factory=list)
+
+
+class MetaDataEntry(BaseModel):
+    """메타 데이터 기록용 VISA 쿼리 항목 — 스윕 종료 시 한 번 쿼리."""
+    alias: str
+    description: str
+    resolved_cmd: str
+    figure_axis: str = ""
+    unit: str = ""
+    enabled: bool = True
+    meas_type: MeasType = MeasType.NONE
+
+
+class MetaDataConfig(BaseModel):
+    """메타 데이터 전체 설정 (Single/Double Sweep 공통)."""
+    enabled: bool = False
+    entries: List[MetaDataEntry] = Field(default_factory=list)
 
 
 class DoubleSweepConfig(BaseModel):
@@ -222,6 +288,8 @@ class DoubleSweepConfig(BaseModel):
     second_use_safety: bool = False
     second_safety_steps: int = 0
     second_safety_interval_ms: float = 0.0
+    # Alarm
+    alarm: AlarmConfig = Field(default_factory=AlarmConfig)
 
 
 class MainUIProfile(BaseModel):
@@ -230,6 +298,10 @@ class MainUIProfile(BaseModel):
     measurements: List[InstantiatedMeasurement] = Field(default_factory=list)
     write_cmds: List[InstantiatedWriteCmd] = Field(default_factory=list)
     second_sweep_channels: List[InstantiatedSecondSweepChannel] = Field(default_factory=list)
+    # 알람 계층 — Parameter Manager에서 지정, Double Sweep AlarmPanel combo 소스
+    alarm_measurements: List[InstantiatedMeasurement] = Field(default_factory=list)
+    # 메타 데이터 계층 — Parameter Manager에서 지정, MetaDataConfig.entries로 변환됨
+    meta_data_measurements: List[InstantiatedMeasurement] = Field(default_factory=list)
 
 
 class FullProfile(BaseModel):
@@ -249,6 +321,8 @@ class FullProfile(BaseModel):
     save_enabled: bool = False
     # Double sweep
     double_sweep: DoubleSweepConfig = Field(default_factory=DoubleSweepConfig)
+    # Meta data
+    meta_data: MetaDataConfig = Field(default_factory=MetaDataConfig)
 
 
 # ---------------------------------------------------------------------------

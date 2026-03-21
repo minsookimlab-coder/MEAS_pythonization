@@ -1,6 +1,6 @@
 # Pythonization — 시스템 구조
 
-> Last updated: 2026-03-20 | Version: 1.0
+> Last updated: 2026-03-20 | Version: 1.01
 
 ---
 
@@ -21,6 +21,7 @@ pythonization/
 │   ├── sweep.py                    SweepConfig + calculate_next_step()
 │   ├── sweep_worker.py             SweepWorker (QThread — VISA I/O)
 │   ├── second_channel_worker.py    SecondChannelWorker (QThread — double sweep)
+│   ├── alarm_manager.py            AlarmManager — 사운드/이메일 알람 발동
 │   ├── derivative_channel.py       실시간 dA/dB 계산 (슬라이딩 윈도우)
 │   ├── data_saver.py               .dat 파일 저장
 │   ├── visa_library_registry.py    visa_libraries.yaml 로더/저장
@@ -37,7 +38,7 @@ pythonization/
 │   ├── parameter_manager_window.py ParameterManagerWindow — 측정 항목 구성
 │   ├── visa_library_window.py      VisaLibraryWindow — VISA 명령어 라이브러리
 │   ├── graph_window.py             GraphWindow — 실시간 그래프
-│   ├── double_sweep_window.py      DoubleSweepWindow — 이중 파라미터 스윕
+│   ├── double_sweep_window.py      DoubleSweepWindow + AlarmPanel — 이중 파라미터 스윕 + 알람
 │   ├── instrument_settings_ui.py   InstrumentSettingsUI — 하드웨어 설정
 │   ├── debug_window.py             DebugWindow — VISA 로그 + 콘솔
 │   ├── data_window.py              DataWindow — 현재 측정값 테이블

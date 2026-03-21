@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QGroupBox, QScrollArea, QWidget, QCheckBox,
     QMessageBox, QFrame, QSpinBox, QDoubleSpinBox,
+    QSplitter, QSizePolicy,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
@@ -22,6 +23,7 @@ from config.config_models import (
     InstantiatedMeasurement, InstantiatedSweepValue, InstantiatedWriteCmd,
     InstantiatedSecondSweepChannel, SecondSweepAdvanceType, MainUIProfile,
     MeasurementParamDef, SweepValueDef, WriteCmdDef,
+    MetaDataConfig, MetaDataEntry, MeasType,
 )
 from core.visa_library_registry import VisaLibraryRegistry
 from core.profile_registry import ProfileRegistry
@@ -250,14 +252,47 @@ class AddEntryDialog(QDialog):
         self._fb_widget = QWidget()
         fb_form = QFormLayout(self._fb_widget)
         fb_form.setContentsMargins(0, 0, 0, 0)
-        self._le_fb_cmd  = QLineEdit()
-        self._le_fb_cmd.setFont(_MONO)
-        self._le_fb_cmd.setPlaceholderText("e.g. print(smua.measure.v())")
+        self._combo_fb_cmd = QComboBox()
+        self._combo_fb_cmd.setFont(_MONO)
+        self._combo_fb_cmd.setMinimumWidth(200)
         self._le_fb_poll = QLineEdit("1.0")
         self._le_fb_tol  = QLineEdit("95.0")
-        fb_form.addRow("Feedback Read Cmd:", self._le_fb_cmd)
+        fb_form.addRow("Feedback Read Cmd:", self._combo_fb_cmd)
         fb_form.addRow("Poll Interval (s):",  self._le_fb_poll)
         fb_form.addRow("Tolerance (%):",      self._le_fb_tol)
+
+        # Stability check (std dev) — phase 2 after threshold reached
+        fb_sep = QFrame()
+        fb_sep.setFrameShape(QFrame.Shape.HLine)
+        fb_sep.setStyleSheet("color: #30363d;")
+        fb_form.addRow(fb_sep)
+        fb_stab_lbl = QLabel("Stability Check (after threshold):")
+        fb_stab_lbl.setStyleSheet("color: #79c0ff; font-size: 11px;")
+        fb_form.addRow(fb_stab_lbl)
+
+        self._sb_fb_std_window = QSpinBox()
+        self._sb_fb_std_window.setRange(0, 1000)
+        self._sb_fb_std_window.setValue(0)
+        self._sb_fb_std_window.setSpecialValueText("disabled")
+        self._sb_fb_std_window.setToolTip(
+            "Threshold 도달 후 추가 폴링 샘플 수.\n"
+            "0 = 비활성화 (기존 동작).\n"
+            "N > 0 이면 최근 N개 측정값의 std dev < Threshold가 될 때 진행."
+        )
+        self._le_fb_noisefloor = QLineEdit("0.0")
+        self._le_fb_noisefloor.setToolTip(
+            "측정값과 같은 단위의 기기 노이즈 하한선.\n"
+            "분모 = max(|mean|, |next_v|) + noisefloor 에서 /0 방지 및 zero 신호 보호."
+        )
+        self._le_fb_std_threshold = QLineEdit("0.01")
+        self._le_fb_std_threshold.setToolTip(
+            "무차원 안정성 기준 (예: 0.01 = 1%).\n"
+            "metric = SD / (max(|mean|, |next_v|) + noisefloor) < 이 값이면 안정 판정."
+        )
+        fb_form.addRow("Std Window (n):",       self._sb_fb_std_window)
+        fb_form.addRow("Noise Floor:",           self._le_fb_noisefloor)
+        fb_form.addRow("Stability Threshold:",   self._le_fb_std_threshold)
+
         second_layout.addWidget(self._fb_widget)
 
         # WAIT_FOR_TIME fields
@@ -273,6 +308,9 @@ class AddEntryDialog(QDialog):
         self._combo_advance.currentIndexChanged.connect(self._update_advance_visibility)
         self._combo_source_type.currentIndexChanged.connect(self._update_advance_options)
         self._second_widget.setVisible(self._section_type == 'second')
+
+        # Feedback cmd combobox: refresh when alias changes
+        self._combo_alias.currentTextChanged.connect(self._refresh_fb_cmd_combo)
 
         # ── OK / Cancel ───────────────────────────────────────────────
         btn_row = QHBoxLayout()
@@ -293,7 +331,21 @@ class AddEntryDialog(QDialog):
         # Initial population
         if aliases:
             self._refresh_entry_combo(aliases[0])
+            self._refresh_fb_cmd_combo(aliases[0])
         self._update_advance_visibility(0)
+
+    def _refresh_fb_cmd_combo(self, alias: str = ""):
+        """Feedback read cmd 콤보박스를 선택된 alias의 measurement 목록으로 갱신."""
+        if not hasattr(self, '_combo_fb_cmd'):
+            return
+        alias = alias or self._combo_alias.currentText()
+        self._combo_fb_cmd.blockSignals(True)
+        self._combo_fb_cmd.clear()
+        lib = self._lib_reg.get_library(alias)
+        for m in lib.measurements:
+            label = f"{m.description}  [{_truncate(m.cmd_query, 50)}]"
+            self._combo_fb_cmd.addItem(label, m.cmd_query)
+        self._combo_fb_cmd.blockSignals(False)
 
     def _refresh_entry_combo(self, alias: str):
         self._combo_entry.blockSignals(True)
@@ -461,6 +513,7 @@ class AddEntryDialog(QDialog):
         at = self._combo_advance.itemData(idx)
         self._fb_widget.setVisible(at == SecondSweepAdvanceType.FEEDBACK)
         self._wait_widget.setVisible(at == SecondSweepAdvanceType.WAIT_FOR_TIME)
+        self._update_fb_cmd_state()
 
     def _update_advance_options(self, idx: int):
         source_type = self._combo_source_type.itemData(idx)
@@ -468,13 +521,29 @@ class AddEntryDialog(QDialog):
             at = self._combo_advance.itemData(i)
             item = self._combo_advance.model().item(i)
             if item:
-                if source_type == "write_cmd" and at in (
-                    SecondSweepAdvanceType.SWEEP,
-                    SecondSweepAdvanceType.FEEDBACK,
-                ):
+                # write_cmd에서는 SWEEP만 비활성 (FEEDBACK은 허용)
+                if source_type == "write_cmd" and at == SecondSweepAdvanceType.SWEEP:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
                 else:
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEnabled)
+        self._update_fb_cmd_state()
+
+    def _update_fb_cmd_state(self):
+        """source_type에 따라 feedback read cmd 콤보박스 활성/비활성 전환."""
+        if not hasattr(self, '_combo_fb_cmd'):
+            return
+        source_type = self._combo_source_type.currentData()
+        at = self._combo_advance.currentData()
+        if at != SecondSweepAdvanceType.FEEDBACK:
+            return
+        is_sweep_val = (source_type == "sweep_value")
+        self._combo_fb_cmd.setEnabled(not is_sweep_val)
+        if is_sweep_val:
+            self._combo_fb_cmd.setToolTip(
+                "Sweep Value의 Paired Read Command가 자동으로 사용됩니다."
+            )
+        else:
+            self._combo_fb_cmd.setToolTip("")
 
     # ------------------------------------------------------------------
     # Pre-fill from existing entry (Edit mode)
@@ -548,9 +617,17 @@ class AddEntryDialog(QDialog):
                     self._combo_advance.setCurrentIndex(i)
                     break
             self._update_advance_visibility(self._combo_advance.currentIndex())
-            self._le_fb_cmd.setText(p.feedback_read_cmd)
+            # Feedback read cmd: select by stored cmd_query
+            self._refresh_fb_cmd_combo(p.alias)
+            for i in range(self._combo_fb_cmd.count()):
+                if self._combo_fb_cmd.itemData(i) == p.feedback_read_cmd:
+                    self._combo_fb_cmd.setCurrentIndex(i)
+                    break
             self._le_fb_poll.setText(str(p.feedback_poll_interval))
             self._le_fb_tol.setText(str(p.feedback_tolerance_pct))
+            self._sb_fb_std_window.setValue(p.feedback_std_window)
+            self._le_fb_noisefloor.setText(str(p.feedback_noisefloor))
+            self._le_fb_std_threshold.setText(str(p.feedback_std_threshold))
             self._le_wait.setText(str(p.wait_time))
 
     # ------------------------------------------------------------------
@@ -716,13 +793,22 @@ class AddEntryDialog(QDialog):
                     paired_read_cmd = paired_read_cmd.replace(f"{{{ph}}}", val if val != '[SWEEP]' else val)
 
             if at == SecondSweepAdvanceType.FEEDBACK:
-                fb_cmd = self._le_fb_cmd.text().strip()
+                if source_type == "sweep_value":
+                    # Paired read command를 feedback read로 자동 사용
+                    fb_cmd = paired_read_cmd
+                else:
+                    fb_cmd = self._combo_fb_cmd.currentData() or ""
                 if not fb_cmd:
-                    QMessageBox.warning(self, "Validation", "Feedback read command is required.")
+                    QMessageBox.warning(self, "Validation",
+                        "Feedback read command is required.\n"
+                        "VISA 라이브러리에 measurement 항목을 추가한 후 선택하세요.")
                     return
                 try:
-                    fb_poll = float(self._le_fb_poll.text().strip())
-                    fb_tol  = float(self._le_fb_tol.text().strip())
+                    fb_poll    = float(self._le_fb_poll.text().strip())
+                    fb_tol     = float(self._le_fb_tol.text().strip())
+                    fb_std_win = self._sb_fb_std_window.value()
+                    fb_nf      = float(self._le_fb_noisefloor.text().strip())
+                    fb_std_thr = float(self._le_fb_std_threshold.text().strip())
                 except ValueError:
                     QMessageBox.warning(self, "Validation", "Feedback parameters must be numbers.")
                     return
@@ -733,6 +819,9 @@ class AddEntryDialog(QDialog):
                     feedback_read_cmd=fb_cmd,
                     feedback_poll_interval=fb_poll,
                     feedback_tolerance_pct=fb_tol,
+                    feedback_std_window=fb_std_win,
+                    feedback_noisefloor=fb_nf,
+                    feedback_std_threshold=fb_std_thr,
                     figure_axis=axis, unit=unit,
                 )
             elif at == SecondSweepAdvanceType.WAIT_FOR_TIME:
@@ -971,6 +1060,117 @@ class SectionPanel(QGroupBox):
 
 
 # ---------------------------------------------------------------------------
+# RightMeasPanel — 우측 패널용 compact 측정값 목록 패널
+# ---------------------------------------------------------------------------
+
+
+class RightMeasPanel(QGroupBox):
+    """
+    Parameter Manager 우측 패널용 compact 섹션.
+    라이브러리에서 측정값(measurement)을 추가/삭제하는 일관된 UI.
+    세부 설정(조건, 활성화 등)은 담당 창에서 관리.
+    """
+
+    def __init__(
+        self,
+        title: str,
+        color: str,
+        lib_registry: VisaLibraryRegistry,
+        parent=None,
+    ):
+        super().__init__(title, parent)
+        self.setStyleSheet(f"QGroupBox {{ font-weight: bold; color: {color}; }}")
+        self._lib_reg = lib_registry
+        self._items: List[InstantiatedMeasurement] = []
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 14, 6, 6)
+        layout.setSpacing(4)
+
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["Alias", "Description", "Unit"])
+        self._table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setMinimumHeight(80)
+        self._table.cellDoubleClicked.connect(self._edit)
+        layout.addWidget(self._table)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+        btn_add  = QPushButton("Add")
+        btn_edit = QPushButton("Edit")
+        btn_del  = QPushButton("Delete")
+        for btn in (btn_add, btn_edit, btn_del):
+            btn.setFixedHeight(22)
+        btn_add.clicked.connect(self._add)
+        btn_edit.clicked.connect(self._edit)
+        btn_del.clicked.connect(self._delete)
+        btn_row.addWidget(btn_add)
+        btn_row.addWidget(btn_edit)
+        btn_row.addWidget(btn_del)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+    def load_items(self, items: List[InstantiatedMeasurement]):
+        self._items = list(items)
+        self._refresh_table()
+
+    def get_items(self) -> List[InstantiatedMeasurement]:
+        return list(self._items)
+
+    def _refresh_table(self):
+        self._table.setRowCount(len(self._items))
+        for row, item in enumerate(self._items):
+            for col, text in enumerate([item.alias, item.description, item.unit]):
+                cell = QTableWidgetItem(str(text))
+                cell.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self._table.setItem(row, col, cell)
+
+    def _add(self):
+        dlg = AddEntryDialog(self._lib_reg, 'measurement', self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            result = dlg.get_result()
+            if result is not None:
+                self._items.append(result)
+                self._refresh_table()
+                self._table.selectRow(len(self._items) - 1)
+
+    def _edit(self):
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._items):
+            return
+        dlg = AddEntryDialog(
+            self._lib_reg, 'measurement', self, prefill=self._items[row]
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            result = dlg.get_result()
+            if result is not None:
+                self._items[row] = result
+                self._refresh_table()
+                self._table.selectRow(row)
+
+    def _delete(self):
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._items):
+            return
+        self._items.pop(row)
+        self._refresh_table()
+
+
+
+# ---------------------------------------------------------------------------
 # ParameterManagerWindow
 # ---------------------------------------------------------------------------
 
@@ -992,7 +1192,7 @@ class ParameterManagerWindow(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Parameter Manager")
-        self.resize(900, 680)
+        self.resize(1180, 700)
         self.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowMinimizeButtonHint |
@@ -1015,11 +1215,15 @@ class ParameterManagerWindow(QDialog):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(8)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
+        # ── Horizontal splitter: 좌측(섹션 패널) / 우측(알람+메타데이터) ──
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # ── 좌측 패널 ────────────────────────────────────────────────
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        left_content = QWidget()
+        content_layout = QVBoxLayout(left_content)
         content_layout.setSpacing(10)
         content_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -1051,8 +1255,37 @@ class ParameterManagerWindow(QDialog):
         content_layout.addWidget(self._panel_second)
 
         content_layout.addStretch()
-        scroll.setWidget(content)
-        outer.addWidget(scroll)
+        left_scroll.setWidget(left_content)
+        splitter.addWidget(left_scroll)
+
+        # ── 우측 패널 ────────────────────────────────────────────────
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        right_scroll.setMinimumWidth(260)
+
+        right_content = QWidget()
+        right_layout = QVBoxLayout(right_content)
+        right_layout.setContentsMargins(4, 0, 0, 0)
+        right_layout.setSpacing(10)
+
+        self._alarm_panel = RightMeasPanel("Alarm Measurements", "#ffa657", self._lib_reg)
+        right_layout.addWidget(self._alarm_panel)
+
+        sep_v = QFrame()
+        sep_v.setFrameShape(QFrame.Shape.HLine)
+        sep_v.setStyleSheet("color: #30363d;")
+        right_layout.addWidget(sep_v)
+
+        self._meta_panel = RightMeasPanel("Meta Data Measurements", "#56d364", self._lib_reg)
+        right_layout.addWidget(self._meta_panel)
+
+        right_layout.addStretch()
+        right_scroll.setWidget(right_content)
+        splitter.addWidget(right_scroll)
+
+        splitter.setSizes([780, 320])
+        outer.addWidget(splitter, stretch=1)
 
         # Bottom buttons
         btn_row = QHBoxLayout()
@@ -1077,15 +1310,42 @@ class ParameterManagerWindow(QDialog):
         self._panel_sweep.load_items(mui.sweep_values)
         self._panel_meas.load_items(mui.measurements)
         self._panel_second.load_items(mui.second_sweep_channels)
+        self._alarm_panel.load_items(mui.alarm_measurements)
+        self._meta_panel.load_items(mui.meta_data_measurements)
 
     def _on_apply(self):
+        alarm_meas = self._alarm_panel.get_items()
+        meta_meas  = self._meta_panel.get_items()
         profile = MainUIProfile(
             sweep_values=self._panel_sweep.get_items(),
             measurements=self._panel_meas.get_items(),
             write_cmds=[],
             second_sweep_channels=self._panel_second.get_items(),
+            alarm_measurements=alarm_meas,
+            meta_data_measurements=meta_meas,
         )
         self._reg.save_main_ui(profile)
+
+        # meta_data_measurements → MetaDataConfig.entries (기존 enabled 상태 보존)
+        existing_meta = self._reg.meta_data_config
+        existing_map  = {(e.alias, e.description): e for e in existing_meta.entries}
+        new_entries = [
+            MetaDataEntry(
+                alias=m.alias,
+                description=m.description,
+                resolved_cmd=m.resolved_cmd,
+                figure_axis=m.figure_axis,
+                unit=m.unit,
+                enabled=existing_map[(m.alias, m.description)].enabled
+                        if (m.alias, m.description) in existing_map else True,
+                meas_type=m.meas_type,
+            )
+            for m in meta_meas
+        ]
+        self._reg.save_meta_data_config(
+            MetaDataConfig(enabled=existing_meta.enabled, entries=new_entries)
+        )
+
         self.selection_applied.emit(profile)
         self.hide()
 

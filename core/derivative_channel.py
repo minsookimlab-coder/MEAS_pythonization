@@ -7,12 +7,13 @@ DerivativeChannel: 슬라이딩 윈도우 기반 실시간 dA1/dA2 계산.
 - scipy 없으면 자동으로 Linear Regression fallback
 - div/zero 방지: min_delta 임계값으로 guard
 - 메서드:
-    linear  — np.polyfit(A2, A1, 1)[0]  = dA1/dA2 (직접 회귀)
-    savgol  — SG 1차 미분 비율: (dA1/d_idx) / (dA2/d_idx)
+    linear  — np.polyfit(A2, A1, order) 최고차 계수 × order! = d^n A1/dA2^n
+    savgol  — 1차 미분 전용: (dA1/d_idx) / (dA2/d_idx); order>1이면 linear로 fallback
 """
 
 from __future__ import annotations
 
+import math as _math
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -20,9 +21,13 @@ from typing import Optional, Tuple
 import numpy as np
 
 # ──────────────────────────────────────────────────────────
-# Column key used in GraphDataPoint.values and DataSaver
+# Column keys used in GraphDataPoint.values and DataSaver
 # ──────────────────────────────────────────────────────────
-OUTPUT_KEY = "__deriv__"
+OUTPUT_KEY  = "__deriv__"
+OUTPUT_KEY_2 = "__deriv2__"
+OUTPUT_KEY_3 = "__deriv3__"
+
+_ORDER_KEYS = {1: OUTPUT_KEY, 2: OUTPUT_KEY_2, 3: OUTPUT_KEY_3}
 
 
 # ──────────────────────────────────────────────────────────
@@ -33,12 +38,13 @@ OUTPUT_KEY = "__deriv__"
 class DerivativeConfig:
     """사용자가 설정하는 파생 채널 파라미터."""
     enabled: bool = False
+    order: int = 1                # 1 = dA1/dA2, 2 = d²A1/dA2², 3 = d³A1/dA2³
     numerator_key: str = ""       # A1 column key  (e.g. "__sweep__")
     denominator_key: str = ""     # A2 column key  (e.g. "smua_current")
     output_label: str = ""        # e.g. "dV/dI"   (빈 문자열이면 자동 생성)
     output_unit: str = ""         # e.g. "Ω"
     window_size: int = 10         # sliding window 길이 (3 ≤ N ≤ 50)
-    method: str = "linear"        # "linear" | "savgol"
+    method: str = "linear"        # "linear" | "savgol"  (savgol: order==1 전용)
     min_delta: float = 1e-10      # |ΔA2| 임계값 — 이 미만이면 None 반환
 
 
@@ -47,13 +53,13 @@ class DerivativeConfig:
 # ──────────────────────────────────────────────────────────
 
 class DerivativeChannel:
-    """슬라이딩 윈도우 방식으로 dA1/dA2를 실시간 계산.
+    """슬라이딩 윈도우 방식으로 d^n A1/dA2^n을 실시간 계산.
 
     사용법:
         ch = DerivativeChannel(cfg)
         ch.reset()                      # sweep 시작 시 버퍼 초기화
         val = ch.push(a1, a2)           # 매 스텝마다 호출
-        # val: float or None (< 3 points, or ΔA2 too small)
+        # val: float or None (점 부족, or ΔA2 too small)
     """
 
     def __init__(self, config: DerivativeConfig) -> None:
@@ -75,47 +81,52 @@ class DerivativeChannel:
         self._buf_a2.clear()
 
     def push(self, a1: float, a2: float) -> Optional[float]:
-        """새 (A1, A2) 쌍 추가 후 dA1/dA2 반환.
+        """새 (A1, A2) 쌍 추가 후 d^n A1/dA2^n 반환.
 
         None을 반환하는 경우:
-          - 버퍼에 점이 3개 미만
-          - A2 변화량이 min_delta 미만 (divide-by-zero 방지)
+          - 버퍼 점 수 < max(3, order+2)
+          - A2 변화량이 min_delta 미만
           - 수치 오류
         """
         self._buf_a1.append(a1)
         self._buf_a2.append(a2)
-        if len(self._buf_a1) < 3:
+        order = self._cfg.order
+        min_pts = max(3, order + 2)
+        if len(self._buf_a1) < min_pts:
             return None
 
         a1_arr = np.asarray(self._buf_a1, dtype=np.float64)
         a2_arr = np.asarray(self._buf_a2, dtype=np.float64)
 
-        if self._cfg.method == "savgol":
+        if order == 1 and self._cfg.method == "savgol":
             result = self._savgol_deriv(a1_arr, a2_arr)
             if result is not None:
                 return result
-        # linear (default + savgol fallback)
-        return self._linear_deriv(a1_arr, a2_arr)
+        # polynomial fit (default for order≥1; fallback for savgol)
+        return self._poly_deriv(a1_arr, a2_arr, order)
 
     # ── Computation methods ────────────────────────────────────────────
 
-    def _linear_deriv(self, a1: np.ndarray, a2: np.ndarray) -> Optional[float]:
-        """A2 vs A1 linear regression → slope = dA1/dA2."""
+    def _poly_deriv(self, a1: np.ndarray, a2: np.ndarray, order: int) -> Optional[float]:
+        """A2 vs A1 polynomial regression (degree=order) → d^n A1/dA2^n.
+
+        For p(x) = c_0*x^n + ..., d^n p/dx^n = n! * c_0.
+        """
         delta = float(np.max(a2) - np.min(a2))
         if delta < self._cfg.min_delta:
-            return None     # A2 너무 평탄 → meaningless ratio
+            return None
         try:
-            slope = float(np.polyfit(a2, a1, 1)[0])
-            return slope
+            coeffs = np.polyfit(a2, a1, order)
+            return float(_math.factorial(order) * coeffs[0])
         except (np.linalg.LinAlgError, ValueError):
             return None
 
     def _savgol_deriv(self, a1: np.ndarray, a2: np.ndarray) -> Optional[float]:
-        """(dA1/d_idx) / (dA2/d_idx) 를 SG 필터로 추정 → dA1/dA2."""
+        """(dA1/d_idx) / (dA2/d_idx) 를 SG 필터로 추정 → dA1/dA2 (order==1 전용)."""
         try:
             from scipy.signal import savgol_filter  # type: ignore
         except ImportError:
-            return None         # scipy 없으면 caller가 linear로 fallback
+            return None         # scipy 없으면 caller가 poly로 fallback
 
         n = len(a1)
         wl = n if n % 2 == 1 else n - 1    # window_length 는 홀수
@@ -137,7 +148,7 @@ class DerivativeChannel:
 
     @property
     def output_key(self) -> str:
-        return OUTPUT_KEY
+        return _ORDER_KEYS.get(self._cfg.order, OUTPUT_KEY)
 
     def col_info(self) -> Tuple[str, str, str]:
         """(key, display_label, unit) — GraphWindow.begin_session() 용."""
@@ -146,7 +157,10 @@ class DerivativeChannel:
         elif self._cfg.numerator_key and self._cfg.denominator_key:
             n = self._cfg.numerator_key.lstrip("_")
             d = self._cfg.denominator_key.lstrip("_")
-            lbl = f"d{n}/d{d}"
+            order = self._cfg.order
+            sup = {1: "", 2: "²", 3: "³"}
+            pre = {1: "d", 2: "d²", 3: "d³"}
+            lbl = f"{pre.get(order,'d')}{n}/d{d}{sup.get(order,'')}"
         else:
-            lbl = "deriv"
-        return (OUTPUT_KEY, lbl, self._cfg.output_unit)
+            lbl = f"deriv{self._cfg.order}"
+        return (self.output_key, lbl, self._cfg.output_unit)

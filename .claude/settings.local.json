@@ -12,7 +12,10 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/visa_library_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''visa_library_window.py: OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/graph_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''graph_window.py: OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/main_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''main_window.py: OK''\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/debug_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''debug_window.py: OK''\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/debug_window.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''debug_window.py: OK''\\)\")",
+      "Bash(python -c \"import main\")",
+      "Bash(python -m py_compile config/config_models.py core/second_channel_worker.py core/profile_registry.py gui/double_sweep_window.py gui/parameter_manager_window.py gui/main_window.py)",
+      "Bash(python -c \"import gui.parameter_manager_window\")"
     ]
   }
 }

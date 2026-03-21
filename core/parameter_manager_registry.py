@@ -10,7 +10,7 @@ import yaml
 from config.config_models import (
     ParameterManagerProfile, MainUIProfile,
     InstantiatedMeasurement, InstantiatedSweepValue, InstantiatedWriteCmd,
-    InstantiatedSecondSweepChannel, DoubleSweepConfig,
+    InstantiatedSecondSweepChannel, DoubleSweepConfig, MetaDataConfig,
 )
 
 if TYPE_CHECKING:
@@ -23,12 +23,14 @@ class ParameterManagerRegistry:
 
     def __init__(self, settings_dir: Optional[Path] = None):
         base = settings_dir or _SETTINGS_DIR
-        self._sel_path = base / "parameter_manager.yaml"
-        self._mui_path = base / "main_ui_profile.yaml"
-        self._ds_path  = base / "double_sweep.yaml"
-        self._selection = ParameterManagerProfile()
-        self._main_ui   = MainUIProfile()
+        self._sel_path  = base / "parameter_manager.yaml"
+        self._mui_path  = base / "main_ui_profile.yaml"
+        self._ds_path   = base / "double_sweep.yaml"
+        self._meta_path = base / "meta_data.yaml"
+        self._selection    = ParameterManagerProfile()
+        self._main_ui      = MainUIProfile()
         self._double_sweep = DoubleSweepConfig()
+        self._meta_data    = MetaDataConfig()
         self._load()
 
     def _load(self):
@@ -54,6 +56,13 @@ class ParameterManagerRegistry:
                     self._double_sweep = DoubleSweepConfig.model_validate(yaml.safe_load(f) or {})
                 except Exception:
                     self._double_sweep = DoubleSweepConfig()
+
+        if self._meta_path.exists():
+            with open(self._meta_path, "r", encoding="utf-8") as f:
+                try:
+                    self._meta_data = MetaDataConfig.model_validate(yaml.safe_load(f) or {})
+                except Exception:
+                    self._meta_data = MetaDataConfig()
 
     # ------------------------------------------------------------------
     # Selection (Parameter Manager window state)
@@ -92,6 +101,19 @@ class ParameterManagerRegistry:
     def save_double_sweep_config(self, cfg: DoubleSweepConfig):
         self._double_sweep = cfg
         with open(self._ds_path, "w", encoding="utf-8") as f:
+            yaml.dump(cfg.model_dump(), f, allow_unicode=True, sort_keys=False)
+
+    # ------------------------------------------------------------------
+    # Meta Data Config
+    # ------------------------------------------------------------------
+
+    @property
+    def meta_data_config(self) -> MetaDataConfig:
+        return self._meta_data
+
+    def save_meta_data_config(self, cfg: MetaDataConfig):
+        self._meta_data = cfg
+        with open(self._meta_path, "w", encoding="utf-8") as f:
             yaml.dump(cfg.model_dump(), f, allow_unicode=True, sort_keys=False)
 
     # ------------------------------------------------------------------
@@ -218,6 +240,9 @@ class ParameterManagerRegistry:
                         feedback_read_cmd=old.feedback_read_cmd,
                         feedback_poll_interval=old.feedback_poll_interval,
                         feedback_tolerance_pct=old.feedback_tolerance_pct,
+                        feedback_std_window=old.feedback_std_window,
+                        feedback_noisefloor=old.feedback_noisefloor,
+                        feedback_std_threshold=old.feedback_std_threshold,
                         wait_time=old.wait_time,
                         figure_axis=sv_entry.figure_axis,
                         unit=sv_entry.unit,

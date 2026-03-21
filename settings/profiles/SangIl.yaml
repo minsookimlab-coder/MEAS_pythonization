@@ -29,7 +29,7 @@ main_ui:
     paired_read_cmd: reading=smua.measure.v()print(reading)
     figure_axis: target_smua_voltage
     unit: V
-    safety_steps: 10
+    safety_steps: 5
     safety_interval_ms: 1.0
     fill_params:
       v: '[SWEEP]'
@@ -39,7 +39,7 @@ main_ui:
     paired_read_cmd: reading=smub.measure.i()print(reading)
     figure_axis: target_smub_voltage
     unit: V
-    safety_steps: 10
+    safety_steps: 5
     safety_interval_ms: 1.0
     fill_params:
       v: '[SWEEP]'
@@ -51,6 +51,8 @@ main_ui:
     unit: A
     fill_params: {}
     axis_suffix: ''
+    meas_type: none
+    checked: true
   - alias: 2636A
     description: read_smub_current
     resolved_cmd: print(smub.measure.i())
@@ -58,6 +60,8 @@ main_ui:
     unit: A
     fill_params: {}
     axis_suffix: ''
+    meas_type: none
+    checked: false
   - alias: 2636A
     description: read_smua_voltage
     resolved_cmd: print(smua.measure.v())
@@ -65,6 +69,8 @@ main_ui:
     unit: V
     fill_params: {}
     axis_suffix: ''
+    meas_type: none
+    checked: true
   - alias: 2636A
     description: read_smub_voltage
     resolved_cmd: print(smub.measure.i())
@@ -72,13 +78,8 @@ main_ui:
     unit: V
     fill_params: {}
     axis_suffix: ''
-  - alias: IPS
-    description: read_z_magnetic_field
-    resolved_cmd: READ:DEV:GRPZ:PSU:SIG:FLD
-    figure_axis: B
-    unit: T
-    fill_params: {}
-    axis_suffix: ''
+    meas_type: none
+    checked: false
   - alias: M81
     description: read_M81_M1_voltage_ip
     resolved_cmd: FETCh:SENSe1:LIA:X?
@@ -87,6 +88,8 @@ main_ui:
     fill_params:
       M: '1'
     axis_suffix: ''
+    meas_type: none
+    checked: true
   - alias: M81
     description: read_M81_M1_voltage_oop
     resolved_cmd: FETCh:SENSe1:LIA:Y?
@@ -95,6 +98,8 @@ main_ui:
     fill_params:
       M: '1'
     axis_suffix: ''
+    meas_type: none
+    checked: false
   - alias: M81
     description: read_M81_M2_voltage_ip
     resolved_cmd: FETCh:SENSe2:LIA:X?
@@ -103,6 +108,8 @@ main_ui:
     fill_params:
       M: '2'
     axis_suffix: ''
+    meas_type: none
+    checked: false
   - alias: M81
     description: read_M81_M2_voltage_oop
     resolved_cmd: FETCh:SENSe2:LIA:Y?
@@ -111,6 +118,8 @@ main_ui:
     fill_params:
       M: '2'
     axis_suffix: ''
+    meas_type: none
+    checked: false
   - alias: M81
     description: read_M81_M3_voltage_ip
     resolved_cmd: FETCh:SENSe3:LIA:X?
@@ -119,6 +128,8 @@ main_ui:
     fill_params:
       M: '3'
     axis_suffix: ''
+    meas_type: none
+    checked: false
   - alias: M81
     description: read_M81_M3_voltage_oop
     resolved_cmd: FETCh:SENSe3:LIA:Y?
@@ -127,6 +138,62 @@ main_ui:
     fill_params:
       M: '3'
     axis_suffix: ''
+    meas_type: none
+    checked: false
+  - alias: IPS
+    description: read_z_magnetic_field
+    resolved_cmd: READ:DEV:GRPZ:PSU:SIG:FLD
+    figure_axis: B
+    unit: T
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: bfield
+    checked: false
+  - alias: IPS
+    description: read_IPS_MB1_temperature
+    resolved_cmd: READ:DEV:MB1.T1:TEMP:SIG:TEMP
+    figure_axis: MB1_TEMP
+    unit: K
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: temperature
+    checked: false
+  - alias: IPS
+    description: read_IPS_PT1_temperature
+    resolved_cmd: READ:DEV:DB8.T1:TEMP:SIG:TEMP
+    figure_axis: PT1_TEMP
+    unit: K
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: temperature
+    checked: false
+  - alias: IPS
+    description: read_IPS_PT2_temperature
+    resolved_cmd: READ:DEV:DB7.T1:TEMP:SIG:TEMP
+    figure_axis: PT2_TEMP
+    unit: K
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: temperature
+    checked: false
+  - alias: ITC
+    description: read_ITC_VTI_temperature
+    resolved_cmd: READ:DEV:MB1.T1:TEMP:SIG:TEMP
+    figure_axis: VTI_TEMP
+    unit: K
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: temperature
+    checked: false
+  - alias: ITC
+    description: read_ITC_probe_temperature
+    resolved_cmd: READ:DEV:DB8.T1:TEMP:SIG:TEMP
+    figure_axis: probe_TEMP
+    unit: K
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: temperature
+    checked: false
   write_cmds: []
   second_sweep_channels:
   - alias: 2636A
@@ -141,6 +208,9 @@ main_ui:
     feedback_read_cmd: ''
     feedback_poll_interval: 1.0
     feedback_tolerance_pct: 95.0
+    feedback_std_window: 0
+    feedback_noisefloor: 0.0
+    feedback_std_threshold: 0.01
     wait_time: 1.0
     figure_axis: target_smua_voltage
     unit: V
@@ -156,16 +226,85 @@ main_ui:
     feedback_read_cmd: ''
     feedback_poll_interval: 1.0
     feedback_tolerance_pct: 95.0
+    feedback_std_window: 0
+    feedback_noisefloor: 0.0
+    feedback_std_threshold: 0.01
     wait_time: 1.0
     figure_axis: target_smub_voltage
     unit: V
-sweep_to: -1.0
+  alarm_measurements:
+  - alias: M81
+    description: read_M81_Modul1_voltage_ip
+    resolved_cmd: :FETCh:SENSe1:LIA:X?
+    figure_axis: M81_M1_voltage_ip
+    unit: V
+    fill_params:
+      M: '1'
+    axis_suffix: ''
+    meas_type: none
+    checked: true
+  meta_data_measurements:
+  - alias: IPS
+    description: read_IPS_z_magnetic_field
+    resolved_cmd: READ:DEV:GRPZ:PSU:SIG:FLD
+    figure_axis: B
+    unit: T
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: none
+    checked: true
+  - alias: IPS
+    description: read_IPS_MB1_temperature
+    resolved_cmd: READ:DEV:MB1.T1:TEMP:SIG:TEMP
+    figure_axis: MB1_TEMP
+    unit: K
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: none
+    checked: true
+  - alias: IPS
+    description: read_IPS_PT1_temperature
+    resolved_cmd: READ:DEV:DB8.T1:TEMP:SIG:TEMP
+    figure_axis: PT1_TEMP
+    unit: K
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: none
+    checked: true
+  - alias: IPS
+    description: read_IPS_PT2_temperature
+    resolved_cmd: READ:DEV:DB7.T1:TEMP:SIG:TEMP
+    figure_axis: PT2_TEMP
+    unit: K
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: none
+    checked: true
+  - alias: ITC
+    description: read_ITC_VTI_temperature
+    resolved_cmd: READ:DEV:MB1.T1:TEMP:SIG:TEMP
+    figure_axis: VTI_TEMP
+    unit: K
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: none
+    checked: true
+  - alias: ITC
+    description: read_ITC_probe_temperature
+    resolved_cmd: READ:DEV:DB8.T1:TEMP:SIG:TEMP
+    figure_axis: probe_TEMP
+    unit: K
+    fill_params: {}
+    axis_suffix: ''
+    meas_type: none
+    checked: true
+sweep_to: 0.0
 sweep_rate: 0.1
-time_per_point: 0.5
+time_per_point: 0.7
 active_sweep_channel_idx: 0
 main_folder: D:/Users/SangIl
-custom_folder: test1
-custom_word: ''
+custom_folder: test2
+custom_word: dsd
 include_date: true
 save_enabled: true
 double_sweep:
@@ -178,9 +317,70 @@ double_sweep:
   array_from: 0.5
   array_to: 1.0
   array_step: 0.1
-  selected_channel_idx: 1
+  selected_channel_idx: 0
   retrace_to_zero: false
   second_sweep_rate: 1.0
   second_use_safety: true
   second_safety_steps: 10
   second_safety_interval_ms: 5.0
+  alarm:
+    enabled: true
+    use_sound: false
+    use_email: false
+    email_to: ''
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    smtp_user: ''
+    smtp_password: ''
+    fire_on_complete: false
+    triggers:
+    - enabled: true
+      kind: comm_error
+      meas_description: ''
+      operator: '>'
+      threshold: 0.0
+meta_data:
+  enabled: false
+  entries:
+  - alias: IPS
+    description: read_IPS_z_magnetic_field
+    resolved_cmd: READ:DEV:GRPZ:PSU:SIG:FLD
+    figure_axis: B
+    unit: T
+    enabled: false
+    meas_type: none
+  - alias: IPS
+    description: read_IPS_MB1_temperature
+    resolved_cmd: READ:DEV:MB1.T1:TEMP:SIG:TEMP
+    figure_axis: MB1_TEMP
+    unit: K
+    enabled: false
+    meas_type: none
+  - alias: IPS
+    description: read_IPS_PT1_temperature
+    resolved_cmd: READ:DEV:DB8.T1:TEMP:SIG:TEMP
+    figure_axis: PT1_TEMP
+    unit: K
+    enabled: false
+    meas_type: none
+  - alias: IPS
+    description: read_IPS_PT2_temperature
+    resolved_cmd: READ:DEV:DB7.T1:TEMP:SIG:TEMP
+    figure_axis: PT2_TEMP
+    unit: K
+    enabled: false
+    meas_type: none
+  - alias: ITC
+    description: read_ITC_VTI_temperature
+    resolved_cmd: READ:DEV:MB1.T1:TEMP:SIG:TEMP
+    figure_axis: VTI_TEMP
+    unit: K
+    enabled: false
+    meas_type: none
+  - alias: ITC
+    description: read_ITC_probe_temperature
+    resolved_cmd: READ:DEV:DB8.T1:TEMP:SIG:TEMP
+    figure_axis: probe_TEMP
+    unit: K
+    enabled: false
+    meas_type: none

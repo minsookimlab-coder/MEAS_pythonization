@@ -2,8 +2,10 @@
 SecondChannelWorker: double sweep의 second channel을 설정하는 워커.
 QThread 위에서 동작하며 advance_type에 따라 4가지 전략 중 하나를 실행합니다.
 """
+import math
 import threading
 import time as _time
+from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -145,13 +147,28 @@ class SecondChannelWorker(QObject):
 
     def _do_feedback(self, alias: str, ch: InstantiatedSecondSweepChannel,
                      next_v: float, prev_v: Optional[float]) -> None:
-        """값 설정 후 feedback_read_cmd로 폴링, 목표 도달 시 반환."""
+        """값 설정 후 feedback_read_cmd로 폴링, 목표 도달 시 반환.
+
+        Phase 1: tolerance_pct에 도달할 때까지 poll
+        Phase 2 (std_window > 0): tolerance 도달 후 추가 폴링 —
+          최근 std_window 개 측정값의 std dev < std_threshold 가 되면 반환
+        """
         self._session.write(alias, ch.cmd_set.format(v=next_v))
 
         denom = abs(next_v - (prev_v or 0.0))
+        use_std = ch.feedback_std_window > 0 and ch.feedback_std_threshold > 0.0
+
+        # denom == 0 이면 이미 목표값에 있음 — std 체크만 남아있을 수 있음
         if denom < 1e-12:
-            # 이미 목표값 → 즉시 반환
-            return
+            if not use_std:
+                return
+            # threshold는 이미 충족, Phase 2만 실행
+            threshold_reached = True
+        else:
+            threshold_reached = False
+
+        # sliding window for Phase 2
+        window: deque = deque(maxlen=ch.feedback_std_window) if use_std else deque(maxlen=1)
 
         while True:
             if self._stop_event.is_set():
@@ -159,12 +176,32 @@ class SecondChannelWorker(QObject):
             _time.sleep(ch.feedback_poll_interval)
             try:
                 raw = self._session.query(alias, ch.feedback_read_cmd).strip()
-                v_read = float(raw)
+                v_read = float(raw.split()[0])
             except Exception:
                 continue
-            ratio = abs(v_read - (prev_v or 0.0)) / denom
-            if ratio >= ch.feedback_tolerance_pct / 100.0:
-                break
+
+            # Phase 1: check threshold progress
+            if not threshold_reached:
+                ratio = abs(v_read - (prev_v or 0.0)) / denom
+                if ratio >= ch.feedback_tolerance_pct / 100.0:
+                    threshold_reached = True
+                    window.clear()   # reset window for Phase 2
+                    if not use_std:
+                        break        # no std check needed — done
+                else:
+                    continue         # still in Phase 1, don't accumulate yet
+
+            # Phase 2: accumulate + normalized stability metric
+            # metric = SD / (max(|mean|, |next_v|) + noisefloor) < std_threshold
+            window.append(v_read)
+            if len(window) < ch.feedback_std_window:
+                continue             # not enough samples yet
+            mean = sum(window) / len(window)
+            std = math.sqrt(sum((v - mean) ** 2 for v in window) / len(window))
+            scale = max(abs(mean), abs(next_v)) + ch.feedback_noisefloor
+            metric = std / scale if scale > 1e-30 else float("inf")
+            if metric < ch.feedback_std_threshold:
+                break                # stable enough — advance
 
     def _do_wait_for_time(self, alias: str, cmd_set: str,
                           value: float, wait_time: float) -> None:
