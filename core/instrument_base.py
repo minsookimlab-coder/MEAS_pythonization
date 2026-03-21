@@ -46,6 +46,8 @@ class BaseInstrument(ABC):
         print(f"[{self.alias}] Connecting to {resource_str} ...")
         self.inst = self.rm.open_resource(resource_str)
         self.inst.timeout = self.timeout
+        self.inst.read_termination  = self.read_termination
+        self.inst.write_termination = self.write_termination
         self._post_connect()
 
     def disconnect(self):

@@ -95,6 +95,7 @@ class MainWindow(QMainWindow):
         )
         self._meta_manager = MetaDataManager(self._session)
         self._meta_data_window = None
+        self._command_window = None
 
         # Worker 스레드 셋업
         self._worker = SweepWorker()
@@ -182,6 +183,9 @@ class MainWindow(QMainWindow):
         act_meta = QAction("Meta Data Config...", self)
         act_meta.triggered.connect(self._open_meta_data_config)
         view_menu.addAction(act_meta)
+        act_cmd = QAction("Command Window...", self)
+        act_cmd.triggered.connect(self._open_command_window)
+        view_menu.addAction(act_cmd)
 
     def _setup_ui(self):
         self._glow_frame = QFrame()
@@ -722,6 +726,13 @@ class MainWindow(QMainWindow):
             self._meta_data_window = MetaDataConfigWindow(self)
         self._meta_data_window.show()
         self._meta_data_window.raise_()
+
+    def _open_command_window(self):
+        from gui.command_window import CommandWindow
+        if self._command_window is None:
+            self._command_window = CommandWindow(self._session, self._visa_lib_registry, self)
+        self._command_window.show()
+        self._command_window.raise_()
 
     def _open_double_sweep(self):
         from gui.double_sweep_window import DoubleSweepWindow

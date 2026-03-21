@@ -299,12 +299,12 @@ main_ui:
     meas_type: none
     checked: true
 sweep_to: 0.0
-sweep_rate: 0.1
-time_per_point: 0.7
+sweep_rate: 5.0
+time_per_point: 0.5
 active_sweep_channel_idx: 0
 main_folder: D:/Users/SangIl
-custom_folder: test2
-custom_word: dsd
+custom_folder: test23
+custom_word: ''
 include_date: true
 save_enabled: true
 double_sweep:
@@ -315,14 +315,14 @@ double_sweep:
   rate_dummy: 5.0
   time_per_point: 0.5
   array_from: 0.5
-  array_to: 1.0
+  array_to: 0.6
   array_step: 0.1
-  selected_channel_idx: 0
+  selected_channel_idx: 1
   retrace_to_zero: false
   second_sweep_rate: 1.0
   second_use_safety: true
-  second_safety_steps: 10
-  second_safety_interval_ms: 5.0
+  second_safety_steps: 5
+  second_safety_interval_ms: 1.0
   alarm:
     enabled: true
     use_sound: false
@@ -332,10 +332,19 @@ double_sweep:
     smtp_port: 587
     smtp_user: ''
     smtp_password: ''
-    fire_on_complete: false
+    use_telegram: true
+    telegram_bot_token: 8455510788:AAF8xF5l2RuTatNeSRuzOkVjN_aTorGEAqQ
+    telegram_chat_id: '7681063541'
+    telegram_contacts: []
+    fire_on_complete: true
     triggers:
     - enabled: true
       kind: comm_error
+      meas_description: ''
+      operator: '>'
+      threshold: 0.0
+    - enabled: true
+      kind: meas_error
       meas_description: ''
       operator: '>'
       threshold: 0.0

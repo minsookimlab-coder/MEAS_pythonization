@@ -239,6 +239,12 @@ class AlarmTrigger(BaseModel):
     threshold: float = 0.0
 
 
+class TelegramContact(BaseModel):
+    """Telegram 알람 수신자 — 이름과 Chat ID."""
+    name: str = ""
+    chat_id: str = ""
+
+
 class AlarmConfig(BaseModel):
     """알람 전체 설정 (Double Sweep 전용)."""
     enabled: bool = False
@@ -249,6 +255,10 @@ class AlarmConfig(BaseModel):
     smtp_port: int = 587
     smtp_user: str = ""
     smtp_password: str = ""
+    use_telegram: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_contacts: List[TelegramContact] = Field(default_factory=list)
     fire_on_complete: bool = False   # 모든 array 완료 시 알람
     triggers: List[AlarmTrigger] = Field(default_factory=list)
 

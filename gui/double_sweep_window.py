@@ -18,10 +18,10 @@ from enum import Enum, auto
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QDoubleValidator, QFont
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QFrame,
-    QLabel, QLineEdit, QPushButton, QDoubleSpinBox, QSpinBox, QCheckBox,
+    QLabel, QLineEdit, QPushButton, QSpinBox, QCheckBox,
     QButtonGroup, QRadioButton, QMessageBox, QWidget, QComboBox,
     QScrollArea, QSizePolicy,
 )
@@ -130,6 +130,224 @@ _OP_LABELS = [">", "<", ">=", "<=", "==", "!="]
 
 def _truncate(s: str, n: int = 40) -> str:
     return s[:n] + ("…" if len(s) > n else "")
+
+
+class TelegramPanel(QFrame):
+    """
+    Double Sweep 창 우측 패널 — Telegram Bot 알람 설정.
+
+    수신자 목록(이름 → Chat ID)을 저장·관리하고,
+    콤보박스 선택 = 알람 전송 대상.
+    """
+
+    def __init__(self, alarm_manager, parent=None):
+        super().__init__(parent)
+        self._alarm_manager = alarm_manager
+        self._contacts: list = []   # [{"name": str, "chat_id": str}]
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 6, 8, 6)
+        root.setSpacing(6)
+
+        title = QLabel("Telegram")
+        title.setStyleSheet("font-weight: bold; color: #58a6ff; font-size: 13px;")
+        root.addWidget(title)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #30363d;"); root.addWidget(sep)
+
+        self._cb_enable = QCheckBox("활성화")
+        self._cb_enable.setStyleSheet("font-weight: bold;")
+        root.addWidget(self._cb_enable)
+
+        # Bot Token
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(6); form.setVerticalSpacing(4)
+        token_row = QHBoxLayout(); token_row.setSpacing(4)
+        self._le_token = QLineEdit()
+        self._le_token.setFont(_MONO)
+        self._le_token.setPlaceholderText("123456789:AAB...")
+        self._le_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self._btn_show = QPushButton("Show")
+        self._btn_show.setFixedHeight(22); self._btn_show.setFixedWidth(44)
+        self._btn_show.setCheckable(True)
+        self._btn_show.toggled.connect(self._on_show_toggled)
+        token_row.addWidget(self._le_token, stretch=1); token_row.addWidget(self._btn_show)
+        form.addRow("Bot Token:", token_row)
+        root.addLayout(form)
+
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color: #30363d;"); root.addWidget(sep2)
+
+        # 수신자 선택 (알람 대상)
+        recv_lbl = QLabel("수신자 (알람 대상)")
+        recv_lbl.setStyleSheet("color: #79c0ff; font-weight: bold;")
+        root.addWidget(recv_lbl)
+
+        self._combo_contacts = QComboBox()
+        self._combo_contacts.setFont(_MONO)
+        self._combo_contacts.setPlaceholderText("(저장된 수신자 없음)")
+        self._combo_contacts.currentIndexChanged.connect(self._on_contact_selected)
+        root.addWidget(self._combo_contacts)
+
+        sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setStyleSheet("color: #30363d;"); root.addWidget(sep3)
+
+        # 수신자 추가/편집 영역
+        add_lbl = QLabel("수신자 추가 / 편집")
+        add_lbl.setStyleSheet("color: #888; font-size: 10px;")
+        root.addWidget(add_lbl)
+
+        edit_form = QFormLayout()
+        edit_form.setContentsMargins(0, 0, 0, 0)
+        edit_form.setHorizontalSpacing(6); edit_form.setVerticalSpacing(3)
+        self._le_contact_name = QLineEdit()
+        self._le_contact_name.setFont(_MONO)
+        self._le_contact_name.setPlaceholderText("표시 이름 (예: 실험실)")
+        edit_form.addRow("이름:", self._le_contact_name)
+        self._le_new_chat_id = QLineEdit()
+        self._le_new_chat_id.setFont(_MONO)
+        self._le_new_chat_id.setPlaceholderText("-100123456789")
+        edit_form.addRow("Chat ID:", self._le_new_chat_id)
+        root.addLayout(edit_form)
+
+        btn_row = QHBoxLayout(); btn_row.setSpacing(4)
+        btn_save = QPushButton("저장"); btn_save.setFixedHeight(24)
+        btn_del  = QPushButton("삭제"); btn_del.setFixedHeight(24)
+        btn_save.clicked.connect(self._on_save_contact)
+        btn_del.clicked.connect(self._on_del_contact)
+        btn_row.addWidget(btn_save); btn_row.addWidget(btn_del); btn_row.addStretch()
+        root.addLayout(btn_row)
+
+        sep4 = QFrame(); sep4.setFrameShape(QFrame.Shape.HLine)
+        sep4.setStyleSheet("color: #30363d;"); root.addWidget(sep4)
+
+        test_row = QHBoxLayout()
+        self._btn_test = QPushButton("Test"); self._btn_test.setFixedHeight(24)
+        self._btn_test.clicked.connect(self._on_test)
+        test_row.addWidget(self._btn_test); test_row.addStretch()
+        root.addLayout(test_row)
+
+        self._lbl_status = QLabel("")
+        self._lbl_status.setFont(_MONO)
+        self._lbl_status.setStyleSheet("font-size: 10px;")
+        self._lbl_status.setWordWrap(True)
+        root.addWidget(self._lbl_status)
+
+        root.addStretch()
+
+    # ------------------------------------------------------------------
+
+    def _on_show_toggled(self, checked: bool):
+        self._le_token.setEchoMode(
+            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+        )
+        self._btn_show.setText("Hide" if checked else "Show")
+
+    def _active_chat_id(self) -> str:
+        """콤보박스에서 선택된 수신자의 Chat ID 반환."""
+        idx = self._combo_contacts.currentIndex()
+        if 0 <= idx < len(self._contacts):
+            return self._contacts[idx]["chat_id"]
+        return ""
+
+    def _on_contact_selected(self, idx: int):
+        """콤보 선택 시 편집 필드에 해당 수신자 정보 채움."""
+        if 0 <= idx < len(self._contacts):
+            c = self._contacts[idx]
+            self._le_contact_name.setText(c["name"])
+            self._le_new_chat_id.setText(c["chat_id"])
+
+    def _on_save_contact(self):
+        name    = self._le_contact_name.text().strip()
+        chat_id = self._le_new_chat_id.text().strip()
+        if not name or not chat_id:
+            self._set_status("이름과 Chat ID를 입력하세요.", "#f44747"); return
+        for c in self._contacts:
+            if c["name"] == name:
+                c["chat_id"] = chat_id
+                self._refresh_combo(name)
+                self._set_status(f"'{name}' 업데이트됨.", "#56d364"); return
+        self._contacts.append({"name": name, "chat_id": chat_id})
+        self._refresh_combo(name)
+        self._set_status(f"'{name}' 저장됨.", "#56d364")
+
+    def _on_del_contact(self):
+        idx = self._combo_contacts.currentIndex()
+        if 0 <= idx < len(self._contacts):
+            name = self._contacts.pop(idx)["name"]
+            self._refresh_combo()
+            self._le_contact_name.clear(); self._le_new_chat_id.clear()
+            self._set_status(f"'{name}' 삭제됨.", "#e3b341")
+
+    def _refresh_combo(self, select_name: str = ""):
+        self._combo_contacts.blockSignals(True)
+        self._combo_contacts.clear()
+        for c in self._contacts:
+            self._combo_contacts.addItem(c["name"])
+        if select_name:
+            idx = self._combo_contacts.findText(select_name)
+            if idx >= 0:
+                self._combo_contacts.setCurrentIndex(idx)
+        self._combo_contacts.blockSignals(False)
+
+    def _set_status(self, msg: str, color: str):
+        self._lbl_status.setStyleSheet(f"color: {color}; font-size: 10px;")
+        self._lbl_status.setText(msg)
+
+    def _on_test(self):
+        token   = self._le_token.text().strip()
+        chat_id = self._active_chat_id()
+        if not token or not chat_id:
+            self._set_status("Token과 수신자를 설정하세요.", "#f44747"); return
+        self._btn_test.setEnabled(False)
+        self._set_status("전송 중...", "#888")
+        import threading
+        def _do():
+            err = self._alarm_manager.send_telegram_test(token, chat_id)
+            from PySide6.QtCore import QMetaObject, Qt as _Qt, Q_ARG
+            QMetaObject.invokeMethod(
+                self, "_on_test_result", _Qt.ConnectionType.QueuedConnection,
+                Q_ARG(str, err or ""), Q_ARG(bool, err is None),
+            )
+        threading.Thread(target=_do, daemon=True).start()
+
+    @Slot(str, bool)
+    def _on_test_result(self, err: str, ok: bool):
+        self._btn_test.setEnabled(True)
+        if ok:
+            self._set_status("✓ 메시지 전송 성공", "#56d364")
+        else:
+            self._set_status(f"✗ {err}", "#f44747")
+
+    # ------------------------------------------------------------------
+    # Config serialization
+    # ------------------------------------------------------------------
+
+    def get_config(self) -> dict:
+        return {
+            "use_telegram": self._cb_enable.isChecked(),
+            "telegram_bot_token": self._le_token.text().strip(),
+            "telegram_chat_id": self._active_chat_id(),   # 선택된 수신자
+            "telegram_contacts": list(self._contacts),
+        }
+
+    def load_config(self, cfg: "AlarmConfig"):
+        self._cb_enable.setChecked(cfg.use_telegram)
+        self._le_token.setText(cfg.telegram_bot_token)
+        self._contacts = [{"name": c.name, "chat_id": c.chat_id}
+                          for c in cfg.telegram_contacts]
+        # 저장된 chat_id와 일치하는 수신자를 선택 상태로 복원
+        self._refresh_combo()
+        if cfg.telegram_chat_id:
+            for i, c in enumerate(self._contacts):
+                if c["chat_id"] == cfg.telegram_chat_id:
+                    self._combo_contacts.setCurrentIndex(i)
+                    break
 
 
 class AlarmPanel(QFrame):
@@ -381,8 +599,8 @@ class DoubleSweepWindow(QDialog):
     def __init__(self, main_win: "MainWindow", param_reg, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Double Sweep")
-        self.setMinimumWidth(500)
-        self.resize(720, 600)
+        self.setMinimumWidth(900)
+        self.resize(1200, 680)
         self.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowMinimizeButtonHint |
@@ -480,6 +698,16 @@ class DoubleSweepWindow(QDialog):
         right_scroll.setWidget(self._alarm_panel)
         glow_h.addWidget(right_scroll)
 
+        # 우측 패널 (TelegramPanel)
+        tg_scroll = QScrollArea()
+        tg_scroll.setWidgetResizable(True)
+        tg_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        tg_scroll.setMinimumWidth(200)
+        tg_scroll.setMaximumWidth(260)
+        self._telegram_panel = TelegramPanel(self._alarm_manager)
+        tg_scroll.setWidget(self._telegram_panel)
+        glow_h.addWidget(tg_scroll)
+
         # Second Channel selector
         ch_frame = QFrame()
         ch_frame.setFrameShape(QFrame.Shape.StyledPanel)
@@ -509,35 +737,46 @@ class DoubleSweepWindow(QDialog):
         form.setHorizontalSpacing(12)
         sp_layout.addLayout(form)
 
-        def _dsb(lo=-1e9, hi=1e9, dec=4, val=0.0, suffix=""):
-            w = QDoubleSpinBox()
-            w.setRange(lo, hi)
-            w.setDecimals(dec)
-            w.setValue(val)
-            w.setFont(_MONO)
-            if suffix:
-                w.setSuffix(f"  {suffix}")
-            w.setFixedWidth(160)
-            return w
+        def _lefield(w=160):
+            """QLineEdit + unit QLabel + container widget."""
+            le = QLineEdit()
+            le.setFont(_MONO)
+            le.setFixedWidth(w)
+            vd = QDoubleValidator()
+            vd.setNotation(QDoubleValidator.Notation.StandardNotation)
+            le.setValidator(vd)
+            lbl_u = QLabel("")
+            lbl_u.setFont(_MONO)
+            lbl_u.setStyleSheet("color: #888888;")
+            lbl_u.setMinimumWidth(60)
+            cnt = QWidget()
+            h = QHBoxLayout(cnt)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(4)
+            h.addWidget(le)
+            h.addWidget(lbl_u)
+            h.addStretch()
+            return le, lbl_u, cnt
 
-        self._sb_start  = _dsb(val=0.0)
-        self._sb_stop   = _dsb(val=1.0)
-        self._sb_rate_t = _dsb(lo=1e-9, hi=1e9, val=1.0, suffix="units/min")
-        self._sb_rate_r = _dsb(lo=1e-9, hi=1e9, val=1.0, suffix="units/min")
-        self._sb_rate_d = _dsb(lo=1e-9, hi=1e9, val=1.0, suffix="units/min")
-        self._sb_tpp    = _dsb(lo=0.001, hi=3600, dec=3, val=1.0, suffix="sec")
+        self._le_start,  self._lbl_start_unit,  cnt_start  = _lefield()
+        self._le_stop,   self._lbl_stop_unit,   cnt_stop   = _lefield()
+        self._le_rate_t, self._lbl_rate_t_unit, cnt_rate_t = _lefield()
+        self._le_rate_r, self._lbl_rate_r_unit, cnt_rate_r = _lefield()
+        self._le_rate_d, self._lbl_rate_d_unit, cnt_rate_d = _lefield()
+        self._le_tpp,    _lbl_tpp_unit,         cnt_tpp    = _lefield()
+        _lbl_tpp_unit.setText("sec")
 
         self._cb_retrace_to_zero = QCheckBox("Retrace to 0")
         self._cb_retrace_to_zero.setFont(_MONO)
         self._cb_retrace_to_zero.setToolTip("When checked, RETRACE sweeps to 0 instead of Start Point")
 
-        form.addRow("Start Point:", self._sb_start)
-        form.addRow("Stop Point:",  self._sb_stop)
-        form.addRow("Rate (trace):",    self._sb_rate_t)
-        form.addRow("Rate (retrace):",  self._sb_rate_r)
+        form.addRow("Start Point:", cnt_start)
+        form.addRow("Stop Point:",  cnt_stop)
+        form.addRow("Rate (trace):",    cnt_rate_t)
+        form.addRow("Rate (retrace):",  cnt_rate_r)
         form.addRow("",                 self._cb_retrace_to_zero)
-        form.addRow("Rate (dummy):",    self._sb_rate_d)
-        form.addRow("Time / Point:",    self._sb_tpp)
+        form.addRow("Rate (dummy):",    cnt_rate_d)
+        form.addRow("Time / Point:",    cnt_tpp)
         outer.addWidget(sp_frame)
 
         # SWEEP Channel Settings (only visible when second channel advance_type == SWEEP)
@@ -554,8 +793,8 @@ class DoubleSweepWindow(QDialog):
         sc_form.setHorizontalSpacing(12)
         sc_layout.addLayout(sc_form)
 
-        self._sb_second_rate = _dsb(lo=1e-9, hi=1e9, val=1.0, suffix="units/min")
-        sc_form.addRow("Sweep Rate:", self._sb_second_rate)
+        self._le_second_rate, self._lbl_second_rate_unit, cnt_sr = _lefield()
+        sc_form.addRow("Sweep Rate:", cnt_sr)
 
         self._cb_second_safety = QCheckBox("Use Safety Ramp")
         self._cb_second_safety.setFont(_MONO)
@@ -569,12 +808,13 @@ class DoubleSweepWindow(QDialog):
         self._sb_second_steps.setEnabled(False)
         sc_form.addRow("Safety Steps:", self._sb_second_steps)
 
-        self._sb_second_interval = _dsb(lo=0.0, hi=60000, dec=1, val=0.0, suffix="ms")
-        self._sb_second_interval.setEnabled(False)
-        sc_form.addRow("Safety Interval:", self._sb_second_interval)
+        self._le_second_interval, _lbl_si_unit, cnt_si = _lefield()
+        _lbl_si_unit.setText("ms")
+        self._le_second_interval.setEnabled(False)
+        sc_form.addRow("Safety Interval:", cnt_si)
 
         self._cb_second_safety.toggled.connect(self._sb_second_steps.setEnabled)
-        self._cb_second_safety.toggled.connect(self._sb_second_interval.setEnabled)
+        self._cb_second_safety.toggled.connect(self._le_second_interval.setEnabled)
 
         self._sweep_ch_frame.setVisible(False)
         outer.addWidget(self._sweep_ch_frame)
@@ -588,28 +828,42 @@ class DoubleSweepWindow(QDialog):
         arr_title.setStyleSheet("font-weight: bold; font-size: 12px;")
         arr_layout.addWidget(arr_title)
 
+        def _le_inline(w=90):
+            """QLineEdit + unit QLabel without a container (avoids parent-child GC issue)."""
+            le = QLineEdit()
+            le.setFont(_MONO)
+            le.setFixedWidth(w)
+            vd = QDoubleValidator()
+            vd.setNotation(QDoubleValidator.Notation.StandardNotation)
+            le.setValidator(vd)
+            lbl = QLabel("")
+            lbl.setFont(_MONO)
+            lbl.setStyleSheet("color: #888888;")
+            lbl.setMinimumWidth(50)
+            return le, lbl
+
         arr_row = QHBoxLayout()
         arr_row.addWidget(QLabel("From:"))
-        self._sb_arr_from = _dsb(val=0.0)
-        self._sb_arr_from.setFixedWidth(90)
-        arr_row.addWidget(self._sb_arr_from)
+        self._le_arr_from,  self._lbl_arr_from_unit  = _le_inline()
+        self._le_arr_to,    self._lbl_arr_to_unit    = _le_inline()
+        self._le_arr_step,  self._lbl_arr_step_unit  = _le_inline()
+        arr_row.addWidget(self._le_arr_from)
+        arr_row.addWidget(self._lbl_arr_from_unit)
         arr_row.addWidget(QLabel("To:"))
-        self._sb_arr_to = _dsb(val=1.0)
-        self._sb_arr_to.setFixedWidth(90)
-        arr_row.addWidget(self._sb_arr_to)
+        arr_row.addWidget(self._le_arr_to)
+        arr_row.addWidget(self._lbl_arr_to_unit)
         arr_row.addWidget(QLabel("Step:"))
-        self._sb_arr_step = _dsb(lo=-1e9, hi=1e9, val=0.1)
-        self._sb_arr_step.setFixedWidth(90)
-        arr_row.addWidget(self._sb_arr_step)
+        arr_row.addWidget(self._le_arr_step)
+        arr_row.addWidget(self._lbl_arr_step_unit)
         self._lbl_n_points = QLabel("→ — pts")
         self._lbl_n_points.setStyleSheet("color: #888888;")
         arr_row.addWidget(self._lbl_n_points)
         arr_layout.addLayout(arr_row)
         outer.addWidget(arr_frame)
 
-        # Connect array spinboxes to point count update
-        for sb in (self._sb_arr_from, self._sb_arr_to, self._sb_arr_step):
-            sb.valueChanged.connect(self._update_n_points)
+        # Connect array inputs to point count update
+        for le in (self._le_arr_from, self._le_arr_to, self._le_arr_step):
+            le.textChanged.connect(self._update_n_points)
 
         # Estimated time + ETA row
         est_row = QHBoxLayout()
@@ -630,11 +884,11 @@ class DoubleSweepWindow(QDialog):
         outer.addLayout(est_row)
 
         # Connect all params that affect the estimate
-        for sb in (self._sb_start, self._sb_stop,
-                   self._sb_rate_t, self._sb_rate_r, self._sb_rate_d,
-                   self._sb_tpp,
-                   self._sb_arr_from, self._sb_arr_to, self._sb_arr_step):
-            sb.valueChanged.connect(self._update_est_time)
+        for le in (self._le_start, self._le_stop,
+                   self._le_rate_t, self._le_rate_r, self._le_rate_d,
+                   self._le_tpp,
+                   self._le_arr_from, self._le_arr_to, self._le_arr_step):
+            le.textChanged.connect(self._update_est_time)
 
         # Status row
         status_frame = QFrame()
@@ -763,6 +1017,7 @@ class DoubleSweepWindow(QDialog):
             self._sweep_ch_frame.setVisible(
                 self._second_channel.advance_type == SecondSweepAdvanceType.SWEEP
             )
+            self._update_unit_labels()
 
     # ------------------------------------------------------------------
     # Config load / save
@@ -770,61 +1025,103 @@ class DoubleSweepWindow(QDialog):
 
     def _load_config(self):
         cfg = self._param_reg.double_sweep_config
-        self._sb_start.setValue(cfg.start_point)
-        self._sb_stop.setValue(cfg.stop_point)
-        self._sb_rate_t.setValue(cfg.rate_trace)
-        self._sb_rate_r.setValue(cfg.rate_retrace)
-        self._sb_rate_d.setValue(cfg.rate_dummy)
-        self._sb_tpp.setValue(cfg.time_per_point)
-        self._sb_arr_from.setValue(cfg.array_from)
-        self._sb_arr_to.setValue(cfg.array_to)
-        self._sb_arr_step.setValue(cfg.array_step)
+        self._le_start.setText(f"{cfg.start_point:g}")
+        self._le_stop.setText(f"{cfg.stop_point:g}")
+        self._le_rate_t.setText(f"{cfg.rate_trace:g}")
+        self._le_rate_r.setText(f"{cfg.rate_retrace:g}")
+        self._le_rate_d.setText(f"{cfg.rate_dummy:g}")
+        self._le_tpp.setText(f"{cfg.time_per_point:g}")
+        self._le_arr_from.setText(f"{cfg.array_from:g}")
+        self._le_arr_to.setText(f"{cfg.array_to:g}")
+        self._le_arr_step.setText(f"{cfg.array_step:g}")
         self._cb_retrace_to_zero.setChecked(cfg.retrace_to_zero)
-        self._sb_second_rate.setValue(cfg.second_sweep_rate)
+        self._le_second_rate.setText(f"{cfg.second_sweep_rate:g}")
         self._cb_second_safety.setChecked(cfg.second_use_safety)
         self._sb_second_steps.setValue(cfg.second_safety_steps)
-        self._sb_second_interval.setValue(cfg.second_safety_interval_ms)
+        self._le_second_interval.setText(f"{cfg.second_safety_interval_ms:g}")
         self._update_n_points()
         self._update_est_time()
         # AlarmPanel: refresh combo from alarm_measurements, then load saved config
         alarm_meas = self._param_reg.main_ui_profile.alarm_measurements
         self._alarm_panel.refresh_measurements(alarm_meas)
         self._alarm_panel.load_config(cfg.alarm)
+        self._telegram_panel.load_config(cfg.alarm)
+
+    def _build_alarm_config(self) -> AlarmConfig:
+        from config.config_models import TelegramContact
+        base = self._alarm_panel.get_config().model_dump()
+        tg = self._telegram_panel.get_config()
+        contacts = [TelegramContact(**c) for c in tg.pop("telegram_contacts", [])]
+        return AlarmConfig(**base, **tg, telegram_contacts=contacts)
 
     def _save_config(self):
         cfg = DoubleSweepConfig(
-            start_point=self._sb_start.value(),
-            stop_point=self._sb_stop.value(),
-            rate_trace=self._sb_rate_t.value(),
-            rate_retrace=self._sb_rate_r.value(),
-            rate_dummy=self._sb_rate_d.value(),
-            time_per_point=self._sb_tpp.value(),
-            array_from=self._sb_arr_from.value(),
-            array_to=self._sb_arr_to.value(),
-            array_step=self._sb_arr_step.value(),
+            start_point=self._parse_ds_float(self._le_start.text(), 0.0),
+            stop_point=self._parse_ds_float(self._le_stop.text(), 1.0),
+            rate_trace=self._parse_ds_float(self._le_rate_t.text(), 1.0),
+            rate_retrace=self._parse_ds_float(self._le_rate_r.text(), 1.0),
+            rate_dummy=self._parse_ds_float(self._le_rate_d.text(), 1.0),
+            time_per_point=self._parse_ds_float(self._le_tpp.text(), 1.0),
+            array_from=self._parse_ds_float(self._le_arr_from.text(), 0.0),
+            array_to=self._parse_ds_float(self._le_arr_to.text(), 1.0),
+            array_step=self._parse_ds_float(self._le_arr_step.text(), 0.1),
             selected_channel_idx=max(0, self._second_radio_group.checkedId()),
             retrace_to_zero=self._cb_retrace_to_zero.isChecked(),
-            second_sweep_rate=self._sb_second_rate.value(),
+            second_sweep_rate=self._parse_ds_float(self._le_second_rate.text(), 1.0),
             second_use_safety=self._cb_second_safety.isChecked(),
             second_safety_steps=self._sb_second_steps.value(),
-            second_safety_interval_ms=self._sb_second_interval.value(),
-            alarm=self._alarm_panel.get_config(),
+            second_safety_interval_ms=self._parse_ds_float(self._le_second_interval.text(), 0.0),
+            alarm=self._build_alarm_config(),
         )
         self._param_reg.save_double_sweep_config(cfg)
 
     def _current_cfg(self) -> DoubleSweepConfig:
         return DoubleSweepConfig(
-            start_point=self._sb_start.value(),
-            stop_point=self._sb_stop.value(),
-            rate_trace=self._sb_rate_t.value(),
-            rate_retrace=self._sb_rate_r.value(),
-            rate_dummy=self._sb_rate_d.value(),
-            time_per_point=self._sb_tpp.value(),
-            array_from=self._sb_arr_from.value(),
-            array_to=self._sb_arr_to.value(),
-            array_step=self._sb_arr_step.value(),
+            start_point=self._parse_ds_float(self._le_start.text(), 0.0),
+            stop_point=self._parse_ds_float(self._le_stop.text(), 1.0),
+            rate_trace=self._parse_ds_float(self._le_rate_t.text(), 1.0),
+            rate_retrace=self._parse_ds_float(self._le_rate_r.text(), 1.0),
+            rate_dummy=self._parse_ds_float(self._le_rate_d.text(), 1.0),
+            time_per_point=self._parse_ds_float(self._le_tpp.text(), 1.0),
+            array_from=self._parse_ds_float(self._le_arr_from.text(), 0.0),
+            array_to=self._parse_ds_float(self._le_arr_to.text(), 1.0),
+            array_step=self._parse_ds_float(self._le_arr_step.text(), 0.1),
             retrace_to_zero=self._cb_retrace_to_zero.isChecked(),
         )
+
+    @staticmethod
+    def _parse_ds_float(text: str, default: float = 0.0) -> float:
+        try:
+            return float(text.strip())
+        except (ValueError, AttributeError):
+            return default
+
+    def _get_first_channel_unit(self) -> str:
+        try:
+            profile = self._main_win._active_profile
+            idx = profile.active_sweep_channel_idx
+            if 0 <= idx < len(profile.main_ui.sweep_values):
+                return profile.main_ui.sweep_values[idx].unit
+        except Exception:
+            pass
+        return ""
+
+    def _update_unit_labels(self):
+        """Refresh unit labels based on current first/second channel selections."""
+        u1 = self._get_first_channel_unit()
+        self._lbl_start_unit.setText(u1)
+        self._lbl_stop_unit.setText(u1)
+        rate_u1 = f"{u1}/min" if u1 else "units/min"
+        self._lbl_rate_t_unit.setText(rate_u1)
+        self._lbl_rate_r_unit.setText(rate_u1)
+        self._lbl_rate_d_unit.setText(rate_u1)
+
+        u2 = self._second_channel.unit if self._second_channel else ""
+        self._lbl_arr_from_unit.setText(u2)
+        self._lbl_arr_to_unit.setText(u2)
+        self._lbl_arr_step_unit.setText(u2)
+        rate_u2 = f"{u2}/min" if u2 else "units/min"
+        self._lbl_second_rate_unit.setText(rate_u2)
 
     def _update_n_points(self):
         cfg = self._current_cfg()
@@ -1040,9 +1337,9 @@ class DoubleSweepWindow(QDialog):
             return ch
         use_safety = self._cb_second_safety.isChecked()
         return ch.model_copy(update={
-            "sweep_rate": self._sb_second_rate.value(),
+            "sweep_rate": self._parse_ds_float(self._le_second_rate.text(), 1.0),
             "safety_steps": self._sb_second_steps.value() if use_safety else 0,
-            "safety_interval_ms": self._sb_second_interval.value() if use_safety else 0.0,
+            "safety_interval_ms": self._parse_ds_float(self._le_second_interval.text(), 0.0) if use_safety else 0.0,
         })
 
     def _advance_second(self, next_val: float, prev: Optional[float]):
@@ -1057,8 +1354,8 @@ class DoubleSweepWindow(QDialog):
 
         # Clear graph and reset derivative buffers when advancing to next array step
         if prev is not None:
-            for ch in (self._main_win._deriv_channel, self._main_win._deriv_channel2, self._main_win._deriv_channel3):
-                ch.reset()
+            for _dc in (self._main_win._deriv_channel, self._main_win._deriv_channel2, self._main_win._deriv_channel3):
+                _dc.reset()
             if self._main_win._graph_window is not None:
                 try:
                     cols = [("__sweep__", self._ctx.sweep_col[0], self._ctx.sweep_col[1])]
@@ -1082,7 +1379,8 @@ class DoubleSweepWindow(QDialog):
 
     @Slot()
     def _on_advance_done(self):
-        # Always start DUMMY after advance
+        if self._phase != DoubleSweepPhase.ADVANCING_SECOND:
+            return
         self._start_sweep_phase(DoubleSweepPhase.DUMMY)
 
     @Slot(str)
@@ -1160,6 +1458,7 @@ class DoubleSweepWindow(QDialog):
         # TRACE 파일 경로를 메타 데이터 JSON 저장에 사용
         if phase_name == "trace":
             self._trace_filepath = self._data_saver.get_filepath()
+        self._update_ds_save_path()
 
     # ------------------------------------------------------------------
     # Sweep tick (same pattern as main_window)
@@ -1454,6 +1753,7 @@ class DoubleSweepWindow(QDialog):
             self._second_thread.start()
         self._update_ds_save_path()
         self._rebuild_second_channel_radios()
+        self._update_unit_labels()
         # Refresh alarm panel measurements in case alarm_measurements changed
         alarm_meas = self._param_reg.main_ui_profile.alarm_measurements
         self._alarm_panel.refresh_measurements(alarm_meas)
