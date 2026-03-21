@@ -293,6 +293,7 @@ class DoubleSweepConfig(BaseModel):
     array_step: float = 0.1
     selected_channel_idx: int = 0
     retrace_to_zero: bool = False  # if True, RETRACE sweeps to 0 instead of start_point
+    to_zero_at_last: bool = False  # if True, send second channel to 0 after all array steps
     # SWEEP-type second channel params (adjustable in DoubleSweepWindow)
     second_sweep_rate: float = 1.0
     second_use_safety: bool = False

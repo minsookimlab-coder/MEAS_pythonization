@@ -70,6 +70,7 @@ class DoubleSweepContext:
 class DoubleSweepPhase(Enum):
     IDLE             = auto()
     PRE_INIT         = auto()   # first channel → start_point (no data)
+    RETURNING_ZERO   = auto()   # second channel → 0 after all array steps (no measurement)
     ADVANCING_SECOND = auto()
     DUMMY            = auto()
     TRACE            = auto()
@@ -90,24 +91,58 @@ def _generate_array(cfg: DoubleSweepConfig) -> List[float]:
     return result if result else [cfg.array_from]
 
 
-def _estimate_total_seconds(cfg: "DoubleSweepConfig", n_array: int) -> float:
-    """Estimate total sweep time in seconds (excluding PRE_INIT and second-channel advance)."""
-    tpp = cfg.time_per_point
-    distance = abs(cfg.stop_point - cfg.start_point)
+def _estimate_total_seconds(
+    cfg: "DoubleSweepConfig",
+    n_array: int,
+    second_ch: "Optional[InstantiatedSecondSweepChannel]" = None,
+) -> float:
+    """Estimate total sweep time in seconds.
 
-    def _n_steps(dist: float, rate: float) -> int:
-        if rate <= 0 or tpp <= 0:
-            return 1
-        increment = (rate / 60.0) * tpp
-        if increment <= 0:
-            return 1
-        return math.ceil(dist / increment) + 1   # +1 for the is_done step
+    Rules:
+    - time = distance * 60 / rate  (tpp is measurement interval only, does not affect travel time)
+    - retrace_to_zero: retrace goes to 0; dummy goes from 0 to start_point
+    - second channel advance time: SWEEP → step * 60 / sweep_rate; WAIT_FOR_TIME → wait_time; others → 0
+    """
+    if n_array == 0:
+        return 0.0
 
-    dummy_steps = 1                                    # already at start_point
-    trace_steps   = _n_steps(distance, cfg.rate_trace)
-    retrace_steps = _n_steps(distance, cfg.rate_retrace)
-    steps_per_cycle = dummy_steps + trace_steps + retrace_steps
-    return n_array * steps_per_cycle * tpp
+    def _sweep_time(dist: float, rate: float) -> float:
+        if rate <= 0 or dist <= 0:
+            return 0.0
+        return dist * 60.0 / rate
+
+    trace_dist   = abs(cfg.stop_point - cfg.start_point)
+    if cfg.retrace_to_zero:
+        retrace_dist = abs(cfg.stop_point)
+        dummy_dist   = abs(cfg.start_point)
+    else:
+        retrace_dist = trace_dist
+        dummy_dist   = 0.0
+
+    trace_time   = _sweep_time(trace_dist,   cfg.rate_trace)
+    retrace_time = _sweep_time(retrace_dist, cfg.rate_retrace)
+    dummy_time   = _sweep_time(dummy_dist,   cfg.rate_dummy)
+
+    advance_time = 0.0
+    if second_ch is not None:
+        if second_ch.advance_type == SecondSweepAdvanceType.SWEEP and second_ch.sweep_rate > 0:
+            step = abs(cfg.array_step) if abs(cfg.array_step) > 1e-12 else 0.0
+            advance_time = _sweep_time(step, second_ch.sweep_rate)
+        elif second_ch.advance_type == SecondSweepAdvanceType.WAIT_FOR_TIME:
+            advance_time = getattr(second_ch, "wait_time", 0.0)
+
+    time_per_cycle = advance_time + dummy_time + trace_time + retrace_time
+    total = n_array * time_per_cycle
+
+    # to_zero_at_last: add time for final second channel → 0 move
+    if cfg.to_zero_at_last and second_ch is not None:
+        last_val = cfg.array_from + (n_array - 1) * cfg.array_step
+        if second_ch.advance_type == SecondSweepAdvanceType.SWEEP and second_ch.sweep_rate > 0:
+            total += _sweep_time(abs(last_val), second_ch.sweep_rate)
+        elif second_ch.advance_type == SecondSweepAdvanceType.WAIT_FOR_TIME:
+            total += getattr(second_ch, "wait_time", 0.0)
+
+    return total
 
 
 def _fmt_hms(total_sec: float) -> str:
@@ -864,6 +899,15 @@ class DoubleSweepWindow(QDialog):
         self._lbl_n_points.setStyleSheet("color: #888888;")
         arr_row.addWidget(self._lbl_n_points)
         arr_layout.addLayout(arr_row)
+
+        self._cb_to_zero_at_last = QCheckBox("to 0 at last step")
+        self._cb_to_zero_at_last.setFont(_MONO)
+        self._cb_to_zero_at_last.setToolTip(
+            "마지막 array step 완료 후 second channel을 0으로 전송합니다.\n"
+            "SWEEP type: advance type 그대로 0까지 sweep\n"
+            "기타 type: VISA write 명령어로 즉시 0 전송"
+        )
+        arr_layout.addWidget(self._cb_to_zero_at_last)
         self._arr_frame = arr_frame
         outer.addWidget(arr_frame)
 
@@ -893,8 +937,11 @@ class DoubleSweepWindow(QDialog):
         for le in (self._le_start, self._le_stop,
                    self._le_rate_t, self._le_rate_r, self._le_rate_d,
                    self._le_tpp,
-                   self._le_arr_from, self._le_arr_to, self._le_arr_step):
+                   self._le_arr_from, self._le_arr_to, self._le_arr_step,
+                   self._le_second_rate):
             le.textChanged.connect(self._update_est_time)
+        self._cb_retrace_to_zero.stateChanged.connect(self._update_est_time)
+        self._cb_to_zero_at_last.stateChanged.connect(self._update_est_time)
 
         # Status row
         status_frame = QFrame()
@@ -1041,6 +1088,7 @@ class DoubleSweepWindow(QDialog):
         self._le_arr_to.setText(f"{cfg.array_to:g}")
         self._le_arr_step.setText(f"{cfg.array_step:g}")
         self._cb_retrace_to_zero.setChecked(cfg.retrace_to_zero)
+        self._cb_to_zero_at_last.setChecked(cfg.to_zero_at_last)
         self._le_second_rate.setText(f"{cfg.second_sweep_rate:g}")
         self._cb_second_safety.setChecked(cfg.second_use_safety)
         self._sb_second_steps.setValue(cfg.second_safety_steps)
@@ -1075,6 +1123,7 @@ class DoubleSweepWindow(QDialog):
             array_step=self._parse_ds_float(self._le_arr_step.text(), 0.1),
             selected_channel_idx=max(0, self._second_radio_group.checkedId()),
             retrace_to_zero=self._cb_retrace_to_zero.isChecked(),
+            to_zero_at_last=self._cb_to_zero_at_last.isChecked(),
             second_sweep_rate=self._parse_ds_float(self._le_second_rate.text(), 1.0),
             second_use_safety=self._cb_second_safety.isChecked(),
             second_safety_steps=self._sb_second_steps.value(),
@@ -1095,6 +1144,7 @@ class DoubleSweepWindow(QDialog):
             array_to=self._parse_ds_float(self._le_arr_to.text(), 1.0),
             array_step=self._parse_ds_float(self._le_arr_step.text(), 0.1),
             retrace_to_zero=self._cb_retrace_to_zero.isChecked(),
+            to_zero_at_last=self._cb_to_zero_at_last.isChecked(),
         )
 
     @staticmethod
@@ -1139,7 +1189,10 @@ class DoubleSweepWindow(QDialog):
     def _update_est_time(self):
         cfg = self._current_cfg()
         arr = _generate_array(cfg)
-        sec = _estimate_total_seconds(cfg, len(arr))
+        second_ch = None
+        if self._second_channel is not None:
+            second_ch = self._make_effective_second_channel()
+        sec = _estimate_total_seconds(cfg, len(arr), second_ch)
         self._lbl_est_time.setText(_fmt_hms(sec))
         eta = _datetime.now() + _timedelta(seconds=sec)
         # 24h 이내면 HH:MM, 그 이상이면 날짜 포함
@@ -1425,8 +1478,36 @@ class DoubleSweepWindow(QDialog):
             time_per_point=self._cfg.time_per_point,
         ))
 
+    def _return_second_to_zero(self):
+        """모든 array step 완료 후 second channel을 0으로 전송."""
+        ch = self._make_effective_second_channel()
+        last_val = self._array[-1] if self._array else None
+        self._set_phase(DoubleSweepPhase.RETURNING_ZERO)
+        self._lbl_phase.setText("RETURNING 0")
+
+        if ch.advance_type == SecondSweepAdvanceType.SWEEP:
+            # SWEEP type: use full advance worker so safety ramp / rate are respected
+            self.request_advance.emit(SecondChannelRequest(
+                channel=ch,
+                next_value=0.0,
+                prev_value=last_val,
+                time_per_point=self._cfg.time_per_point,
+            ))
+        else:
+            # Other types: single VISA write to 0, then finish immediately
+            ch_simple = ch.model_copy(update={"advance_type": SecondSweepAdvanceType.SIMPLE_HOP})
+            self.request_advance.emit(SecondChannelRequest(
+                channel=ch_simple,
+                next_value=0.0,
+                prev_value=last_val,
+                time_per_point=self._cfg.time_per_point,
+            ))
+
     @Slot()
     def _on_advance_done(self):
+        if self._phase == DoubleSweepPhase.RETURNING_ZERO:
+            self._finish()
+            return
         if self._phase != DoubleSweepPhase.ADVANCING_SECOND:
             return
         self._start_sweep_phase(DoubleSweepPhase.DUMMY)
@@ -1474,7 +1555,10 @@ class DoubleSweepWindow(QDialog):
                     prev=self._array[self._array_idx - 1],
                 )
             else:
-                self._finish()
+                if self._cfg.to_zero_at_last and self._second_channel is not None:
+                    self._return_second_to_zero()
+                else:
+                    self._finish()
 
     # ------------------------------------------------------------------
     # DataSaver

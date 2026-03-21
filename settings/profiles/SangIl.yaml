@@ -317,18 +317,19 @@ custom_word: '1'
 include_date: true
 save_enabled: true
 double_sweep:
-  start_point: 0.0
-  stop_point: 1.0
+  start_point: -5.0
+  stop_point: 5.0
   rate_trace: 5.0
   rate_retrace: 5.0
-  rate_dummy: 5.0
+  rate_dummy: 20.0
   time_per_point: 0.5
   array_from: 0.5
-  array_to: 0.6
+  array_to: 1.0
   array_step: 0.1
   selected_channel_idx: 1
-  retrace_to_zero: false
-  second_sweep_rate: 1.0
+  retrace_to_zero: true
+  to_zero_at_last: false
+  second_sweep_rate: 5.0
   second_use_safety: true
   second_safety_steps: 5
   second_safety_interval_ms: 1.0
@@ -341,7 +342,7 @@ double_sweep:
     smtp_port: 587
     smtp_user: ''
     smtp_password: ''
-    use_telegram: true
+    use_telegram: false
     telegram_bot_token: 8455510788:AAF8xF5l2RuTatNeSRuzOkVjN_aTorGEAqQ
     telegram_chat_id: '7681063541'
     telegram_contacts:
