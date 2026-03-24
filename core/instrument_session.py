@@ -37,16 +37,24 @@ class InstrumentSession:
         self._instruments: Dict[str, BaseInstrument] = {}
         self._log_callbacks = []
         self._shut_down = False
+        self._log_enabled = True # log_enabled 플래그 추가
         self._lock = threading.Lock()
+        atexit.register(self.shutdown) # atexit에 shutdown 등록 - 프로그램이 정상적으로 종료될 때뿐만 아니라, 예외로 인해 비정상적으로 종료될 때도 호출됩니다.
 
         # 비정상 종료(크래시, 강제 종료) 시에도 VISA 세션이 해제되도록 등록
         atexit.register(self.shutdown)
+
+    def set_log_enabled(self, enabled: bool):  # ← 새 메서드 추가
+        """VISA 로깅 활성/비활성화"""
+        self._log_enabled = enabled
 
     def add_log_callback(self, cb):
         """VISA 명령어 로그 콜백을 등록합니다. cb(alias, cmd_type, cmd, result)."""
         self._log_callbacks.append(cb)
 
     def _emit_log(self, alias: str, cmd_type: str, cmd: str, result=None):
+        if not self._log_enabled:  # ← 조건 추가
+            return  # 로그 비활성화 시 콜백 호출 건너뜀
         for cb in self._log_callbacks:
             try:
                 cb(alias, cmd_type, cmd, result)
@@ -118,6 +126,7 @@ class InstrumentSession:
             except Exception as e:
                 self._emit_log(alias, "write_err", cmd, f"{type(e).__name__}: {e}")
                 raise
+
 
     def read(self, alias: str) -> str:
         """alias 장비로부터 응답을 읽어 반환합니다."""

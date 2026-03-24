@@ -19,12 +19,12 @@
   sweep_values:
   - description: write_smua_voltage
     cmd_set: smua.source.levelv={v}
-    paired_read_cmd: reading=smua.measure.v()print(reading)
+    paired_read_cmd: print(smua.measure.v())
     figure_axis: target_smua_voltage
     unit: V
   - description: write_smub_voltage
     cmd_set: smub.source.levelv={v}
-    paired_read_cmd: reading=smub.measure.i()print(reading)
+    paired_read_cmd: print(smub.measure.i())
     figure_axis: target_smub_voltage
     unit: V
   write_cmds: []
@@ -101,6 +101,28 @@ SR830:
   sweep_values: []
   write_cmds: []
 VNA:
-  measurements: []
+  measurements:
+  - description: VNA_set_delaytime
+    cmd_query: DEL {time};TYPE LIN
+    figure_axis: none
+    unit: t
   sweep_values: []
-  write_cmds: []
+  write_cmds:
+  - description: VNA_configuration
+    cmd_set: ':DISP:WIND{channel}:ACT;
+
+      :CALC{channel}:PAR:COUN {num_of_trace};
+
+      :CALC{channel}:PAR{active_trace}:SEL;:CALC1:PAR{active_trace}:DEF {SXX};
+
+      :CALC{channel}:FORM MLOG;'
+    figure_axis: none
+    unit: none
+  - description: VNA_set_numofpoint
+    cmd_set: :SENS{channel}:SWE:POIN {num_of_point};
+    figure_axis: none
+    unit: none
+  - description: VNA_set_sweeptime
+    cmd_set: SENS{channel}:SWE:TIME {t}
+    figure_axis: none
+    unit: t

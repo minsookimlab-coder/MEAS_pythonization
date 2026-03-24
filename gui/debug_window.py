@@ -50,6 +50,17 @@ class DebugWindow(QDialog):
     # ------------------------------------------------------------------
     # Panel builders
     # ------------------------------------------------------------------
+    def set_visa_log_callback(self, cb):
+        """Show 토글 변경 시 호출할 콜백 등록"""
+        self._on_visa_show_changed = cb
+        # 초기 상태도 적용
+        if cb:
+            cb(self._cb_visa_show.isChecked())
+        # 토글 변경 신호 연결
+        self._cb_visa_show.stateChanged.connect(
+            lambda: cb(self._cb_visa_show.isChecked()) if cb else None
+        )
+
 
     def _build_visa_panel(self) -> QWidget:
         panel = QWidget()
@@ -65,6 +76,7 @@ class DebugWindow(QDialog):
         self._cb_visa_show.setFont(self._mono)
         self._cb_visa_show.setStyleSheet("font-size: 10px; color: #888;")
         hdr.addWidget(self._cb_visa_show)
+        self._on_visa_show_changed = None  # setter 추가 위한 placeholder
         hdr.addStretch()
 
         btn_clear = QPushButton("Clear")

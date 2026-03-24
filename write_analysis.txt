@@ -1,0 +1,819 @@
+
+=== WRITE_ANALYSIS ===
+Total loop: 479.25ms
+Steps: 10
+Step[0]: set_value=50.70ms, sleep=0.52ms
+Step[last]: set_value=45.56ms, sleep=0.53ms
+Avg: set_value=44.97ms, sleep=2.94ms
+  Step 0: set_value=50.70ms, sleep=0.52ms
+  Step 1: set_value=40.27ms, sleep=0.53ms
+  Step 2: set_value=48.85ms, sleep=0.52ms
+  Step 3: set_value=25.85ms, sleep=24.78ms
+  Step 4: set_value=47.63ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 473.96ms
+Steps: 10
+Step[0]: set_value=27.13ms, sleep=0.52ms
+Step[last]: set_value=53.00ms, sleep=0.52ms
+Avg: set_value=39.49ms, sleep=7.90ms
+  Step 0: set_value=27.13ms, sleep=0.52ms
+  Step 1: set_value=52.97ms, sleep=1.04ms
+  Step 2: set_value=28.93ms, sleep=0.53ms
+  Step 3: set_value=27.28ms, sleep=73.81ms
+  Step 4: set_value=27.30ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 506.02ms
+Steps: 10
+Step[0]: set_value=81.77ms, sleep=0.52ms
+Step[last]: set_value=47.86ms, sleep=0.52ms
+Avg: set_value=50.01ms, sleep=0.58ms
+  Step 0: set_value=81.77ms, sleep=0.52ms
+  Step 1: set_value=53.16ms, sleep=0.52ms
+  Step 2: set_value=55.86ms, sleep=0.51ms
+  Step 3: set_value=53.46ms, sleep=0.51ms
+  Step 4: set_value=50.07ms, sleep=0.93ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 514.67ms
+Steps: 10
+Step[0]: set_value=55.17ms, sleep=0.52ms
+Step[last]: set_value=49.60ms, sleep=0.52ms
+Avg: set_value=48.31ms, sleep=3.15ms
+  Step 0: set_value=55.17ms, sleep=0.52ms
+  Step 1: set_value=54.48ms, sleep=0.52ms
+  Step 2: set_value=50.14ms, sleep=0.86ms
+  Step 3: set_value=48.46ms, sleep=0.53ms
+  Step 4: set_value=51.10ms, sleep=0.89ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 508.03ms
+Steps: 10
+Step[0]: set_value=48.64ms, sleep=0.51ms
+Step[last]: set_value=25.90ms, sleep=26.48ms
+Avg: set_value=45.20ms, sleep=5.59ms
+  Step 0: set_value=48.64ms, sleep=0.51ms
+  Step 1: set_value=25.49ms, sleep=25.63ms
+  Step 2: set_value=48.41ms, sleep=0.52ms
+  Step 3: set_value=50.96ms, sleep=0.52ms
+  Step 4: set_value=49.39ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 551.32ms
+Steps: 10
+Step[0]: set_value=72.74ms, sleep=0.52ms
+Step[last]: set_value=48.47ms, sleep=0.52ms
+Avg: set_value=51.64ms, sleep=3.48ms
+  Step 0: set_value=72.74ms, sleep=0.52ms
+  Step 1: set_value=49.26ms, sleep=0.52ms
+  Step 2: set_value=25.90ms, sleep=29.70ms
+  Step 3: set_value=55.25ms, sleep=0.52ms
+  Step 4: set_value=56.25ms, sleep=0.53ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 485.40ms
+Steps: 10
+Step[0]: set_value=46.11ms, sleep=0.52ms
+Step[last]: set_value=27.07ms, sleep=0.52ms
+Avg: set_value=47.96ms, sleep=0.58ms
+  Step 0: set_value=46.11ms, sleep=0.52ms
+  Step 1: set_value=50.80ms, sleep=0.52ms
+  Step 2: set_value=56.03ms, sleep=0.47ms
+  Step 3: set_value=54.12ms, sleep=0.67ms
+  Step 4: set_value=52.26ms, sleep=0.62ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 530.21ms
+Steps: 10
+Step[0]: set_value=54.32ms, sleep=0.51ms
+Step[last]: set_value=49.61ms, sleep=0.51ms
+Avg: set_value=52.47ms, sleep=0.54ms
+  Step 0: set_value=54.32ms, sleep=0.51ms
+  Step 1: set_value=54.96ms, sleep=0.52ms
+  Step 2: set_value=53.34ms, sleep=0.52ms
+  Step 3: set_value=56.23ms, sleep=0.52ms
+  Step 4: set_value=54.03ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 437.94ms
+Steps: 10
+Step[0]: set_value=46.88ms, sleep=0.52ms
+Step[last]: set_value=45.84ms, sleep=0.52ms
+Avg: set_value=43.25ms, sleep=0.54ms
+  Step 0: set_value=46.88ms, sleep=0.52ms
+  Step 1: set_value=47.34ms, sleep=0.67ms
+  Step 2: set_value=47.14ms, sleep=0.51ms
+  Step 3: set_value=48.44ms, sleep=0.57ms
+  Step 4: set_value=48.31ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 483.28ms
+Steps: 10
+Step[0]: set_value=46.92ms, sleep=0.51ms
+Step[last]: set_value=47.12ms, sleep=0.51ms
+Avg: set_value=47.88ms, sleep=0.44ms
+  Step 0: set_value=46.92ms, sleep=0.51ms
+  Step 1: set_value=47.91ms, sleep=0.51ms
+  Step 2: set_value=45.82ms, sleep=0.19ms
+  Step 3: set_value=47.19ms, sleep=0.52ms
+  Step 4: set_value=47.14ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 466.93ms
+Steps: 10
+Step[0]: set_value=27.04ms, sleep=0.52ms
+Step[last]: set_value=45.77ms, sleep=0.51ms
+Avg: set_value=46.18ms, sleep=0.51ms
+  Step 0: set_value=27.04ms, sleep=0.52ms
+  Step 1: set_value=46.60ms, sleep=0.41ms
+  Step 2: set_value=47.12ms, sleep=0.51ms
+  Step 3: set_value=46.76ms, sleep=0.52ms
+  Step 4: set_value=47.83ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 500.03ms
+Steps: 10
+Step[0]: set_value=51.46ms, sleep=0.52ms
+Step[last]: set_value=45.54ms, sleep=0.52ms
+Avg: set_value=49.44ms, sleep=0.56ms
+  Step 0: set_value=51.46ms, sleep=0.52ms
+  Step 1: set_value=51.38ms, sleep=0.63ms
+  Step 2: set_value=48.21ms, sleep=0.52ms
+  Step 3: set_value=52.76ms, sleep=0.52ms
+  Step 4: set_value=50.48ms, sleep=0.54ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 508.39ms
+Steps: 10
+Step[0]: set_value=72.87ms, sleep=0.52ms
+Step[last]: set_value=46.42ms, sleep=0.59ms
+Avg: set_value=50.34ms, sleep=0.49ms
+  Step 0: set_value=72.87ms, sleep=0.52ms
+  Step 1: set_value=49.53ms, sleep=0.52ms
+  Step 2: set_value=48.80ms, sleep=0.21ms
+  Step 3: set_value=48.06ms, sleep=0.51ms
+  Step 4: set_value=48.15ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 480.54ms
+Steps: 10
+Step[0]: set_value=46.25ms, sleep=0.52ms
+Step[last]: set_value=46.73ms, sleep=0.28ms
+Avg: set_value=45.15ms, sleep=2.90ms
+  Step 0: set_value=46.25ms, sleep=0.52ms
+  Step 1: set_value=47.00ms, sleep=0.52ms
+  Step 2: set_value=46.97ms, sleep=0.52ms
+  Step 3: set_value=46.96ms, sleep=0.52ms
+  Step 4: set_value=47.85ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 450.96ms
+Steps: 10
+Step[0]: set_value=46.13ms, sleep=0.51ms
+Step[last]: set_value=47.41ms, sleep=0.51ms
+Avg: set_value=44.59ms, sleep=0.50ms
+  Step 0: set_value=46.13ms, sleep=0.51ms
+  Step 1: set_value=46.74ms, sleep=0.51ms
+  Step 2: set_value=46.43ms, sleep=0.58ms
+  Step 3: set_value=47.00ms, sleep=0.52ms
+  Step 4: set_value=46.75ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 497.08ms
+Steps: 10
+Step[0]: set_value=27.45ms, sleep=0.52ms
+Step[last]: set_value=48.61ms, sleep=0.52ms
+Avg: set_value=49.19ms, sleep=0.51ms
+  Step 0: set_value=27.45ms, sleep=0.52ms
+  Step 1: set_value=72.27ms, sleep=0.52ms
+  Step 2: set_value=46.71ms, sleep=0.52ms
+  Step 3: set_value=47.07ms, sleep=0.52ms
+  Step 4: set_value=53.34ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 519.11ms
+Steps: 10
+Step[0]: set_value=73.97ms, sleep=0.52ms
+Step[last]: set_value=54.98ms, sleep=0.66ms
+Avg: set_value=51.39ms, sleep=0.52ms
+  Step 0: set_value=73.97ms, sleep=0.52ms
+  Step 1: set_value=47.37ms, sleep=0.52ms
+  Step 2: set_value=46.08ms, sleep=0.91ms
+  Step 3: set_value=47.01ms, sleep=0.52ms
+  Step 4: set_value=46.48ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 504.22ms
+Steps: 10
+Step[0]: set_value=50.17ms, sleep=0.52ms
+Step[last]: set_value=49.45ms, sleep=0.52ms
+Avg: set_value=49.90ms, sleep=0.52ms
+  Step 0: set_value=50.17ms, sleep=0.52ms
+  Step 1: set_value=50.10ms, sleep=0.51ms
+  Step 2: set_value=50.07ms, sleep=0.52ms
+  Step 3: set_value=47.21ms, sleep=0.52ms
+  Step 4: set_value=51.54ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 463.82ms
+Steps: 10
+Step[0]: set_value=26.48ms, sleep=0.52ms
+Step[last]: set_value=47.03ms, sleep=0.52ms
+Avg: set_value=45.86ms, sleep=0.52ms
+  Step 0: set_value=26.48ms, sleep=0.52ms
+  Step 1: set_value=45.63ms, sleep=0.51ms
+  Step 2: set_value=47.76ms, sleep=0.51ms
+  Step 3: set_value=48.81ms, sleep=0.52ms
+  Step 4: set_value=48.64ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 482.21ms
+Steps: 10
+Step[0]: set_value=27.47ms, sleep=0.54ms
+Step[last]: set_value=76.62ms, sleep=0.52ms
+Avg: set_value=47.69ms, sleep=0.52ms
+  Step 0: set_value=27.47ms, sleep=0.54ms
+  Step 1: set_value=48.04ms, sleep=0.54ms
+  Step 2: set_value=52.02ms, sleep=0.52ms
+  Step 3: set_value=51.31ms, sleep=0.52ms
+  Step 4: set_value=48.18ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 510.89ms
+Steps: 10
+Step[0]: set_value=49.00ms, sleep=0.51ms
+Step[last]: set_value=49.89ms, sleep=0.52ms
+Avg: set_value=50.56ms, sleep=0.52ms
+  Step 0: set_value=49.00ms, sleep=0.51ms
+  Step 1: set_value=48.57ms, sleep=0.52ms
+  Step 2: set_value=49.62ms, sleep=0.52ms
+  Step 3: set_value=48.67ms, sleep=0.52ms
+  Step 4: set_value=47.84ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 492.26ms
+Steps: 10
+Step[0]: set_value=48.99ms, sleep=0.51ms
+Step[last]: set_value=46.87ms, sleep=0.14ms
+Avg: set_value=48.78ms, sleep=0.44ms
+  Step 0: set_value=48.99ms, sleep=0.51ms
+  Step 1: set_value=49.88ms, sleep=0.52ms
+  Step 2: set_value=47.58ms, sleep=0.52ms
+  Step 3: set_value=46.23ms, sleep=0.52ms
+  Step 4: set_value=50.17ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 367.72ms
+Steps: 10
+Step[0]: set_value=29.73ms, sleep=0.52ms
+Step[last]: set_value=54.56ms, sleep=0.54ms
+Avg: set_value=36.25ms, sleep=0.52ms
+  Step 0: set_value=29.73ms, sleep=0.52ms
+  Step 1: set_value=46.39ms, sleep=0.51ms
+  Step 2: set_value=50.64ms, sleep=0.52ms
+  Step 3: set_value=27.54ms, sleep=0.54ms
+  Step 4: set_value=35.89ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 504.21ms
+Steps: 10
+Step[0]: set_value=53.31ms, sleep=0.52ms
+Step[last]: set_value=46.84ms, sleep=0.17ms
+Avg: set_value=49.92ms, sleep=0.50ms
+  Step 0: set_value=53.31ms, sleep=0.52ms
+  Step 1: set_value=48.32ms, sleep=0.52ms
+  Step 2: set_value=47.00ms, sleep=0.52ms
+  Step 3: set_value=47.94ms, sleep=0.57ms
+  Step 4: set_value=47.75ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 487.88ms
+Steps: 10
+Step[0]: set_value=48.33ms, sleep=0.69ms
+Step[last]: set_value=45.86ms, sleep=0.15ms
+Avg: set_value=48.31ms, sleep=0.48ms
+  Step 0: set_value=48.33ms, sleep=0.69ms
+  Step 1: set_value=47.68ms, sleep=0.52ms
+  Step 2: set_value=51.98ms, sleep=0.52ms
+  Step 3: set_value=50.28ms, sleep=0.52ms
+  Step 4: set_value=48.89ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 529.38ms
+Steps: 10
+Step[0]: set_value=81.47ms, sleep=0.52ms
+Step[last]: set_value=48.42ms, sleep=0.51ms
+Avg: set_value=52.43ms, sleep=0.51ms
+  Step 0: set_value=81.47ms, sleep=0.52ms
+  Step 1: set_value=51.48ms, sleep=0.52ms
+  Step 2: set_value=50.17ms, sleep=0.52ms
+  Step 3: set_value=47.46ms, sleep=0.52ms
+  Step 4: set_value=53.90ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 488.61ms
+Steps: 10
+Step[0]: set_value=30.55ms, sleep=0.52ms
+Step[last]: set_value=58.97ms, sleep=0.52ms
+Avg: set_value=48.35ms, sleep=0.51ms
+  Step 0: set_value=30.55ms, sleep=0.52ms
+  Step 1: set_value=40.70ms, sleep=0.30ms
+  Step 2: set_value=28.64ms, sleep=0.36ms
+  Step 3: set_value=51.58ms, sleep=0.52ms
+  Step 4: set_value=52.71ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 513.67ms
+Steps: 10
+Step[0]: set_value=53.74ms, sleep=0.54ms
+Step[last]: set_value=54.06ms, sleep=0.51ms
+Avg: set_value=50.83ms, sleep=0.53ms
+  Step 0: set_value=53.74ms, sleep=0.54ms
+  Step 1: set_value=52.16ms, sleep=0.52ms
+  Step 2: set_value=53.15ms, sleep=0.52ms
+  Step 3: set_value=26.60ms, sleep=0.51ms
+  Step 4: set_value=45.49ms, sleep=0.55ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 526.18ms
+Steps: 10
+Step[0]: set_value=46.95ms, sleep=0.52ms
+Step[last]: set_value=53.39ms, sleep=0.52ms
+Avg: set_value=52.09ms, sleep=0.52ms
+  Step 0: set_value=46.95ms, sleep=0.52ms
+  Step 1: set_value=50.14ms, sleep=0.52ms
+  Step 2: set_value=54.83ms, sleep=0.52ms
+  Step 3: set_value=53.98ms, sleep=0.52ms
+  Step 4: set_value=53.12ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 534.48ms
+Steps: 10
+Step[0]: set_value=52.59ms, sleep=0.52ms
+Step[last]: set_value=53.84ms, sleep=0.52ms
+Avg: set_value=52.89ms, sleep=0.56ms
+  Step 0: set_value=52.59ms, sleep=0.52ms
+  Step 1: set_value=50.41ms, sleep=0.52ms
+  Step 2: set_value=51.48ms, sleep=0.51ms
+  Step 3: set_value=54.42ms, sleep=0.52ms
+  Step 4: set_value=55.81ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 530.24ms
+Steps: 10
+Step[0]: set_value=53.84ms, sleep=0.68ms
+Step[last]: set_value=55.95ms, sleep=1.10ms
+Avg: set_value=52.40ms, sleep=0.62ms
+  Step 0: set_value=53.84ms, sleep=0.68ms
+  Step 1: set_value=51.30ms, sleep=0.52ms
+  Step 2: set_value=50.56ms, sleep=0.45ms
+  Step 3: set_value=50.20ms, sleep=0.82ms
+  Step 4: set_value=47.85ms, sleep=0.24ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 559.76ms
+Steps: 10
+Step[0]: set_value=50.99ms, sleep=27.95ms
+Step[last]: set_value=49.97ms, sleep=0.51ms
+Avg: set_value=52.71ms, sleep=3.26ms
+  Step 0: set_value=50.99ms, sleep=27.95ms
+  Step 1: set_value=50.44ms, sleep=0.52ms
+  Step 2: set_value=49.21ms, sleep=0.52ms
+  Step 3: set_value=62.91ms, sleep=0.51ms
+  Step 4: set_value=27.14ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 521.06ms
+Steps: 10
+Step[0]: set_value=52.95ms, sleep=0.52ms
+Step[last]: set_value=50.77ms, sleep=0.52ms
+Avg: set_value=51.59ms, sleep=0.52ms
+  Step 0: set_value=52.95ms, sleep=0.52ms
+  Step 1: set_value=55.54ms, sleep=0.52ms
+  Step 2: set_value=55.14ms, sleep=0.51ms
+  Step 3: set_value=49.77ms, sleep=0.51ms
+  Step 4: set_value=50.04ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 501.30ms
+Steps: 10
+Step[0]: set_value=49.13ms, sleep=0.53ms
+Step[last]: set_value=47.35ms, sleep=0.54ms
+Avg: set_value=49.56ms, sleep=0.56ms
+  Step 0: set_value=49.13ms, sleep=0.53ms
+  Step 1: set_value=50.59ms, sleep=0.52ms
+  Step 2: set_value=50.86ms, sleep=0.52ms
+  Step 3: set_value=50.00ms, sleep=0.52ms
+  Step 4: set_value=49.23ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 490.50ms
+Steps: 10
+Step[0]: set_value=29.13ms, sleep=0.51ms
+Step[last]: set_value=49.43ms, sleep=0.52ms
+Avg: set_value=48.53ms, sleep=0.51ms
+  Step 0: set_value=29.13ms, sleep=0.51ms
+  Step 1: set_value=48.70ms, sleep=0.52ms
+  Step 2: set_value=48.22ms, sleep=0.52ms
+  Step 3: set_value=53.95ms, sleep=0.52ms
+  Step 4: set_value=49.00ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 495.23ms
+Steps: 10
+Step[0]: set_value=52.84ms, sleep=0.52ms
+Step[last]: set_value=50.01ms, sleep=0.51ms
+Avg: set_value=49.00ms, sleep=0.52ms
+  Step 0: set_value=52.84ms, sleep=0.52ms
+  Step 1: set_value=53.46ms, sleep=0.51ms
+  Step 2: set_value=56.28ms, sleep=0.52ms
+  Step 3: set_value=27.67ms, sleep=0.52ms
+  Step 4: set_value=59.14ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 447.12ms
+Steps: 10
+Step[0]: set_value=59.59ms, sleep=0.67ms
+Step[last]: set_value=47.73ms, sleep=0.52ms
+Avg: set_value=44.18ms, sleep=0.53ms
+  Step 0: set_value=59.59ms, sleep=0.67ms
+  Step 1: set_value=28.18ms, sleep=0.25ms
+  Step 2: set_value=33.73ms, sleep=1.01ms
+  Step 3: set_value=30.83ms, sleep=0.42ms
+  Step 4: set_value=44.42ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 439.41ms
+Steps: 10
+Step[0]: set_value=26.34ms, sleep=0.54ms
+Step[last]: set_value=47.51ms, sleep=0.52ms
+Avg: set_value=43.43ms, sleep=0.50ms
+  Step 0: set_value=26.34ms, sleep=0.54ms
+  Step 1: set_value=27.96ms, sleep=0.52ms
+  Step 2: set_value=47.90ms, sleep=0.52ms
+  Step 3: set_value=47.10ms, sleep=0.52ms
+  Step 4: set_value=48.03ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 453.55ms
+Steps: 10
+Step[0]: set_value=25.98ms, sleep=0.52ms
+Step[last]: set_value=47.21ms, sleep=0.83ms
+Avg: set_value=44.82ms, sleep=0.53ms
+  Step 0: set_value=25.98ms, sleep=0.52ms
+  Step 1: set_value=45.82ms, sleep=0.52ms
+  Step 2: set_value=46.23ms, sleep=0.96ms
+  Step 3: set_value=44.68ms, sleep=0.16ms
+  Step 4: set_value=46.03ms, sleep=0.40ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 412.80ms
+Steps: 10
+Step[0]: set_value=51.82ms, sleep=0.52ms
+Step[last]: set_value=27.36ms, sleep=24.30ms
+Avg: set_value=38.38ms, sleep=2.89ms
+  Step 0: set_value=51.82ms, sleep=0.52ms
+  Step 1: set_value=51.90ms, sleep=0.52ms
+  Step 2: set_value=50.59ms, sleep=0.51ms
+  Step 3: set_value=46.51ms, sleep=0.51ms
+  Step 4: set_value=46.75ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 515.64ms
+Steps: 10
+Step[0]: set_value=70.46ms, sleep=0.52ms
+Step[last]: set_value=26.02ms, sleep=0.51ms
+Avg: set_value=51.04ms, sleep=0.52ms
+  Step 0: set_value=70.46ms, sleep=0.52ms
+  Step 1: set_value=45.98ms, sleep=0.52ms
+  Step 2: set_value=48.90ms, sleep=0.52ms
+  Step 3: set_value=51.57ms, sleep=0.52ms
+  Step 4: set_value=75.48ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 509.50ms
+Steps: 10
+Step[0]: set_value=51.94ms, sleep=0.52ms
+Step[last]: set_value=55.56ms, sleep=0.52ms
+Avg: set_value=50.43ms, sleep=0.52ms
+  Step 0: set_value=51.94ms, sleep=0.52ms
+  Step 1: set_value=48.84ms, sleep=0.52ms
+  Step 2: set_value=27.81ms, sleep=0.52ms
+  Step 3: set_value=39.95ms, sleep=0.52ms
+  Step 4: set_value=53.91ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 482.04ms
+Steps: 10
+Step[0]: set_value=51.54ms, sleep=0.52ms
+Step[last]: set_value=52.08ms, sleep=0.52ms
+Avg: set_value=47.68ms, sleep=0.52ms
+  Step 0: set_value=51.54ms, sleep=0.52ms
+  Step 1: set_value=51.76ms, sleep=0.52ms
+  Step 2: set_value=50.28ms, sleep=0.52ms
+  Step 3: set_value=53.49ms, sleep=0.52ms
+  Step 4: set_value=53.36ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 484.53ms
+Steps: 10
+Step[0]: set_value=48.36ms, sleep=0.52ms
+Step[last]: set_value=53.84ms, sleep=0.52ms
+Avg: set_value=47.93ms, sleep=0.52ms
+  Step 0: set_value=48.36ms, sleep=0.52ms
+  Step 1: set_value=49.63ms, sleep=0.51ms
+  Step 2: set_value=49.02ms, sleep=0.52ms
+  Step 3: set_value=51.89ms, sleep=0.51ms
+  Step 4: set_value=51.07ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 412.33ms
+Steps: 10
+Step[0]: set_value=25.93ms, sleep=0.52ms
+Step[last]: set_value=48.83ms, sleep=0.51ms
+Avg: set_value=40.69ms, sleep=0.54ms
+  Step 0: set_value=25.93ms, sleep=0.52ms
+  Step 1: set_value=59.28ms, sleep=0.51ms
+  Step 2: set_value=26.66ms, sleep=0.51ms
+  Step 3: set_value=41.82ms, sleep=0.19ms
+  Step 4: set_value=26.93ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 485.52ms
+Steps: 10
+Step[0]: set_value=26.92ms, sleep=0.52ms
+Step[last]: set_value=47.52ms, sleep=0.52ms
+Avg: set_value=44.68ms, sleep=3.87ms
+  Step 0: set_value=26.92ms, sleep=0.52ms
+  Step 1: set_value=40.23ms, sleep=0.78ms
+  Step 2: set_value=28.12ms, sleep=33.77ms
+  Step 3: set_value=53.92ms, sleep=0.52ms
+  Step 4: set_value=52.49ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 497.83ms
+Steps: 10
+Step[0]: set_value=47.86ms, sleep=0.51ms
+Step[last]: set_value=48.99ms, sleep=0.52ms
+Avg: set_value=44.06ms, sleep=5.72ms
+  Step 0: set_value=47.86ms, sleep=0.51ms
+  Step 1: set_value=49.33ms, sleep=0.52ms
+  Step 2: set_value=25.89ms, sleep=27.40ms
+  Step 3: set_value=49.55ms, sleep=0.52ms
+  Step 4: set_value=47.66ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 498.93ms
+Steps: 10
+Step[0]: set_value=50.09ms, sleep=0.52ms
+Step[last]: set_value=52.64ms, sleep=0.52ms
+Avg: set_value=49.37ms, sleep=0.52ms
+  Step 0: set_value=50.09ms, sleep=0.52ms
+  Step 1: set_value=49.25ms, sleep=0.52ms
+  Step 2: set_value=48.63ms, sleep=0.52ms
+  Step 3: set_value=47.29ms, sleep=0.52ms
+  Step 4: set_value=47.75ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 491.20ms
+Steps: 10
+Step[0]: set_value=47.98ms, sleep=0.52ms
+Step[last]: set_value=48.49ms, sleep=0.52ms
+Avg: set_value=48.60ms, sleep=0.52ms
+  Step 0: set_value=47.98ms, sleep=0.52ms
+  Step 1: set_value=48.45ms, sleep=0.52ms
+  Step 2: set_value=47.73ms, sleep=0.52ms
+  Step 3: set_value=49.26ms, sleep=0.52ms
+  Step 4: set_value=49.27ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 397.69ms
+Steps: 10
+Step[0]: set_value=26.05ms, sleep=26.28ms
+Step[last]: set_value=33.80ms, sleep=0.20ms
+Avg: set_value=36.60ms, sleep=3.16ms
+  Step 0: set_value=26.05ms, sleep=26.28ms
+  Step 1: set_value=49.95ms, sleep=0.52ms
+  Step 2: set_value=48.32ms, sleep=0.52ms
+  Step 3: set_value=48.12ms, sleep=0.52ms
+  Step 4: set_value=48.53ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 526.97ms
+Steps: 10
+Step[0]: set_value=41.10ms, sleep=0.52ms
+Step[last]: set_value=49.48ms, sleep=0.52ms
+Avg: set_value=52.17ms, sleep=0.52ms
+  Step 0: set_value=41.10ms, sleep=0.52ms
+  Step 1: set_value=61.24ms, sleep=0.52ms
+  Step 2: set_value=58.92ms, sleep=0.52ms
+  Step 3: set_value=57.04ms, sleep=0.52ms
+  Step 4: set_value=47.75ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 486.20ms
+Steps: 10
+Step[0]: set_value=49.08ms, sleep=0.52ms
+Step[last]: set_value=45.95ms, sleep=0.52ms
+Avg: set_value=48.11ms, sleep=0.50ms
+  Step 0: set_value=49.08ms, sleep=0.52ms
+  Step 1: set_value=57.68ms, sleep=0.52ms
+  Step 2: set_value=49.54ms, sleep=0.52ms
+  Step 3: set_value=47.27ms, sleep=0.52ms
+  Step 4: set_value=46.54ms, sleep=0.72ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 472.26ms
+Steps: 10
+Step[0]: set_value=45.68ms, sleep=0.52ms
+Step[last]: set_value=46.27ms, sleep=0.51ms
+Avg: set_value=46.69ms, sleep=0.53ms
+  Step 0: set_value=45.68ms, sleep=0.52ms
+  Step 1: set_value=47.12ms, sleep=0.52ms
+  Step 2: set_value=47.56ms, sleep=0.45ms
+  Step 3: set_value=47.59ms, sleep=0.52ms
+  Step 4: set_value=47.03ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 478.93ms
+Steps: 10
+Step[0]: set_value=71.06ms, sleep=0.38ms
+Step[last]: set_value=25.69ms, sleep=0.51ms
+Avg: set_value=47.38ms, sleep=0.50ms
+  Step 0: set_value=71.06ms, sleep=0.38ms
+  Step 1: set_value=46.89ms, sleep=0.51ms
+  Step 2: set_value=49.35ms, sleep=0.51ms
+  Step 3: set_value=45.64ms, sleep=0.52ms
+  Step 4: set_value=52.41ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 431.01ms
+Steps: 10
+Step[0]: set_value=49.16ms, sleep=0.53ms
+Step[last]: set_value=45.86ms, sleep=0.52ms
+Avg: set_value=42.58ms, sleep=0.52ms
+  Step 0: set_value=49.16ms, sleep=0.53ms
+  Step 1: set_value=26.88ms, sleep=0.52ms
+  Step 2: set_value=45.83ms, sleep=0.52ms
+  Step 3: set_value=48.27ms, sleep=0.52ms
+  Step 4: set_value=46.97ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 514.69ms
+Steps: 10
+Step[0]: set_value=53.30ms, sleep=0.52ms
+Step[last]: set_value=53.67ms, sleep=0.52ms
+Avg: set_value=50.95ms, sleep=0.51ms
+  Step 0: set_value=53.30ms, sleep=0.52ms
+  Step 1: set_value=52.80ms, sleep=0.52ms
+  Step 2: set_value=51.11ms, sleep=0.51ms
+  Step 3: set_value=49.53ms, sleep=0.48ms
+  Step 4: set_value=54.56ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 490.71ms
+Steps: 10
+Step[0]: set_value=47.96ms, sleep=0.51ms
+Step[last]: set_value=46.65ms, sleep=0.52ms
+Avg: set_value=48.49ms, sleep=0.57ms
+  Step 0: set_value=47.96ms, sleep=0.51ms
+  Step 1: set_value=50.15ms, sleep=0.52ms
+  Step 2: set_value=51.01ms, sleep=0.51ms
+  Step 3: set_value=49.62ms, sleep=0.52ms
+  Step 4: set_value=47.56ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 429.37ms
+Steps: 10
+Step[0]: set_value=52.97ms, sleep=0.52ms
+Step[last]: set_value=74.21ms, sleep=0.53ms
+Avg: set_value=42.41ms, sleep=0.52ms
+  Step 0: set_value=52.97ms, sleep=0.52ms
+  Step 1: set_value=51.30ms, sleep=0.52ms
+  Step 2: set_value=49.40ms, sleep=0.52ms
+  Step 3: set_value=26.43ms, sleep=0.51ms
+  Step 4: set_value=33.64ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 486.72ms
+Steps: 10
+Step[0]: set_value=70.64ms, sleep=0.52ms
+Step[last]: set_value=47.74ms, sleep=0.27ms
+Avg: set_value=48.20ms, sleep=0.47ms
+  Step 0: set_value=70.64ms, sleep=0.52ms
+  Step 1: set_value=50.26ms, sleep=0.53ms
+  Step 2: set_value=45.78ms, sleep=0.52ms
+  Step 3: set_value=29.07ms, sleep=0.52ms
+  Step 4: set_value=43.10ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 486.57ms
+Steps: 10
+Step[0]: set_value=47.89ms, sleep=0.52ms
+Step[last]: set_value=46.38ms, sleep=0.51ms
+Avg: set_value=48.13ms, sleep=0.53ms
+  Step 0: set_value=47.89ms, sleep=0.52ms
+  Step 1: set_value=47.13ms, sleep=0.87ms
+  Step 2: set_value=47.45ms, sleep=0.52ms
+  Step 3: set_value=53.64ms, sleep=0.38ms
+  Step 4: set_value=47.62ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 474.36ms
+Steps: 10
+Step[0]: set_value=70.98ms, sleep=0.51ms
+Step[last]: set_value=47.60ms, sleep=0.51ms
+Avg: set_value=46.89ms, sleep=0.54ms
+  Step 0: set_value=70.98ms, sleep=0.51ms
+  Step 1: set_value=47.36ms, sleep=0.52ms
+  Step 2: set_value=45.55ms, sleep=0.46ms
+  Step 3: set_value=47.78ms, sleep=0.52ms
+  Step 4: set_value=26.28ms, sleep=0.51ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 485.46ms
+Steps: 10
+Step[0]: set_value=47.46ms, sleep=0.52ms
+Step[last]: set_value=46.14ms, sleep=0.51ms
+Avg: set_value=47.96ms, sleep=0.58ms
+  Step 0: set_value=47.46ms, sleep=0.52ms
+  Step 1: set_value=46.68ms, sleep=0.35ms
+  Step 2: set_value=49.81ms, sleep=0.52ms
+  Step 3: set_value=47.12ms, sleep=0.51ms
+  Step 4: set_value=49.59ms, sleep=0.52ms
+
+
+=== WRITE_ANALYSIS ===
+Total loop: 511.76ms
+Steps: 10
+Step[0]: set_value=70.73ms, sleep=0.52ms
+Step[last]: set_value=49.91ms, sleep=0.52ms
+Avg: set_value=50.61ms, sleep=0.56ms
+  Step 0: set_value=70.73ms, sleep=0.52ms
+  Step 1: set_value=46.85ms, sleep=0.51ms
+  Step 2: set_value=46.86ms, sleep=0.51ms
+  Step 3: set_value=46.04ms, sleep=0.96ms
+  Step 4: set_value=46.56ms, sleep=0.47ms
+

@@ -26,21 +26,21 @@ main_ui:
   - alias: 2636A
     description: write_smua_voltage
     cmd_set: smua.source.levelv={v}
-    paired_read_cmd: reading=smua.measure.v()print(reading)
+    paired_read_cmd: print(smua.measure.v())
     figure_axis: target_smua_voltage
     unit: V
-    safety_steps: 10
-    safety_interval_ms: 5.0
+    safety_steps: 0
+    safety_interval_ms: 0.0
     fill_params:
       v: '[SWEEP]'
   - alias: 2636A
     description: write_smub_voltage
     cmd_set: smub.source.levelv={v}
-    paired_read_cmd: reading=smub.measure.i()print(reading)
+    paired_read_cmd: print(smub.measure.i())
     figure_axis: target_smub_voltage
     unit: V
-    safety_steps: 10
-    safety_interval_ms: 5.0
+    safety_steps: 0
+    safety_interval_ms: 0.0
     fill_params:
       v: '[SWEEP]'
   measurements:
@@ -61,7 +61,7 @@ main_ui:
     fill_params: {}
     axis_suffix: ''
     meas_type: none
-    checked: false
+    checked: true
   - alias: 2636A
     description: read_smua_voltage
     resolved_cmd: print(smua.measure.v())
@@ -70,7 +70,7 @@ main_ui:
     fill_params: {}
     axis_suffix: ''
     meas_type: none
-    checked: false
+    checked: true
   - alias: 2636A
     description: read_smub_voltage
     resolved_cmd: print(smub.measure.i())
@@ -79,7 +79,7 @@ main_ui:
     fill_params: {}
     axis_suffix: ''
     meas_type: none
-    checked: false
+    checked: true
   - alias: M81
     description: read_M81_M1_voltage_ip
     resolved_cmd: FETCh:SENSe1:LIA:X?
@@ -89,7 +89,7 @@ main_ui:
       M: '1'
     axis_suffix: ''
     meas_type: none
-    checked: true
+    checked: false
   - alias: M81
     description: read_M81_M1_voltage_oop
     resolved_cmd: FETCh:SENSe1:LIA:Y?
@@ -99,7 +99,7 @@ main_ui:
       M: '1'
     axis_suffix: ''
     meas_type: none
-    checked: true
+    checked: false
   - alias: M81
     description: read_M81_M2_voltage_ip
     resolved_cmd: FETCh:SENSe2:LIA:X?
@@ -109,7 +109,7 @@ main_ui:
       M: '2'
     axis_suffix: ''
     meas_type: none
-    checked: true
+    checked: false
   - alias: M81
     description: read_M81_M2_voltage_oop
     resolved_cmd: FETCh:SENSe2:LIA:Y?
@@ -119,7 +119,7 @@ main_ui:
       M: '2'
     axis_suffix: ''
     meas_type: none
-    checked: true
+    checked: false
   - alias: M81
     description: read_M81_M3_voltage_ip
     resolved_cmd: FETCh:SENSe3:LIA:X?
@@ -308,12 +308,12 @@ main_ui:
     meas_type: none
     checked: true
 sweep_to: 0.0
-sweep_rate: 5.0
-time_per_point: 0.5
+sweep_rate: 20.0
+time_per_point: 0.3
 active_sweep_channel_idx: 0
-main_folder: D:/Users/SangIl
-custom_folder: test112
-custom_word: '123'
+main_folder: D:/Users/San/data/Year2026
+custom_folder: halide back gate FET 260324
+custom_word: as_grown I-V 1
 include_date: true
 save_enabled: true
 double_sweep:
