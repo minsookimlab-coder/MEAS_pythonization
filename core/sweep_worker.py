@@ -55,6 +55,8 @@ class StepResult:
     timing: StepTiming = field(default_factory=StepTiming)
     # 읽은 값: (table row index, value)  value=None 이면 read 실패
     meas_results: List[Tuple[int, Optional[float]]] = field(default_factory=list)
+    # 실패한 row별 오류 메시지: {row: "ExceptionType: message"}
+    meas_errors: Dict[int, str] = field(default_factory=dict)
     measure_only: bool = False
 
 
@@ -82,9 +84,14 @@ class SweepWorker(QObject):
 
     def _do_measurements(
         self, active_measurements: List[Tuple[int, str, str, str]]
-    ) -> List[Tuple[int, Optional[float]]]:
-        """active_measurements 목록을 읽어 (row, value) 리스트로 반환."""
+    ) -> Tuple[List[Tuple[int, Optional[float]]], Dict[int, str]]:
+        """active_measurements 목록을 읽어 (results, errors) 로 반환.
+
+        results: [(row, value_or_None), ...]
+        errors:  {row: "ExceptionType: message"}  — 실패한 row만 포함
+        """
         meas_results: List[Tuple[int, Optional[float]]] = []
+        meas_errors: Dict[int, str] = {}
         groups: Dict[str, List[Tuple[int, str, str]]] = defaultdict(list)
         for row, alias, desc, cmd in active_measurements:
             groups[alias].append((row, desc, cmd))
@@ -102,9 +109,12 @@ class SweepWorker(QObject):
                             meas_results.append((row, float(parts[i])))
                         except (IndexError, ValueError):
                             meas_results.append((row, None))
-                except Exception:
+                            meas_errors[row] = f"parse error (part {i}: {parts[i] if i < len(parts) else 'missing'})"
+                except Exception as e:
+                    err_msg = f"{type(e).__name__}: {e}"
                     for row, _, _ in entries:
                         meas_results.append((row, None))
+                        meas_errors[row] = err_msg
             else:
                 for row, desc, cmd in entries:
                     try:
@@ -112,9 +122,10 @@ class SweepWorker(QObject):
                             self._session, alias
                         )
                         meas_results.append((row, val))
-                    except Exception:
+                    except Exception as e:
                         meas_results.append((row, None))
-        return meas_results
+                        meas_errors[row] = f"{type(e).__name__}: {e}"
+        return meas_results, meas_errors
 
     @Slot(object)
     def run_step(self, req: StepRequest) -> None:
@@ -137,12 +148,13 @@ class SweepWorker(QObject):
 
             # 초기 상태 측정 전용: write 없이 현재 위치에서 measurement만 수행
             if req.measure_only:
-                meas_results = self._do_measurements(req.active_measurements)
+                meas_results, meas_errors = self._do_measurements(req.active_measurements)
                 timing.t_write_done = timing.t_source_read
                 timing.t_meas_done = _time.perf_counter()
                 self.step_done.emit(StepResult(
                     current=current, next_v=current, is_done=False,
-                    timing=timing, meas_results=meas_results, measure_only=True,
+                    timing=timing, meas_results=meas_results, meas_errors=meas_errors,
+                    measure_only=True,
                 ))
                 return
 
@@ -166,40 +178,19 @@ class SweepWorker(QObject):
                     current + (next_v - current) * i / req.safety_steps
                     for i in range(1, req.safety_steps + 1)
                 ]
-                alias = getattr(req.sweep_channel, "alias", None)
-                cmd_tpl = getattr(
-                    getattr(req.sweep_channel, "parameter", None), "cmd_set", None
-                )
-
-                if cmd_tpl and alias and req.safety_interval_ms <= 0:
-                    # ── 배치 최적화: N회 round-trip → 1회 ──────────────
-                    # TSP 기기는 \n 구분 다중 명령을 펌웨어 속도로 순차 실행.
-                    # SCPI 기기도 대부분 \n 구분 다중 명령을 지원.
-                    batch_cmd = "\n".join(cmd_tpl.format(v=v) for v in sub_vs)
-                    if not self._session.is_open(alias):
-                        self._session.open(alias)
-                    self._session.write(alias, batch_cmd)
-                else:
-                    # ── 인터벌 있음: write 소요 시간을 차감한 보정 sleep ──
-                    # interval은 step 사이 최소 시간(물리적 settling)을 의미하므로
-                    # VISA write에 걸린 시간만큼 sleep을 줄여 총 시간을 맞춤.
-                    interval_s = req.safety_interval_ms / 1000.0
-                    for i, sub_v in enumerate(sub_vs):
-                        if self._stop_event.is_set():
-                            break
-                        t0 = _time.perf_counter()
-                        req.sweep_channel.set_value(self._session, sub_v)
-                        if i < len(sub_vs) - 1 and interval_s > 0:
-                            elapsed = _time.perf_counter() - t0
-                            remaining = interval_s - elapsed
-                            if remaining > 0:
-                                _time.sleep(remaining)
+                interval_s = req.safety_interval_ms / 1000.0
+                for sub_v in sub_vs:
+                    if self._stop_event.is_set():
+                        break
+                    req.sweep_channel.set_value(self._session, sub_v)
+                    if interval_s > 0:
+                        _time.sleep(interval_s)
             else:
-                req.sweep_channel.set_value(self._session, next_v)
+                (self._session, next_v)
             timing.t_write_done = _time.perf_counter()
 
             # 4. 체크된 Measurement 읽기 (write 이후 → 새 출력값에 대한 응답 측정)
-            meas_results = self._do_measurements(req.active_measurements)
+            meas_results, meas_errors = self._do_measurements(req.active_measurements)
             timing.t_meas_done = _time.perf_counter()
 
             self.step_done.emit(StepResult(
@@ -208,6 +199,7 @@ class SweepWorker(QObject):
                 is_done=is_done,
                 timing=timing,
                 meas_results=meas_results,
+                meas_errors=meas_errors,
             ))
 
         except Exception as e:

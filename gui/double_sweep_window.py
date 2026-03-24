@@ -1678,11 +1678,13 @@ class DoubleSweepWindow(QDialog):
             val = meas_map.get(idx)
             if val is None:
                 has_err = True
-                # Look up description from context
+                desc = ""
                 for _row, _alias, _desc, _cmd in self._ctx.active_measurements:
                     if _row == idx:
-                        err_descs.append(_desc)
+                        desc = _desc
                         break
+                detail = result.meas_errors.get(idx, "")
+                err_descs.append(f"{desc}: {detail}" if detail else desc)
             row_vals.append(f"{val:.6g}" if val is not None else "ERR")
 
         if has_err:

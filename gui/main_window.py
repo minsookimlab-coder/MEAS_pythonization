@@ -151,6 +151,7 @@ class MainWindow(QMainWindow):
         from gui.data_window import DataWindow
         self._timing_window = TimingWindow(self)
         self._data_window = DataWindow(self)
+        self._debug_window.set_visa_log_callback(self._session.set_log_enabled) # Debug 창의 토글과 세션의 로그 활성화 상태 연결
 
         # 콘솔 입력 → 메인 핸들러 연결
         self._debug_window.set_submit_callback(self._handle_command)
@@ -610,15 +611,17 @@ class MainWindow(QMainWindow):
         self._lbl_save_preview.setFont(_MONO)
         self._lbl_save_preview.setStyleSheet("color: #555555; font-size: 9px;")
         self._lbl_save_preview.setWordWrap(True)
-        btn_copy_path = QPushButton("Copy")
-        btn_copy_path.setFixedWidth(46)
-        btn_copy_path.setFixedHeight(20)
-        btn_copy_path.setFont(QFont("Consolas", 8))
-        btn_copy_path.clicked.connect(self._copy_save_path)
-        btn_open_folder = QPushButton("Open Folder")
-        btn_open_folder.setFixedHeight(20)
-        btn_open_folder.setFont(QFont("Consolas", 8))
-        btn_open_folder.clicked.connect(self._open_save_folder)
+        self._btn_copy_path = QPushButton("Copy")
+        self._btn_copy_path.setFixedWidth(46)
+        self._btn_copy_path.setFixedHeight(20)
+        self._btn_copy_path.setFont(QFont("Consolas", 8))
+        self._btn_copy_path.clicked.connect(self._copy_save_path)
+        btn_copy_path = self._btn_copy_path
+        self._btn_open_folder = QPushButton("Open Folder")
+        self._btn_open_folder.setFixedHeight(20)
+        self._btn_open_folder.setFont(QFont("Consolas", 8))
+        self._btn_open_folder.clicked.connect(self._open_save_folder)
+        btn_open_folder = self._btn_open_folder
         preview_row.addWidget(QLabel("→"))
         preview_row.addWidget(self._lbl_save_preview, stretch=1)
         preview_row.addWidget(btn_copy_path)
@@ -1375,6 +1378,8 @@ class MainWindow(QMainWindow):
         self._sweep_channel_panel.setEnabled(False)
         self._meas_panel.setEnabled(False)
         self._save_settings_frame.setEnabled(False)
+        self._btn_copy_path.setEnabled(True)
+        self._btn_open_folder.setEnabled(True)
         # Double Sweep window UI 잠금
         if self._double_sweep_window is not None:
             self._double_sweep_window.lock_ui(True)
@@ -1570,6 +1575,7 @@ class MainWindow(QMainWindow):
         if has_err:
             err_descs = [
                 self._active_profile.measurements[idx].description
+                + (f": {result.meas_errors[idx]}" if idx in result.meas_errors else "")
                 for idx in self._active_meas_indices
                 if meas_map.get(idx) is None
             ]

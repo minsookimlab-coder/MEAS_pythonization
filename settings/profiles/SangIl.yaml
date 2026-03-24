@@ -29,8 +29,8 @@ main_ui:
     paired_read_cmd: reading=smua.measure.v()print(reading)
     figure_axis: target_smua_voltage
     unit: V
-    safety_steps: 5
-    safety_interval_ms: 1.0
+    safety_steps: 10
+    safety_interval_ms: 0.1
     fill_params:
       v: '[SWEEP]'
   - alias: 2636A
@@ -39,8 +39,8 @@ main_ui:
     paired_read_cmd: reading=smub.measure.i()print(reading)
     figure_axis: target_smub_voltage
     unit: V
-    safety_steps: 5
-    safety_interval_ms: 1.0
+    safety_steps: 10
+    safety_interval_ms: 0.1
     fill_params:
       v: '[SWEEP]'
   measurements:
@@ -99,7 +99,7 @@ main_ui:
       M: '1'
     axis_suffix: ''
     meas_type: none
-    checked: false
+    checked: true
   - alias: M81
     description: read_M81_M2_voltage_ip
     resolved_cmd: FETCh:SENSe2:LIA:X?
@@ -109,7 +109,7 @@ main_ui:
       M: '2'
     axis_suffix: ''
     meas_type: none
-    checked: false
+    checked: true
   - alias: M81
     description: read_M81_M2_voltage_oop
     resolved_cmd: FETCh:SENSe2:LIA:Y?
@@ -119,7 +119,7 @@ main_ui:
       M: '2'
     axis_suffix: ''
     meas_type: none
-    checked: false
+    checked: true
   - alias: M81
     description: read_M81_M3_voltage_ip
     resolved_cmd: FETCh:SENSe3:LIA:X?
@@ -307,13 +307,13 @@ main_ui:
     axis_suffix: ''
     meas_type: none
     checked: true
-sweep_to: 0.0
+sweep_to: 5.0
 sweep_rate: 5.0
 time_per_point: 0.5
 active_sweep_channel_idx: 0
 main_folder: D:/Users/SangIl
-custom_folder: test233
-custom_word: '1'
+custom_folder: test112
+custom_word: '123'
 include_date: true
 save_enabled: true
 double_sweep:
@@ -361,7 +361,7 @@ double_sweep:
       operator: '>'
       threshold: 0.0
 meta_data:
-  enabled: true
+  enabled: false
   entries:
   - alias: IPS
     description: read_IPS_z_magnetic_field
@@ -410,5 +410,5 @@ meta_data:
     resolved_cmd: print(smua.measure.i())
     figure_axis: smua_current
     unit: A
-    enabled: true
+    enabled: false
     meas_type: none

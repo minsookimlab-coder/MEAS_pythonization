@@ -60,6 +60,48 @@ def _make_pen(phase: str) -> pg.mkPen:
     return pg.mkPen(color=color, width=2, style=style)
 
 
+# Extra-Y trace colors (cycles when > 8 extra Ys are added)
+_EXTRA_Y_COLORS: List[str] = [
+    "#ff7f0e",   # orange
+    "#2ca02c",   # green
+    "#9467bd",   # purple
+    "#8c564b",   # brown
+    "#e377c2",   # pink
+    "#bcbd22",   # yellow-green
+    "#17becf",   # cyan
+    "#7f7f7f",   # gray
+]
+
+# Extra Y uses the same phase line-styles but in its own color
+_EXTRA_PHASE_STYLES: Dict[str, Qt.PenStyle] = {
+    "_":       Qt.PenStyle.SolidLine,
+    "trace":   Qt.PenStyle.SolidLine,
+    "retrace": Qt.PenStyle.DashLine,
+    "dummy":   Qt.PenStyle.DotLine,
+}
+
+
+def _make_extra_pen(color: str, phase: str) -> pg.mkPen:
+    style = _EXTRA_PHASE_STYLES.get(phase, Qt.PenStyle.SolidLine)
+    return pg.mkPen(color=color, width=2, style=style)
+
+
+class _ExtraYState:
+    """State for one additional Y trace row inside GraphPanel."""
+    def __init__(self, color: str) -> None:
+        self.key: Optional[str] = None
+        self.unit: str = ""
+        self.uses_main_vb: bool = True   # True → same unit as main Y, shares left axis
+        self.vb: Optional[pg.ViewBox] = None   # right-side VB when uses_main_vb=False
+        self.curves: Dict[str, pg.PlotDataItem] = {}   # phase → PlotDataItem
+        self.y_div: float = 1.0
+        self.y_pfx: str = ""
+        self.color: str = color
+        # UI references (set in _add_extra_y)
+        self.combo: Optional[QComboBox] = None
+        self.row_widget: Optional[QWidget] = None
+
+
 # ──────────────────────────────────────────────────────────
 # 2D Map colormaps  (Origin-style + common scientific)
 # ──────────────────────────────────────────────────────────
@@ -322,6 +364,12 @@ class GraphPanel(QFrame):
         self._lr_region: Optional[pg.LinearRegionItem] = None
         self._lr_line: Optional[pg.PlotDataItem] = None
         self._lr_text: Optional[pg.TextItem] = None
+        # Extra Y state
+        self._extra_ys: List[_ExtraYState] = []
+        # unit → (ViewBox, AxisItem, layout_col)  for separate-scale right axes
+        self._unit_vbs: Dict[str, Tuple[pg.ViewBox, pg.AxisItem, int]] = {}
+        self._next_axis_col: int = 3   # cols: 0=left-axis, 1=viewbox, 2=pg right-axis; extra start at 3
+        self._free_axis_cols: List[int] = []
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -352,6 +400,13 @@ class GraphPanel(QFrame):
         self._cmb_y.currentIndexChanged.connect(self._on_axis_changed)
         hdr.addWidget(self._cmb_y)
 
+        self._btn_add_y = QPushButton("+ Y")
+        self._btn_add_y.setFixedHeight(22)
+        self._btn_add_y.setFixedWidth(38)
+        self._btn_add_y.setToolTip("Add another Y-axis trace (same unit → shared scale; different unit → separate right axis)")
+        self._btn_add_y.clicked.connect(self._add_extra_y)
+        hdr.addWidget(self._btn_add_y)
+
         self._cb_auto = QCheckBox("Auto-range")
         self._cb_auto.setChecked(True)
         hdr.addWidget(self._cb_auto)
@@ -376,6 +431,13 @@ class GraphPanel(QFrame):
         hdr.addWidget(btn_rm)
 
         root.addLayout(hdr)
+
+        # ── Extra Y rows container (populated dynamically) ───────────────────
+        self._extra_y_container = QWidget()
+        self._extra_y_vlayout = QVBoxLayout(self._extra_y_container)
+        self._extra_y_vlayout.setContentsMargins(0, 0, 0, 0)
+        self._extra_y_vlayout.setSpacing(2)
+        root.addWidget(self._extra_y_container)
 
         # ── Plot widget ─────────────────────────────────────────────────────
         self._pw = pg.PlotWidget(background="w")
@@ -407,6 +469,9 @@ class GraphPanel(QFrame):
         # ── Auto-hold on manual zoom / pan ───────────────────────────────────
         vb.sigRangeChangedManually.connect(self._on_manual_range_change)
 
+        # Keep extra ViewBoxes aligned when the plot is resized
+        vb.sigResized.connect(self._sync_extra_vb_geometry)
+
     # Columns -----------------------------------------------------------------
 
     def update_columns(self, col_display: List[Tuple[str, str]]) -> None:
@@ -436,6 +501,21 @@ class GraphPanel(QFrame):
         self._y_key = self._cmb_y.currentData()
         self._update_axis_labels()
 
+        # Refresh extra Y combos (preserve selections)
+        for state in self._extra_ys:
+            if state.combo is None:
+                continue
+            prev_key = state.combo.currentData()
+            state.combo.blockSignals(True)
+            state.combo.clear()
+            for key, display in col_display:
+                state.combo.addItem(display, userData=key)
+            idx = state.combo.findData(prev_key) if prev_key else -1
+            state.combo.setCurrentIndex(idx if idx >= 0 else 0)
+            state.combo.blockSignals(False)
+            if state.combo.currentData() != state.key:
+                self._on_extra_y_key_changed(state)
+
     def _on_axis_changed(self) -> None:
         self._x_key = self._cmb_x.currentData()
         self._y_key = self._cmb_y.currentData()
@@ -443,6 +523,7 @@ class GraphPanel(QFrame):
         self._y_div, self._y_pfx = 1.0, ""
         self._update_axis_labels(self._x_pfx, self._y_pfx)
         self._dirty = True
+        self._reconfigure_extra_y_vbs()
 
     def _update_axis_labels(self, x_pfx: str = "", y_pfx: str = "") -> None:
         if self._x_key:
@@ -457,7 +538,7 @@ class GraphPanel(QFrame):
     # Phases ------------------------------------------------------------------
 
     def ensure_phases(self, phases: List[str]) -> None:
-        """Lazily create a PlotDataItem for each unseen phase."""
+        """Lazily create a PlotDataItem for each unseen phase (main Y + all extra Ys)."""
         for phase in phases:
             if phase not in self._curves:
                 color, _ = _PHASE_STYLE.get(phase, ("#888888", Qt.PenStyle.SolidLine))
@@ -473,6 +554,208 @@ class GraphPanel(QFrame):
                 )
                 self._pi.addItem(item)
                 self._curves[phase] = item
+        # Also create curves for each extra Y
+        for state in self._extra_ys:
+            self._ensure_phases_for_extra(state, phases)
+
+    # Extra Y management -------------------------------------------------------
+
+    def _add_extra_y(self) -> None:
+        color = _EXTRA_Y_COLORS[len(self._extra_ys) % len(_EXTRA_Y_COLORS)]
+        state = _ExtraYState(color)
+
+        row_w = QWidget()
+        row_l = QHBoxLayout(row_w)
+        row_l.setContentsMargins(28, 0, 0, 0)
+        row_l.setSpacing(6)
+
+        dot = QLabel("●")
+        dot.setStyleSheet(f"color: {color}; font-size: 10px;")
+        row_l.addWidget(dot)
+        row_l.addWidget(QLabel("Y+:"))
+
+        combo = QComboBox()
+        combo.setFont(_MONO)
+        combo.setMinimumWidth(150)
+        for key, display in self._store.col_display_list():
+            combo.addItem(display, userData=key)
+        main_idx = combo.findData(self._y_key)
+        default_idx = (main_idx + 1) % combo.count() if combo.count() > 1 else 0
+        combo.setCurrentIndex(default_idx)
+        state.combo = combo
+
+        btn_del = QPushButton("✕")
+        btn_del.setFixedWidth(26)
+        btn_del.setToolTip("Remove this Y trace")
+        btn_del.clicked.connect(lambda _=False, s=state: self._remove_extra_y(s))
+
+        row_l.addWidget(combo)
+        row_l.addWidget(btn_del)
+        row_l.addStretch()
+        state.row_widget = row_w
+        self._extra_y_vlayout.addWidget(row_w)
+
+        self._extra_ys.append(state)
+        self._on_extra_y_key_changed(state)   # initialize key/unit/vb
+        # Connect after init to avoid double-trigger
+        combo.currentIndexChanged.connect(lambda _idx=None, s=state: self._on_extra_y_key_changed(s))
+        self._dirty = True
+
+    def _remove_extra_y(self, state: _ExtraYState) -> None:
+        if state not in self._extra_ys:
+            return
+        self._extra_ys.remove(state)
+        self._remove_extra_y_curves(state)
+        if not state.uses_main_vb and state.unit:
+            self._release_unit_vb(state.unit)
+        if state.row_widget is not None:
+            self._extra_y_vlayout.removeWidget(state.row_widget)
+            state.row_widget.deleteLater()
+        self._dirty = True
+
+    def _on_extra_y_key_changed(self, state: _ExtraYState) -> None:
+        new_key = state.combo.currentData() if state.combo else None
+        if new_key == state.key:
+            return
+        _, main_unit = self._store.col_meta(self._y_key) if self._y_key else ("", "")
+        _, new_unit = self._store.col_meta(new_key) if new_key else ("", "")
+        old_unit = state.unit
+        old_uses_main = state.uses_main_vb
+        new_uses_main = (new_unit == main_unit)
+
+        self._remove_extra_y_curves(state)
+
+        # Release old separate VB only if we're switching away from that unit
+        if not old_uses_main and old_unit and old_unit != new_unit:
+            state.unit = new_unit          # update BEFORE release so check sees new state
+            state.uses_main_vb = new_uses_main
+            self._release_unit_vb(old_unit)
+        else:
+            state.unit = new_unit
+            state.uses_main_vb = new_uses_main
+
+        state.key = new_key
+        state.y_div, state.y_pfx = 1.0, ""
+        if not new_uses_main and new_unit:
+            state.vb = self._get_or_create_unit_vb(new_unit)
+        else:
+            state.vb = None
+
+        self._ensure_phases_for_extra(state, list(self._curves.keys()))
+        self._dirty = True
+
+    def _ensure_phases_for_extra(self, state: _ExtraYState, phases: List[str]) -> None:
+        legend = self._pi.legend
+        lbl, _ = self._store.col_meta(state.key) if state.key else (str(state.key), "")
+        for phase in phases:
+            if phase in state.curves:
+                continue
+            phase_label = _PHASE_LABEL.get(phase, phase)
+            name = f"{lbl} ({phase_label})" if phase_label not in ("single", "_") else lbl
+            curve = pg.PlotDataItem(
+                [], [],
+                pen=_make_extra_pen(state.color, phase),
+                name=name,
+                symbol='o',
+                symbolSize=5,
+                symbolBrush=pg.mkBrush(state.color),
+                symbolPen=None,
+                antialias=True,
+            )
+            if state.uses_main_vb:
+                self._pi.addItem(curve)
+            elif state.vb is not None:
+                state.vb.addItem(curve)
+                if legend is not None:
+                    try:
+                        legend.addItem(curve, name)
+                    except Exception:
+                        pass
+            state.curves[phase] = curve
+
+    def _remove_extra_y_curves(self, state: _ExtraYState) -> None:
+        legend = self._pi.legend
+        for phase, curve in state.curves.items():
+            if state.uses_main_vb:
+                try:
+                    self._pi.removeItem(curve)
+                except Exception:
+                    pass
+            elif state.vb is not None:
+                try:
+                    state.vb.removeItem(curve)
+                except Exception:
+                    pass
+                if legend is not None:
+                    try:
+                        legend.removeItem(curve)
+                    except Exception:
+                        pass
+        state.curves.clear()
+
+    def _get_or_create_unit_vb(self, unit: str) -> pg.ViewBox:
+        if unit in self._unit_vbs:
+            return self._unit_vbs[unit][0]
+        col = self._free_axis_cols.pop() if self._free_axis_cols else self._next_axis_col
+        if not self._free_axis_cols:
+            self._next_axis_col = max(self._next_axis_col, col + 1)
+        vb = pg.ViewBox()
+        self._pi.scene().addItem(vb)
+        vb.setXLink(self._pi.getViewBox())
+        axis = pg.AxisItem('right')
+        axis.linkToView(vb)
+        self._pi.layout.addItem(axis, 2, col)
+        axis.setLabel(unit)
+        vb.setGeometry(self._pi.getViewBox().sceneBoundingRect())
+        self._unit_vbs[unit] = (vb, axis, col)
+        return vb
+
+    def _release_unit_vb(self, unit: str) -> None:
+        still_used = any(
+            ey.unit == unit and not ey.uses_main_vb
+            for ey in self._extra_ys
+        )
+        if still_used or unit not in self._unit_vbs:
+            return
+        vb, axis, col = self._unit_vbs.pop(unit)
+        try:
+            self._pi.layout.removeItem(axis)
+            self._pi.scene().removeItem(vb)
+        except Exception:
+            pass
+        self._free_axis_cols.append(col)
+
+    def _reconfigure_extra_y_vbs(self) -> None:
+        """Reassign extra Y ViewBoxes after main Y unit changes."""
+        _, main_unit = self._store.col_meta(self._y_key) if self._y_key else ("", "")
+        for state in self._extra_ys:
+            if state.key is None:
+                continue
+            _, ey_unit = self._store.col_meta(state.key)
+            should_use_main = (ey_unit == main_unit)
+            if should_use_main == state.uses_main_vb:
+                continue
+            self._remove_extra_y_curves(state)
+            old_unit = state.unit
+            state.uses_main_vb = should_use_main
+            state.unit = ey_unit
+            state.y_div, state.y_pfx = 1.0, ""
+            if should_use_main:
+                state.vb = None
+                self._release_unit_vb(old_unit)
+            else:
+                state.vb = self._get_or_create_unit_vb(ey_unit)
+            self._ensure_phases_for_extra(state, list(self._curves.keys()))
+        self._dirty = True
+
+    def _sync_extra_vb_geometry(self) -> None:
+        """Keep right-side ViewBoxes aligned with the main plot area."""
+        try:
+            rect = self._pi.getViewBox().sceneBoundingRect()
+            for vb, axis, col in self._unit_vbs.values():
+                vb.setGeometry(rect)
+        except Exception:
+            pass
 
     # Hold / Resume -----------------------------------------------------------
 
@@ -678,7 +961,7 @@ class GraphPanel(QFrame):
                 self._y_div, self._y_pfx = y_div, y_pfx
                 self._update_axis_labels(x_pfx, y_pfx)
 
-        # ── Push scaled data to curves ───────────────────────────────────
+        # ── Push scaled data to main Y curves ───────────────────────────────
         for phase, curve in self._curves.items():
             xs, ys = all_xy[phase]
             if len(xs) > 0 and len(ys) > 0:
@@ -688,6 +971,46 @@ class GraphPanel(QFrame):
 
         if auto:
             self._pw.enableAutoRange()
+
+        # ── Extra Y curves ───────────────────────────────────────────────
+        for state in self._extra_ys:
+            if not state.key:
+                continue
+            all_xy_extra = {
+                phase: self._store.get_xy(x_key, state.key, phase)
+                for phase in state.curves
+            }
+            if auto and not state.uses_main_vb:
+                _, ey_unit = self._store.col_meta(state.key)
+                if ey_unit:
+                    all_ey = np.concatenate(
+                        [ys for _, ys in all_xy_extra.values() if len(ys) > 0]
+                        or [np.empty(0)]
+                    )
+                    ey_div, ey_pfx = _best_si(all_ey)
+                else:
+                    ey_div, ey_pfx = 1.0, ""
+                if ey_pfx != state.y_pfx:
+                    state.y_div, state.y_pfx = ey_div, ey_pfx
+                    if state.unit in self._unit_vbs:
+                        _, axis, _ = self._unit_vbs[state.unit]
+                        full = f"{ey_pfx}{state.unit}" if ey_pfx else state.unit
+                        axis.setLabel(full)
+
+            # Same-VB extra Ys reuse the main Y's SI divisor (same unit)
+            y_div = self._y_div if state.uses_main_vb else state.y_div
+            for phase, curve in state.curves.items():
+                xs, ys = all_xy_extra.get(phase, (np.empty(0), np.empty(0)))
+                if len(xs) > 0 and len(ys) > 0:
+                    curve.setData(xs / self._x_div, ys / y_div)
+                else:
+                    curve.setData([], [])
+
+        # Auto-range + geometry sync for right-side ViewBoxes
+        if auto:
+            for vb, axis, col in self._unit_vbs.values():
+                vb.enableAutoRange()
+        self._sync_extra_vb_geometry()
 
         # Regression line tracks new data even when not held
         if self._regression_active and self._lr_region is not None:
@@ -711,6 +1034,10 @@ class GraphPanel(QFrame):
         self._stop_regression()
         for curve in self._curves.values():
             curve.setData([], [])
+        for state in self._extra_ys:
+            for curve in state.curves.values():
+                curve.setData([], [])
+            state.y_div, state.y_pfx = 1.0, ""
         self._x_div, self._x_pfx = 1.0, ""
         self._y_div, self._y_pfx = 1.0, ""
         self._update_axis_labels("", "")
@@ -723,6 +1050,10 @@ class GraphPanel(QFrame):
         for item in self._curves.values():
             self._pi.removeItem(item)
         self._curves.clear()
+        # Also reset extra Y curves (remove from their VBs, then recreate empty)
+        for state in self._extra_ys:
+            self._remove_extra_y_curves(state)
+            state.y_div, state.y_pfx = 1.0, ""
         self._x_div, self._x_pfx = 1.0, ""
         self._y_div, self._y_pfx = 1.0, ""
         self._set_held(False)

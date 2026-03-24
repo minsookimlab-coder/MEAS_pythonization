@@ -202,6 +202,15 @@ class DebugWindow(QDialog):
         elif cmd_type == "read":
             msg = f"{hdr} → {result}"
             color = "#56d364"
+        elif cmd_type == "write_err":
+            msg = f"{hdr} ← {cmd}\n{hdr} ✗ {result}"
+            color = "#f44747"
+        elif cmd_type == "query_err":
+            msg = f"{hdr} ← {cmd}\n{hdr} ✗ {result}"
+            color = "#f44747"
+        elif cmd_type == "read_err":
+            msg = f"{hdr} ✗ {result}"
+            color = "#f44747"
         else:
             msg = f"{hdr} {cmd_type}: {cmd}"
             color = "#e3b341"

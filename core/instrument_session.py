@@ -112,22 +112,34 @@ class InstrumentSession:
     def write(self, alias: str, cmd: str):
         """alias 장비에 VISA 명령어를 전송합니다 (응답 없음)."""
         with self._lock:
-            self._instruments[alias].write(cmd)
-            self._emit_log(alias, "write", cmd)
+            try:
+                self._instruments[alias].write(cmd)
+                self._emit_log(alias, "write", cmd)
+            except Exception as e:
+                self._emit_log(alias, "write_err", cmd, f"{type(e).__name__}: {e}")
+                raise
 
     def read(self, alias: str) -> str:
         """alias 장비로부터 응답을 읽어 반환합니다."""
         with self._lock:
-            result = self._instruments[alias].read()
-            self._emit_log(alias, "read", "", result)
-            return result
+            try:
+                result = self._instruments[alias].read()
+                self._emit_log(alias, "read", "", result)
+                return result
+            except Exception as e:
+                self._emit_log(alias, "read_err", "", f"{type(e).__name__}: {e}")
+                raise
 
     def query(self, alias: str, cmd: str) -> str:
         """alias 장비에 명령어를 전송하고 응답을 읽어 반환합니다."""
         with self._lock:
-            result = self._instruments[alias].query(cmd)
-            self._emit_log(alias, "query", cmd, result)
-            return result
+            try:
+                result = self._instruments[alias].query(cmd)
+                self._emit_log(alias, "query", cmd, result)
+                return result
+            except Exception as e:
+                self._emit_log(alias, "query_err", cmd, f"{type(e).__name__}: {e}")
+                raise
 
     # ------------------------------------------------------------------
     # Convenience: open이 안 된 상태에서도 단발성으로 쓸 수 있는 버전
