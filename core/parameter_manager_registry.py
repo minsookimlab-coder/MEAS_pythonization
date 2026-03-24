@@ -16,7 +16,7 @@ from config.config_models import (
 if TYPE_CHECKING:
     from core.visa_library_registry import VisaLibraryRegistry
 
-_SETTINGS_DIR = Path(__file__).parent.parent / "settings"
+from core.app_dirs import SETTINGS_DIR as _SETTINGS_DIR
 
 
 class ParameterManagerRegistry:

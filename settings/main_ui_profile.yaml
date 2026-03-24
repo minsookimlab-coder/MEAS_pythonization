@@ -10,7 +10,7 @@ sweep_values:
 - alias: 2636A
   description: write_smub_voltage
   cmd_set: smub.source.levelv={v}
-  paired_read_cmd: reading=smub.measure.i()print(reading)
+  paired_read_cmd: reading=smub.measure.v()print(reading)
   figure_axis: target_smub_voltage
   unit: V
   safety_steps: 10
@@ -33,7 +33,7 @@ measurements:
   unit: V
 - alias: 2636A
   description: read_smub_voltage
-  resolved_cmd: print(smub.measure.i())
+  resolved_cmd: print(smub.measure.v())
   figure_axis: smub_voltage
   unit: V
 write_cmds: []

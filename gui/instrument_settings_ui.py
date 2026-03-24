@@ -1,10 +1,8 @@
-import sys
 import yaml
 import pkgutil
 import importlib
 import inspect
-from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, List
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -19,14 +17,7 @@ from core.instrument_base import BaseInstrument
 from core.network_utils import find_mac_for_ip
 
 # --- Exe 호환 경로 설정 처리 ---
-if getattr(sys, 'frozen', False):
-    # PyInstaller로 빌드된 .exe로 실행 중일 때 (sys.executable은 exe의 절대 경로)
-    BASE_DIR = Path(sys.executable).parent
-else:
-    # 일반 파이썬 스크립트로 실행 중일 때
-    BASE_DIR = Path(__file__).resolve().parent.parent
-
-SETTINGS_DIR = BASE_DIR / "settings"
+from core.app_dirs import SETTINGS_DIR
 SETTINGS_FILE = SETTINGS_DIR / "instruments.yaml"
 
 class InstrumentSettingsUI(QMainWindow):

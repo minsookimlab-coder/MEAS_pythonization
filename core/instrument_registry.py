@@ -2,21 +2,17 @@
 InstrumentRegistry: instruments.yaml 기반 alias → VISA 주소 조회 클래스.
 InstrumentFactory와 달리 실제 연결 없이 설정 조회만 수행합니다.
 """
-import sys
 import yaml
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from config.config_models import InstrumentConfig
 from core.network_utils import resolve_address, build_visa_string
+from core.app_dirs import SETTINGS_DIR
 
 
 def _default_settings_path() -> Path:
-    if getattr(sys, 'frozen', False):
-        base = Path(sys.executable).parent
-    else:
-        base = Path(__file__).resolve().parent.parent
-    return base / "settings" / "instruments.yaml"
+    return SETTINGS_DIR / "instruments.yaml"
 
 
 class InstrumentRegistry:

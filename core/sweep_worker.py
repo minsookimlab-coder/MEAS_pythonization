@@ -185,7 +185,7 @@ class SweepWorker(QObject):
                     if interval_s > 0:
                         _time.sleep(interval_s)
             else:
-                (self._session, next_v)
+                req.sweep_channel.set_value(self._session, next_v)
             timing.t_write_done = _time.perf_counter()
 
             # 4. 체크된 Measurement 읽기 (write 이후 → 새 출력값에 대한 응답 측정)

@@ -29,18 +29,18 @@ main_ui:
     paired_read_cmd: print(smua.measure.v())
     figure_axis: target_smua_voltage
     unit: V
-    safety_steps: 0
-    safety_interval_ms: 0.0
+    safety_steps: 10
+    safety_interval_ms: 5.0
     fill_params:
       v: '[SWEEP]'
   - alias: 2636A
     description: write_smub_voltage
     cmd_set: smub.source.levelv={v}
-    paired_read_cmd: print(smub.measure.i())
+    paired_read_cmd: print(smub.measure.v())
     figure_axis: target_smub_voltage
     unit: V
-    safety_steps: 0
-    safety_interval_ms: 0.0
+    safety_steps: 10
+    safety_interval_ms: 5.0
     fill_params:
       v: '[SWEEP]'
   measurements:
@@ -73,7 +73,7 @@ main_ui:
     checked: true
   - alias: 2636A
     description: read_smub_voltage
-    resolved_cmd: print(smub.measure.i())
+    resolved_cmd: print(smub.measure.v())
     figure_axis: smub_voltage
     unit: V
     fill_params: {}
@@ -307,10 +307,10 @@ main_ui:
     axis_suffix: ''
     meas_type: none
     checked: true
-sweep_to: 0.0
+sweep_to: 10.0
 sweep_rate: 20.0
 time_per_point: 0.3
-active_sweep_channel_idx: 0
+active_sweep_channel_idx: 1
 main_folder: D:/Users/San/data/Year2026
 custom_folder: halide back gate FET 260324
 custom_word: as_grown I-V 1

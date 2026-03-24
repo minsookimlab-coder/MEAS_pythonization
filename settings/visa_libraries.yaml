@@ -13,7 +13,7 @@
     figure_axis: smua_voltage
     unit: V
   - description: read_smub_voltage
-    cmd_query: print(smub.measure.i())
+    cmd_query: print(smub.measure.v())
     figure_axis: smub_voltage
     unit: V
   sweep_values:
@@ -24,7 +24,7 @@
     unit: V
   - description: write_smub_voltage
     cmd_set: smub.source.levelv={v}
-    paired_read_cmd: print(smub.measure.i())
+    paired_read_cmd: print(smub.measure.v())
     figure_axis: target_smub_voltage
     unit: V
   write_cmds: []

@@ -45,8 +45,13 @@ class _CmdWorker(QThread):
             if not self._session.is_open(self._alias):
                 self._session.open(self._alias)
             if self._read_cmd:
-                # Query: write → read
-                out = self._session.query(self._alias, self._write_cmd)
+                if self._read_cmd == self._write_cmd:
+                    # Pure query (measurement): write_cmd itself returns a response
+                    out = self._session.query(self._alias, self._write_cmd)
+                else:
+                    # Write then separate read (sweep_value: set → readback)
+                    self._session.write(self._alias, self._write_cmd)
+                    out = self._session.query(self._alias, self._read_cmd)
                 self.result_ready.emit(str(out).strip())
             else:
                 self._session.write(self._alias, self._write_cmd)

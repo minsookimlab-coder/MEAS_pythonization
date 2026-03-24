@@ -8,7 +8,8 @@ import yaml
 
 from config.config_models import InstrumentCmdLibrary, MeasurementParamDef, SweepValueDef
 
-_DEFAULT_PATH = Path(__file__).parent.parent / "settings" / "visa_libraries.yaml"
+from core.app_dirs import SETTINGS_DIR
+_DEFAULT_PATH = SETTINGS_DIR / "visa_libraries.yaml"
 
 
 class VisaLibraryRegistry:
