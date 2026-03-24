@@ -38,8 +38,8 @@
   mac_address: 00-30-64-01-78-0A
   extra_params: {}
 - alias: SR830
-  class_name: driver.m81.M81Instrument
-  interface_type: LAN
-  address: 192.168.0.xx
+  class_name: driver.sr830.SR830
+  interface_type: GPIB
+  address: "GPIB0::8::INSTR"
   mac_address: ''
   extra_params: {}

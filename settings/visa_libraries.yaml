@@ -90,16 +90,59 @@ SIGGEN:
   write_cmds: []
 SR830:
   measurements:
-  - description: read_SR830_voltage_ip
-    cmd_query: OUTR?1
-    figure_axis: SR830_voltage_ip
+  - description: read_SR830_X
+    cmd_query: OUTP? 1
+    figure_axis: SR830_X
     unit: V
-  - description: read_SR830_voltage_oop
-    cmd_query: OUTR?2
-    figure_axis: SR830_voltage_oop
+  - description: read_SR830_Y
+    cmd_query: OUTP? 2
+    figure_axis: SR830_Y
     unit: V
-  sweep_values: []
-  write_cmds: []
+  - description: read_SR830_R
+    cmd_query: OUTP? 3
+    figure_axis: SR830_R
+    unit: V
+  - description: read_SR830_theta
+    cmd_query: OUTP? 4
+    figure_axis: SR830_theta
+    unit: deg
+  - description: read_SR830_channel1
+    cmd_query: OUTR? 1
+    figure_axis: SR830_ch1
+    unit: V
+  - description: read_SR830_channel2
+    cmd_query: OUTR? 2
+    figure_axis: SR830_ch2
+    unit: V
+  - description: read_SR830_frequency
+    cmd_query: FREQ?
+    figure_axis: SR830_freq
+    unit: Hz
+  sweep_values:
+  - description: write_SR830_frequency
+    cmd_set: FREQ {v}
+    paired_read_cmd: FREQ?
+    figure_axis: SR830_freq
+    unit: Hz
+  - description: write_SR830_phase
+    cmd_set: PHAS {v}
+    paired_read_cmd: PHAS?
+    figure_axis: SR830_phase
+    unit: deg
+  - description: write_SR830_sine_level
+    cmd_set: SLVL {v}
+    paired_read_cmd: SLVL?
+    figure_axis: SR830_sine_level
+    unit: V
+  write_cmds:
+  - description: SR830_auto_phase
+    cmd_set: APHS
+  - description: SR830_auto_gain
+    cmd_set: AGAN
+  - description: SR830_set_sensitivity
+    cmd_set: SENS {v}
+  - description: SR830_set_time_constant
+    cmd_set: OFLT {v}
 VNA:
   measurements:
   - description: VNA_set_delaytime

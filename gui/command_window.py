@@ -33,18 +33,23 @@ class _CmdWorker(QThread):
     result_ready = Signal(str)   # 결과 문자열 (오류 포함)
 
     def __init__(self, session, alias: str, write_cmd: str,
-                 read_cmd: Optional[str] = None):
+                 read_cmd: Optional[str] = None, read_only: bool = False):
         super().__init__()
         self._session   = session
         self._alias     = alias
         self._write_cmd = write_cmd
         self._read_cmd  = read_cmd
+        self._read_only = read_only
 
     def run(self):
         try:
             if not self._session.is_open(self._alias):
                 self._session.open(self._alias)
-            if self._read_cmd:
+            if self._read_only:
+                # Read only: 아무것도 쓰지 않고 버퍼에서 읽기만 합니다.
+                out = self._session.read(self._alias)
+                self.result_ready.emit(str(out).strip())
+            elif self._read_cmd:
                 if self._read_cmd == self._write_cmd:
                     # Pure query (measurement): write_cmd itself returns a response
                     out = self._session.query(self._alias, self._write_cmd)
@@ -70,7 +75,7 @@ class CommandWindow(QDialog):
                  visa_lib_reg: "VisaLibraryRegistry", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Command Window")
-        self.resize(560, 460)
+        self.resize(560, 540)
         self.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowMinimizeButtonHint |
@@ -164,6 +169,40 @@ class CommandWindow(QDialog):
         btn_row.addStretch()
         btn_row.addWidget(self._btn_send)
         lay.addLayout(btn_row)
+
+        # --- Manual VISA Command ---
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet("color: #30363d;")
+        lay.addWidget(divider)
+
+        manual_title = QLabel("Manual VISA Command")
+        manual_title.setStyleSheet("font-weight: bold;")
+        lay.addWidget(manual_title)
+
+        manual_row = QHBoxLayout()
+        self._le_manual_cmd = QLineEdit()
+        self._le_manual_cmd.setFont(_MONO)
+        self._le_manual_cmd.setPlaceholderText("임의 VISA 명령어 입력  (예: OUTP? 1)")
+        self._le_manual_cmd.returnPressed.connect(self._on_send_manual)
+        manual_row.addWidget(self._le_manual_cmd, stretch=1)
+
+        self._combo_manual_type = QComboBox()
+        self._combo_manual_type.addItem("Query", "query")
+        self._combo_manual_type.addItem("Write", "write")
+        self._combo_manual_type.addItem("Read",  "read")
+        self._combo_manual_type.setFont(_MONO)
+        manual_row.addWidget(self._combo_manual_type)
+
+        self._btn_send_manual = QPushButton("Send")
+        self._btn_send_manual.setMinimumHeight(32)
+        self._btn_send_manual.setStyleSheet(
+            "QPushButton { font-weight: bold; background-color: #2d5a1b; color: white; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #222; color: #555; }"
+        )
+        self._btn_send_manual.clicked.connect(self._on_send_manual)
+        manual_row.addWidget(self._btn_send_manual)
+        lay.addLayout(manual_row)
 
         # --- Output ---
         out_lbl = QLabel("Output")
@@ -311,9 +350,39 @@ class CommandWindow(QDialog):
         self._worker.result_ready.connect(self._on_result)
         self._worker.start()
 
+    def _on_send_manual(self):
+        alias = self._combo_inst.currentText()
+        if not alias:
+            return
+
+        mode = self._combo_manual_type.currentData()  # "query" | "write" | "read"
+        cmd  = self._le_manual_cmd.text().strip()
+
+        # Read 모드는 커맨드 없이 버퍼만 읽으므로 cmd 비어있어도 허용
+        if not cmd and mode != "read":
+            return
+
+        self._btn_send.setEnabled(False)
+        self._btn_send_manual.setEnabled(False)
+        self._te_output.setPlainText("실행 중...")
+
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
+
+        if mode == "query":
+            self._worker = _CmdWorker(self._session, alias, cmd, read_cmd=cmd)
+        elif mode == "read":
+            self._worker = _CmdWorker(self._session, alias, cmd, read_only=True)
+        else:  # write
+            self._worker = _CmdWorker(self._session, alias, cmd)
+
+        self._worker.result_ready.connect(self._on_result)
+        self._worker.start()
+
     @Slot(str)
     def _on_result(self, text: str):
         self._btn_send.setEnabled(True)
+        self._btn_send_manual.setEnabled(True)
         self._te_output.setPlainText(text)
 
     # ------------------------------------------------------------------
