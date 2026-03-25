@@ -73,9 +73,14 @@ class SweepWorker(QObject):
         super().__init__()
         self._session = None
         self._stop_event = threading.Event()
+        self._threshold: float = 1e38  # |value| > threshold → None (nan)
 
     def set_session(self, session) -> None:
         self._session = session
+
+    def set_threshold(self, value: float) -> None:
+        """전역 임계값 설정. |측정값| > value 이면 None(→ nan) 반환."""
+        self._threshold = value
 
     def request_stop(self) -> None:
         """메인 스레드에서 호출 — safety ramp 루프를 중단시킵니다."""
@@ -105,7 +110,10 @@ class SweepWorker(QObject):
                     parts = raw.split("\t")
                     for i, (row, _, _) in enumerate(entries):
                         try:
-                            meas_results.append((row, float(parts[i])))
+                            val = float(parts[i])
+                            if abs(val) > self._threshold:
+                                val = float("nan")
+                            meas_results.append((row, val))
                         except (IndexError, ValueError):
                             meas_results.append((row, None))
                             meas_errors[row] = f"parse error (part {i}: {parts[i] if i < len(parts) else 'missing'})"
@@ -120,6 +128,8 @@ class SweepWorker(QObject):
                         val = MeasurementParameter(name=desc, cmd_query=cmd).read(
                             self._session, alias
                         )
+                        if val is not None and abs(val) > self._threshold:
+                            val = float("nan")
                         meas_results.append((row, val))
                     except Exception as e:
                         meas_results.append((row, None))

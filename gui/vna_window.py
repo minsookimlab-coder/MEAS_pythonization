@@ -597,12 +597,36 @@ class _PlotPanel(QFrame):
 
     def push_data(self, data: dict, first_step: bool = False):
         self._data = data
-        self._replot_all()
         if first_step:
-            self._plot.getViewBox().enableAutoRange()
+            # 뷰 범위를 먼저 설정 → setData 시 ClipToView가 올바른 범위로 클리핑함
+            self._fit_view()
+        self._replot_all()
 
     def auto_range(self):
-        self._plot.getViewBox().enableAutoRange()
+        self._fit_view()
+
+    def _fit_view(self):
+        """raw self._data에서 직접 min/max 계산 → x, y 독립적으로 뷰 범위 설정.
+        enableAutoRange()는 ClipToView와 충돌(닭-달걀)하므로 사용하지 않음."""
+        x_src = self._cb_x.currentData() or ""
+        xd = self._data.get(x_src, np.array([]))
+
+        all_y: List[np.ndarray] = []
+        for row in self._y_rows:
+            yd = self._data.get(row.y_source(), np.array([]))
+            if len(yd):
+                all_y.append(yd)
+
+        if len(xd):
+            xmin, xmax = float(np.nanmin(xd)), float(np.nanmax(xd))
+            if xmin != xmax:
+                self._plot.setXRange(xmin, xmax, padding=0.05)
+
+        if all_y:
+            yd_cat = np.concatenate(all_y)
+            ymin, ymax = float(np.nanmin(yd_cat)), float(np.nanmax(yd_cat))
+            if ymin != ymax:
+                self._plot.setYRange(ymin, ymax, padding=0.05)
 
     def clear_data(self):
         self._data = {}
@@ -1178,9 +1202,14 @@ class VnaWindow(QDialog):
             return
 
         # section role → linspace 계산 (3개 모두 할당된 경우)
+        _was_none = self._linspace_data is None
         if self._compute_linspace():
-            # "time" source가 콤보에 없으면 추가
             self._refresh_plot_sources()
+            # 최초 계산 시 x-source가 "index"이면 "time"으로 자동 전환
+            if _was_none:
+                for _panel in (self._panel_L, self._panel_R):
+                    if _panel.x_source() == "index":
+                        _panel.set_default_x("time")
 
         is_sweep = sweep_values is not None
         self._current_sweep_values = sweep_values

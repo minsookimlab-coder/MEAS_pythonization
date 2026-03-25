@@ -24,6 +24,7 @@ from core.sweep_channel import sweep_channel_from_instantiated, TimeChannel, TIM
 from core.sweep_worker import SweepWorker, StepRequest, StepResult
 from core.visa_library_registry import VisaLibraryRegistry
 from core.profile_registry import ProfileRegistry
+from config.app_config import AppConfig, load_app_config, save_app_config
 from config.config_models import MainUIProfile
 from gui.console_handler import ConsoleCommand, ConsoleCommandHandler
 from gui.debug_window import DebugWindow
@@ -124,9 +125,14 @@ class MainWindow(QMainWindow):
         self._command_window = None
         self._vna_window = None
 
+        # 전역 앱 설정 로드
+        self._app_config: AppConfig = load_app_config()
+        self._config_window = None
+
         # Worker 스레드 셋업
         self._worker = SweepWorker()
         self._worker.set_session(self._session)
+        self._worker.set_threshold(self._app_config.global_threshold)
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self.request_step.connect(self._worker.run_step)
@@ -187,6 +193,10 @@ class MainWindow(QMainWindow):
         act_pm = QAction("Parameter Manager...", self)
         act_pm.triggered.connect(self._open_parameter_manager)
         settings_menu.addAction(act_pm)
+        settings_menu.addSeparator()
+        act_config = QAction("Config...", self)
+        act_config.triggered.connect(self._open_config)
+        settings_menu.addAction(act_config)
 
         view_menu = menubar.addMenu("View")
         act_debug = QAction("Debug Window", self)
@@ -359,6 +369,7 @@ class MainWindow(QMainWindow):
         fp.save_enabled = self._cb_save_enable.isChecked()
         fp.active_sweep_channel_idx = self._sweep_radio_group.checkedId()
         self._param_manager_reg.save_active_profile(fp)
+        save_app_config(self._app_config)
 
     def _apply_active_profile(self):
         """활성 프로파일 설정을 UI에 적용."""
@@ -747,6 +758,18 @@ class MainWindow(QMainWindow):
         self._param_manager_window.show()
         self._param_manager_window.raise_()
 
+    def _open_config(self):
+        from gui.config_window import ConfigWindow
+        if self._config_window is None or not self._config_window.isVisible():
+            self._config_window = ConfigWindow(self._app_config, self)
+            self._config_window.apply_requested.connect(self._on_config_applied)
+        self._config_window.show()
+        self._config_window.raise_()
+
+    def _on_config_applied(self, cfg: AppConfig):
+        self._app_config = cfg
+        self._worker.set_threshold(cfg.global_threshold)
+
     def _open_graph_window(self):
         from gui.graph_window import GraphWindow
         if self._graph_window is None:
@@ -1081,9 +1104,12 @@ class MainWindow(QMainWindow):
                     return meas_map.get(idx)
             return None
 
+        import math as _math
         a1 = _get(cfg.numerator_key)
         a2 = _get(cfg.denominator_key)
         if a1 is None or a2 is None:
+            return None
+        if _math.isnan(a1) or _math.isnan(a2):
             return None
         return channel.push(a1, a2)
 
@@ -1596,6 +1622,9 @@ class MainWindow(QMainWindow):
         self._sweep_step_count += 1
 
         # DataWindow 갱신: next_v + 체크된 measurement 값만
+        # val=None  → 실제 측정 에러 (스윕 중단)
+        # val=nan   → threshold 초과 (스윕 계속, 파일에 "nan" 기록)
+        import math as _math
         meas_map = {row: val for row, val in result.meas_results}
         row_vals = [f"{result.next_v:.6g}"]
         has_err = False
@@ -1603,7 +1632,11 @@ class MainWindow(QMainWindow):
             val = meas_map.get(idx)
             if val is None:
                 has_err = True
-            row_vals.append(f"{val:.6g}" if val is not None else "ERR")
+                row_vals.append("ERR")
+            elif _math.isnan(val):
+                row_vals.append("nan")
+            else:
+                row_vals.append(f"{val:.6g}")
 
         if has_err:
             err_descs = [
@@ -1621,12 +1654,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Measurement Error", err_msg)
             return
         else:
-            # verbose: 측정값 요약
+            # verbose: 측정값 요약 (None/nan 제외)
             val_summary = "  ".join(
                 f"{self._active_profile.measurements[idx].description}="
                 f"{meas_map[idx]:.4g}"
                 for idx in self._active_meas_indices
-                if meas_map.get(idx) is not None
+                if meas_map.get(idx) is not None and not _math.isnan(meas_map[idx])
             )
             if val_summary:
                 self._log_sweep(
@@ -1658,8 +1691,10 @@ class MainWindow(QMainWindow):
             gvals = {"__sweep__": result.next_v}
             for idx in self._active_meas_indices:
                 val = meas_map.get(idx)
-                if val is not None:
-                    gvals[self._active_profile.measurements[idx].description] = val
+                # None (측정 실패 또는 threshold 초과) → nan으로 그래프에 공백 표시
+                gvals[self._active_profile.measurements[idx].description] = (
+                    val if val is not None else float("nan")
+                )
             for ch, key, val in [
                 (self._deriv_channel,  _DERIV_KEY,  deriv_val),
                 (self._deriv_channel2, _DERIV2_KEY, deriv_val2),
