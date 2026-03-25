@@ -1,9 +1,15 @@
 import sys
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
+from core.profile_registry import ProfileRegistry
+from gui.profile_launch_dialog import ProfileLaunchDialog
 from gui.main_window import MainWindow
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MainWindow()
+    reg = ProfileRegistry()
+    dlg = ProfileLaunchDialog(reg)
+    if dlg.exec() != QDialog.DialogCode.Accepted:
+        sys.exit(0)
+    window = MainWindow(profile_registry=reg)
     window.show()
     sys.exit(app.exec())

@@ -83,7 +83,7 @@ class MainWindow(QMainWindow):
     # VISA 로그를 메인 스레드로 릴레이 (worker 스레드에서 호출되므로 Signal 경유)
     _visa_log_relay = Signal(str, str, str, str, object)  # alias, addr, cmd_type, cmd, result
 
-    def __init__(self):
+    def __init__(self, profile_registry: ProfileRegistry = None):
         super().__init__()
         self.setWindowTitle("Measurement System")
         self.resize(1120, 660)
@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         self._sweep_channel = None
         self._meas_checkboxes: list[QCheckBox] = []
         self._active_meas_indices: list[int] = []
-        self._param_manager_reg = ProfileRegistry()
+        self._param_manager_reg = profile_registry if profile_registry is not None else ProfileRegistry()
         self._param_manager_window = None
         self._active_profile: MainUIProfile = MainUIProfile()
         self._running = False
@@ -122,6 +122,7 @@ class MainWindow(QMainWindow):
         self._meta_manager = MetaDataManager(self._session)
         self._meta_data_window = None
         self._command_window = None
+        self._vna_window = None
 
         # Worker 스레드 셋업
         self._worker = SweepWorker()
@@ -213,6 +214,9 @@ class MainWindow(QMainWindow):
         act_cmd = QAction("Command Window...", self)
         act_cmd.triggered.connect(self._open_command_window)
         view_menu.addAction(act_cmd)
+        act_vna = QAction("VNA Control...", self)
+        act_vna.triggered.connect(self._open_vna_window)
+        view_menu.addAction(act_vna)
 
     def _setup_ui(self):
         self._glow_frame = QFrame()
@@ -275,30 +279,36 @@ class MainWindow(QMainWindow):
         self._save_current_to_active_profile()
         self._param_manager_reg.set_active(name)
         self._apply_active_profile()
+        if self._vna_window is not None:
+            self._vna_window.on_profile_changed()
 
     def _profile_add(self):
         name, ok = QInputDialog.getText(self, "Add Profile", "프로파일 이름:")
         if not ok or not name.strip():
             return
         actual = self._param_manager_reg.add_profile(name.strip())
-        self._save_current_to_active_profile()
+        self._save_current_to_active_profile()   # 이전 프로파일 저장 (VNA 포함)
         self._param_manager_reg.set_active(actual)
         self._refresh_profile_combo()
         self._combo_profile.blockSignals(True)
         self._combo_profile.setCurrentText(actual)
         self._combo_profile.blockSignals(False)
         self._apply_active_profile()
+        if self._vna_window is not None:
+            self._vna_window.on_profile_changed()
 
     def _profile_duplicate(self):
         new_name = self._param_manager_reg.duplicate_profile(
             self._param_manager_reg.active_name
         )
-        self._save_current_to_active_profile()
+        self._save_current_to_active_profile()   # 이전 프로파일 저장 (VNA 포함)
         self._param_manager_reg.set_active(new_name)
         self._refresh_profile_combo()
         self._combo_profile.blockSignals(True)
         self._combo_profile.setCurrentText(new_name)
         self._combo_profile.blockSignals(False)
+        if self._vna_window is not None:
+            self._vna_window.on_profile_changed()
 
     def _profile_rename(self):
         old = self._param_manager_reg.active_name
@@ -331,9 +341,12 @@ class MainWindow(QMainWindow):
         self._apply_active_profile()
 
     def _save_current_to_active_profile(self):
-        """현재 UI 상태를 활성 프로파일에 저장."""
+        """현재 UI 상태를 활성 프로파일에 저장 (VNA 포함)."""
         if self._loading_profile:
             return
+        # VNA 설정도 함께 저장 (profiles/vna/{name}.yaml)
+        if self._vna_window is not None:
+            self._vna_window._save_ui_state()
         fp = self._param_manager_reg.get_active_profile()
         fp.main_ui = self._active_profile
         fp.sweep_to = self._sweep_config.sweep_to
@@ -777,6 +790,15 @@ class MainWindow(QMainWindow):
             self._command_window = CommandWindow(self._session, self._visa_lib_registry, self)
         self._command_window.show()
         self._command_window.raise_()
+
+    def _open_vna_window(self):
+        from gui.vna_window import VnaWindow
+        if self._vna_window is None:
+            self._vna_window = VnaWindow(
+                self._session, self._visa_lib_registry,
+                param_manager_reg=self._param_manager_reg, parent=self)
+        self._vna_window.show()
+        self._vna_window.raise_()
 
     def _open_double_sweep(self):
         from gui.double_sweep_window import DoubleSweepWindow
@@ -1345,8 +1367,19 @@ class MainWindow(QMainWindow):
             self._visa_lib_window = VisaLibraryWindow(
                 self._visa_lib_registry, self._registry, self
             )
+            self._visa_lib_window.library_saved.connect(self._on_library_saved)
         self._visa_lib_window.show()
         self._visa_lib_window.raise_()
+
+    def _on_library_saved(self):
+        """라이브러리 저장 후 main UI를 재인스턴스화 (세팅 보존 모드)."""
+        new_mui = self._param_manager_reg.rebuild_main_ui_from_library(
+            self._visa_lib_registry, drop_orphans=False
+        )
+        self._on_selection_applied(new_mui)
+        # Parameter Manager 창이 열려 있으면 라이브러리 뷰 갱신
+        if self._param_manager_window is not None and self._param_manager_window.isVisible():
+            self._param_manager_window.refresh_library()
 
     def _on_start(self):
         if self._running:
@@ -1920,6 +1953,7 @@ class MainWindow(QMainWindow):
 
         # 모든 하위 창 닫기
         for win in (
+            self._vna_window,
             self._graph_window,
             self._double_sweep_window,
             self._param_manager_window,

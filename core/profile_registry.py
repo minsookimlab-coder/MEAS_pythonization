@@ -4,6 +4,7 @@ profiles/ 디렉토리에 이름별 YAML 파일로 저장.
 ParameterManagerRegistry의 drop-in 대체품.
 """
 import re as _re
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
@@ -41,6 +42,7 @@ class ProfileRegistry:
 
         self._load_active_name()
         self._migrate_if_needed()
+        self._migrate_vna_configs()
 
         # Ensure active profile file exists
         if not self._profile_path(self._active_name).exists():
@@ -58,6 +60,10 @@ class ProfileRegistry:
 
     def _profile_path(self, name: str) -> Path:
         return self._profiles_dir / f"{self._sanitize(name)}.yaml"
+
+    def _vna_config_path(self, name: str) -> Path:
+        """VNA 전용 설정 파일 경로 (profiles/vna/{name}.yaml)."""
+        return self._profiles_dir / "vna" / f"{self._sanitize(name)}.yaml"
 
     # ------------------------------------------------------------------
     # Active profile name
@@ -104,13 +110,43 @@ class ProfileRegistry:
 
         self.save_profile("default", profile)
 
+    def _migrate_vna_configs(self):
+        """profiles/vna_*.yaml → profiles/vna/*.yaml 이동 및 오염 정리.
+
+        이전 버전에서 VNA config가 profiles/ 안에 vna_{name}.yaml로 저장되어
+        list_profiles()에 오염됐던 문제를 수정한다.
+        """
+        vna_dir = self._profiles_dir / "vna"
+        vna_dir.mkdir(exist_ok=True)
+        for p in list(self._profiles_dir.glob("vna_*.yaml")):
+            name = p.stem[4:]  # "vna_SangIl" → "SangIl"
+            dest = vna_dir / f"{name}.yaml"
+            try:
+                if not dest.exists():
+                    p.rename(dest)
+                else:
+                    p.unlink()
+            except Exception:
+                pass
+        # active_name이 vna_* 오염 상태이면 원래 프로파일로 복구
+        if self._active_name.startswith("vna_"):
+            real_name = self._active_name[4:]
+            candidates = [p.stem for p in sorted(self._profiles_dir.glob("*.yaml"))
+                          if not p.stem.startswith("vna_")]
+            if real_name in candidates:
+                self.set_active(real_name)
+            elif candidates:
+                self.set_active(candidates[0])
+
     # ------------------------------------------------------------------
     # Profile CRUD
     # ------------------------------------------------------------------
 
     def list_profiles(self) -> List[str]:
-        """프로파일 이름 목록 반환 (default 항상 첫 번째)."""
-        names = [p.stem for p in sorted(self._profiles_dir.glob("*.yaml"))]
+        """프로파일 이름 목록 반환 (default 항상 첫 번째).
+        vna_* 파일은 VNA 전용이므로 제외."""
+        names = [p.stem for p in sorted(self._profiles_dir.glob("*.yaml"))
+                 if not p.stem.startswith("vna_")]
         if "default" in names:
             names.remove("default")
             names.insert(0, "default")
@@ -168,6 +204,9 @@ class ProfileRegistry:
         path = self._profile_path(name)
         if path.exists():
             path.unlink()
+        vna_path = self._vna_config_path(name)
+        if vna_path.exists():
+            vna_path.unlink()
         self._cache.pop(name, None)
         if self._active_name == name:
             remaining = self.list_profiles()
@@ -195,6 +234,11 @@ class ProfileRegistry:
             if old_path.exists():
                 old_path.unlink()
             self._cache.pop(old_name, None)
+            # VNA config 파일도 이름 변경
+            old_vna = self._vna_config_path(old_name)
+            new_vna = self._vna_config_path(actual)
+            if old_vna.exists() and not new_vna.exists():
+                old_vna.rename(new_vna)
 
         if self._active_name == old_name:
             self.set_active(actual)
@@ -211,6 +255,12 @@ class ProfileRegistry:
             counter += 1
             new_name = f"{base}_{counter}"
         self.save_profile(new_name, source.model_copy(deep=True))
+        # VNA config도 복사
+        src_vna = self._vna_config_path(name)
+        dst_vna = self._vna_config_path(new_name)
+        if src_vna.exists() and not dst_vna.exists():
+            dst_vna.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_vna, dst_vna)
         return new_name
 
     # ------------------------------------------------------------------
@@ -257,22 +307,36 @@ class ProfileRegistry:
     # Library rebuild (ParameterManagerRegistry compatibility)
     # ------------------------------------------------------------------
 
-    def rebuild_main_ui_from_library(self, lib_registry: "VisaLibraryRegistry") -> MainUIProfile:
+    def rebuild_main_ui_from_library(
+        self,
+        lib_registry: "VisaLibraryRegistry",
+        drop_orphans: bool = True,
+    ) -> MainUIProfile:
         """
         selection의 (alias, description) 포인터로 라이브러리를 참조해
         MainUIProfile을 재인스턴스화합니다.
-        description이 라이브러리에 존재하면 최신 명령어로 갱신하고,
-        없으면 기존 항목을 그대로 사용합니다.
-        fill_params는 항상 보존됩니다.
+
+        drop_orphans=True  (기본): Parameter Manager Apply 등 사용자가 명시적으로
+            적용할 때. 라이브러리에 없는 항목(유령 데이터)은 결과와 selection
+            포인터에서 모두 제거합니다.
+        drop_orphans=False: 라이브러리 저장 등 상위 계층 변경 시 하위 계층을
+            재인스턴스화할 때. 라이브러리에서 찾은 항목은 새 데이터로 업데이트하고,
+            찾지 못한 항목은 기존 상태 그대로 보존합니다 (세팅 손실 방지).
         """
         active = self.get_active_profile()
         sel = active.parameter_manager
         old_mui = active.main_ui
 
-        old_meas  = {(m.alias, m.description): m for m in old_mui.measurements}
-        old_sweep = {(s.alias, s.description): s for s in old_mui.sweep_values}
-        old_write = {(w.alias, w.description): w for w in old_mui.write_cmds}
+        old_meas   = {(m.alias, m.description): m for m in old_mui.measurements}
+        old_sweep  = {(s.alias, s.description): s for s in old_mui.sweep_values}
+        old_write  = {(w.alias, w.description): w for w in old_mui.write_cmds}
         old_second = {(s.alias, s.description): s for s in old_mui.second_sweep_channels}
+
+        # 라이브러리에서 실제로 찾은 항목만 추적 (selection 정리용)
+        found_meas:   set = set()
+        found_sweep:  set = set()
+        found_write:  set = set()
+        found_second: set = set()
 
         # ── Measurements ──────────────────────────────────────────────
         new_measurements: list[InstantiatedMeasurement] = []
@@ -281,6 +345,7 @@ class ProfileRegistry:
             entry = next((e for e in lib.measurements if e.description == s.description), None)
             old = old_meas.get((s.alias, s.description))
             if entry:
+                found_meas.add((s.alias, s.description))
                 new_measurements.append(InstantiatedMeasurement(
                     alias=s.alias,
                     description=entry.description,
@@ -289,7 +354,8 @@ class ProfileRegistry:
                     unit=entry.unit,
                     fill_params=old.fill_params if old else {},
                 ))
-            elif old:
+            elif not drop_orphans and old:
+                # 라이브러리에 없지만 보존 모드 → 기존 항목 유지
                 new_measurements.append(old)
 
         # ── Sweep Values ───────────────────────────────────────────────
@@ -299,6 +365,7 @@ class ProfileRegistry:
             entry = next((e for e in lib.sweep_values if e.description == s.description), None)
             old = old_sweep.get((s.alias, s.description))
             if entry:
+                found_sweep.add((s.alias, s.description))
                 paired_cmd = entry.paired_read_cmd
                 lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
                 if len(lib_phs) == 1:
@@ -318,7 +385,7 @@ class ProfileRegistry:
                     safety_interval_ms=old.safety_interval_ms if old else 0.0,
                     fill_params=old.fill_params if old else {},
                 ))
-            elif old:
+            elif not drop_orphans and old:
                 new_sweep_values.append(old)
 
         # ── Write Commands ─────────────────────────────────────────────
@@ -328,6 +395,7 @@ class ProfileRegistry:
             entry = next((e for e in lib.write_cmds if e.description == s.description), None)
             old = old_write.get((s.alias, s.description))
             if entry:
+                found_write.add((s.alias, s.description))
                 lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
                 if not lib_phs:
                     new_cmd_set = entry.cmd_set
@@ -345,7 +413,7 @@ class ProfileRegistry:
                     unit=entry.unit,
                     fill_params=old.fill_params if old else {},
                 ))
-            elif old:
+            elif not drop_orphans and old:
                 new_write_cmds.append(old)
 
         # ── Second Sweep Channels ──────────────────────────────────────
@@ -356,6 +424,7 @@ class ProfileRegistry:
             sv_entry = next((e for e in lib.sweep_values if e.description == s.description), None)
             wc_entry = next((e for e in lib.write_cmds  if e.description == s.description), None)
             if sv_entry:
+                found_second.add((s.alias, s.description))
                 lib_phs = _re.findall(r"\{(\w+)\}", sv_entry.cmd_set)
                 new_cmd_set = (
                     sv_entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}") if len(lib_phs) == 1
@@ -377,6 +446,7 @@ class ProfileRegistry:
                         figure_axis=sv_entry.figure_axis, unit=sv_entry.unit,
                     ))
             elif wc_entry:
+                found_second.add((s.alias, s.description))
                 lib_phs = _re.findall(r"\{(\w+)\}", wc_entry.cmd_set)
                 if not lib_phs:
                     new_cmd_set = wc_entry.cmd_set
@@ -398,12 +468,31 @@ class ProfileRegistry:
                         source_type="write_cmd", cmd_set=new_cmd_set,
                         figure_axis=wc_entry.figure_axis, unit=wc_entry.unit,
                     ))
-            elif old:
+            elif not drop_orphans and old:
                 new_second.append(old)
 
-        return MainUIProfile(
+        new_mui = MainUIProfile(
             measurements=new_measurements,
             sweep_values=new_sweep_values,
             write_cmds=new_write_cmds,
             second_sweep_channels=new_second,
         )
+
+        if drop_orphans:
+            # 유령 selection 포인터 제거
+            cleaned_sel = sel.model_copy(update={
+                "measurements":          [s for s in sel.measurements
+                                          if (s.alias, s.description) in found_meas],
+                "sweep_values":          [s for s in sel.sweep_values
+                                          if (s.alias, s.description) in found_sweep],
+                "write_cmds":            [s for s in sel.write_cmds
+                                          if (s.alias, s.description) in found_write],
+                "second_sweep_channels": [s for s in sel.second_sweep_channels
+                                          if (s.alias, s.description) in found_second],
+            })
+            active.parameter_manager = cleaned_sel
+
+        active.main_ui = new_mui
+        self.save_active_profile(active)
+
+        return new_mui

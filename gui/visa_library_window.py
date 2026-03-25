@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QInputDialog, QFrame
 )
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont
 
 from config.config_models import MeasurementParamDef, SweepValueDef, WriteCmdDef, InstrumentCmdLibrary
@@ -233,6 +233,8 @@ class VisaLibraryWindow(QDialog):
     기기(alias)별로 Measurement Parameter / Sweep Value 명령어를 등록·편집·저장합니다.
     """
 
+    library_saved = Signal()   # 라이브러리 저장 완료 시 emit → 하위 계층 재인스턴스화 트리거
+
     _HEADERS = ["Description", "VISA Command", "Figure Axis", "Unit", "Type", "Paired Measurement"]
 
     def __init__(
@@ -383,6 +385,7 @@ class VisaLibraryWindow(QDialog):
             )
         )
         self._lib_reg.save()
+        self.library_saved.emit()
 
     def _on_instrument_changed(self, alias: str):
         self._save_current_silent()   # save previous instrument first
@@ -506,6 +509,7 @@ class VisaLibraryWindow(QDialog):
             )
         )
         self._lib_reg.save()
+        self.library_saved.emit()
         QMessageBox.information(self, "Saved", f"'{self._current_alias}' 라이브러리가 저장되었습니다.")
 
     # ------------------------------------------------------------------
@@ -542,5 +546,6 @@ class VisaLibraryWindow(QDialog):
                 )
             )
             self._lib_reg.save()
+            self.library_saved.emit()
         event.ignore()
         self.hide()

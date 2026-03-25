@@ -1349,6 +1349,10 @@ class ParameterManagerWindow(QDialog):
         self.selection_applied.emit(profile)
         self.hide()
 
+    def refresh_library(self):
+        """라이브러리 저장 후 호출 — 재인스턴스화된 profile 데이터로 패널 갱신."""
+        self._load_from_profile()
+
     # ------------------------------------------------------------------
 
     def showEvent(self, event):

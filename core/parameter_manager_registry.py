@@ -124,12 +124,14 @@ class ParameterManagerRegistry:
         """
         selection의 (alias, description) 포인터로 라이브러리를 참조해
         MainUIProfile을 재인스턴스화합니다.
-        description이 라이브러리에 존재하면 최신 명령어로 갱신하고,
-        없으면 기존 main_ui_profile 항목을 그대로 사용합니다.
+        라이브러리에 없는 항목(유령 데이터)은 결과와 selection 포인터에서 모두 제거합니다.
         """
         old_meas  = {(m.alias, m.description): m for m in self._main_ui.measurements}
         old_sweep = {(s.alias, s.description): s for s in self._main_ui.sweep_values}
         old_write = {(w.alias, w.description): w for w in self._main_ui.write_cmds}
+        found_meas:  set = set()
+        found_sweep: set = set()
+        found_write: set = set()
 
         # ── Measurements ──────────────────────────────────────────────
         new_measurements: list[InstantiatedMeasurement] = []
@@ -137,6 +139,7 @@ class ParameterManagerRegistry:
             lib = lib_registry.get_library(sel.alias)
             entry = next((e for e in lib.measurements if e.description == sel.description), None)
             if entry:
+                found_meas.add((sel.alias, sel.description))
                 new_measurements.append(InstantiatedMeasurement(
                     alias=sel.alias,
                     description=entry.description,
@@ -146,8 +149,7 @@ class ParameterManagerRegistry:
                     fill_params=old_meas[(sel.alias, sel.description)].fill_params
                     if (sel.alias, sel.description) in old_meas else {},
                 ))
-            elif (sel.alias, sel.description) in old_meas:
-                new_measurements.append(old_meas[(sel.alias, sel.description)])
+            # 라이브러리에 없으면 유령 항목 → 드롭
 
         # ── Sweep Values ───────────────────────────────────────────────
         new_sweep_values: list[InstantiatedSweepValue] = []
@@ -156,13 +158,12 @@ class ParameterManagerRegistry:
             entry = next((e for e in lib.sweep_values if e.description == sel.description), None)
             old = old_sweep.get((sel.alias, sel.description))
             if entry:
+                found_sweep.add((sel.alias, sel.description))
                 paired_cmd = entry.paired_read.resolved_cmd()
                 lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
                 if len(lib_phs) == 1:
-                    # 단일 플레이스홀더 → sweep 파라미터로 간주, {v}로 치환
                     new_cmd_set = entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}")
                 elif old:
-                    # 복수 플레이스홀더 → 기존 cmd_set 유지 (고정값 파라미터 복원 불가)
                     new_cmd_set = old.cmd_set
                 else:
                     new_cmd_set = entry.cmd_set
@@ -177,8 +178,7 @@ class ParameterManagerRegistry:
                     safety_interval_ms=old.safety_interval_ms if old else 0.0,
                     fill_params=old.fill_params if old else {},
                 ))
-            elif old:
-                new_sweep_values.append(old)
+            # 라이브러리에 없으면 유령 항목 → 드롭
 
         # ── Write Commands ─────────────────────────────────────────────
         new_write_cmds: list[InstantiatedWriteCmd] = []
@@ -187,6 +187,7 @@ class ParameterManagerRegistry:
             entry = next((e for e in lib.write_cmds if e.description == sel.description), None)
             old = old_write.get((sel.alias, sel.description))
             if entry:
+                found_write.add((sel.alias, sel.description))
                 lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
                 if not lib_phs:
                     new_cmd_set = entry.cmd_set
@@ -204,19 +205,19 @@ class ParameterManagerRegistry:
                     unit=entry.unit,
                     fill_params=old.fill_params if old else {},
                 ))
-            elif old:
-                new_write_cmds.append(old)
+            # 라이브러리에 없으면 유령 항목 → 드롭
 
         # ── Second Sweep Channels ──────────────────────────────────────
         old_second = {(s.alias, s.description): s for s in self._main_ui.second_sweep_channels}
+        found_second: set = set()
         new_second_channels: list[InstantiatedSecondSweepChannel] = []
         for sel in self._selection.second_sweep_channels:
             lib = lib_registry.get_library(sel.alias)
             old = old_second.get((sel.alias, sel.description))
-            # Try sweep_values first, then write_cmds
             sv_entry = next((e for e in lib.sweep_values if e.description == sel.description), None)
             wc_entry = next((e for e in lib.write_cmds if e.description == sel.description), None)
             if sv_entry:
+                found_second.add((sel.alias, sel.description))
                 source_type = "sweep_value"
                 lib_phs = _re.findall(r"\{(\w+)\}", sv_entry.cmd_set)
                 if len(lib_phs) == 1:
@@ -258,6 +259,7 @@ class ParameterManagerRegistry:
                         unit=sv_entry.unit,
                     ))
             elif wc_entry:
+                found_second.add((sel.alias, sel.description))
                 source_type = "write_cmd"
                 lib_phs = _re.findall(r"\{(\w+)\}", wc_entry.cmd_set)
                 if not lib_phs:
@@ -288,12 +290,25 @@ class ParameterManagerRegistry:
                         figure_axis=wc_entry.figure_axis,
                         unit=wc_entry.unit,
                     ))
-            elif old:
-                new_second_channels.append(old)
+            # 라이브러리에 없으면 유령 항목 → 드롭
 
-        return MainUIProfile(
+        # 유령 selection 포인터 제거 후 저장
+        cleaned_sel = self._selection.model_copy(update={
+            "measurements":          [s for s in self._selection.measurements
+                                      if (s.alias, s.description) in found_meas],
+            "sweep_values":          [s for s in self._selection.sweep_values
+                                      if (s.alias, s.description) in found_sweep],
+            "write_cmds":            [s for s in self._selection.write_cmds
+                                      if (s.alias, s.description) in found_write],
+            "second_sweep_channels": [s for s in self._selection.second_sweep_channels
+                                      if (s.alias, s.description) in found_second],
+        })
+        new_mui = MainUIProfile(
             measurements=new_measurements,
             sweep_values=new_sweep_values,
             write_cmds=new_write_cmds,
             second_sweep_channels=new_second_channels,
         )
+        self.save_selection(cleaned_sel)
+        self.save_main_ui(new_mui)
+        return new_mui
