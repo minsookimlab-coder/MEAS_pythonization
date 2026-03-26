@@ -916,8 +916,15 @@ class MainWindow(QMainWindow):
         return aliases
 
     def _run_connection_test(self, include_second: bool = False,
-                             show_success: bool = True) -> bool:
-        """각 기기에 *IDN? 쿼리를 보내 연결 상태를 확인합니다.
+                             show_success: bool = True,
+                             force_idn: bool = False) -> bool:
+        """활성 기기의 연결 상태를 확인합니다.
+
+        force_idn=False (기본, 스윕 자동 호출):
+            이미 열려있는 장비는 *IDN? 없이 "already connected"로 처리.
+            → raw socket 장비(M81 등)의 응답이 측정 버퍼를 오염시키는 것을 방지.
+        force_idn=True (수동 Connection Test 버튼):
+            모든 장비에 *IDN?를 보내 실제 응답을 확인.
 
         show_success=False이면 오류가 있을 때만 다이얼로그를 표시합니다.
         반환값: 모두 성공이면 True, 하나라도 실패하면 False.
@@ -930,11 +937,17 @@ class MainWindow(QMainWindow):
 
         results: dict = {}  # alias → (ok: bool, message: str)
         for alias in aliases:
-            try:
-                idn = self._session.query_once(alias, "*IDN?")
-                results[alias] = (True, idn.strip())
-            except Exception as exc:
-                results[alias] = (False, str(exc))
+            if not force_idn and self._session.is_open(alias):
+                # 이미 열려있는 장비 — *IDN? 전송 없이 연결 확인
+                # raw socket 장비(M81 등)에서 *IDN?를 보내면 응답이 버퍼에 잔류해
+                # 이후 측정값 read를 오염시킬 수 있음.
+                results[alias] = (True, "already connected")
+            else:
+                try:
+                    idn = self._session.query_once(alias, "*IDN?")
+                    results[alias] = (True, idn.strip())
+                except Exception as exc:
+                    results[alias] = (False, str(exc))
 
         all_ok = all(ok for ok, _ in results.values())
 
@@ -953,8 +966,8 @@ class MainWindow(QMainWindow):
         return all_ok
 
     def _on_connection_test(self):
-        """Connection Test 버튼 핸들러 — 항상 요약 창 표시."""
-        self._run_connection_test(include_second=True, show_success=True)
+        """Connection Test 버튼 핸들러 — 항상 *IDN? 전송 후 요약 창 표시."""
+        self._run_connection_test(include_second=True, show_success=True, force_idn=True)
 
     # ------------------------------------------------------------------
     # Derivative Channel UI
