@@ -25,7 +25,7 @@ from core.sweep_worker import SweepWorker, StepRequest, StepResult
 from core.visa_library_registry import VisaLibraryRegistry
 from core.profile_registry import ProfileRegistry
 from config.app_config import AppConfig, load_app_config, save_app_config
-from config.config_models import MainUIProfile
+from config.config_models import MainUIProfile, DerivConfigData
 from gui.console_handler import ConsoleCommand, ConsoleCommandHandler
 from gui.debug_window import DebugWindow
 from gui.sweep_array_window import SweepArrayWindow
@@ -368,6 +368,20 @@ class MainWindow(QMainWindow):
         fp.include_date = self._cb_save_date.isChecked()
         fp.save_enabled = self._cb_save_enable.isChecked()
         fp.active_sweep_channel_idx = self._sweep_radio_group.checkedId()
+        # Derivative channel settings
+        for order, attr in [(1, "deriv1"), (2, "deriv2"), (3, "deriv3")]:
+            if hasattr(self, "_cb_deriv_enable"):
+                cfg = self._build_deriv_config(order)
+                setattr(fp, attr, DerivConfigData(
+                    enabled=cfg.enabled,
+                    numerator_key=cfg.numerator_key,
+                    denominator_key=cfg.denominator_key,
+                    output_label=cfg.output_label,
+                    output_unit=cfg.output_unit,
+                    window_size=cfg.window_size,
+                    method=cfg.method,
+                    min_delta=cfg.min_delta,
+                ))
         self._param_manager_reg.save_active_profile(fp)
         save_app_config(self._app_config)
 
@@ -412,6 +426,30 @@ class MainWindow(QMainWindow):
             btn = self._sweep_radio_group.button(fp.active_sweep_channel_idx)
             if btn:
                 btn.setChecked(True)
+            # Restore derivative channel settings (combos populated by _rebuild_deriv_combos above)
+            if hasattr(self, "_cb_deriv_enable"):
+                for order, attr in [(1, "deriv1"), (2, "deriv2"), (3, "deriv3")]:
+                    d = getattr(fp, attr)
+                    suffix = "" if order == 1 else str(order)
+                    cb = getattr(self, f"_cb_deriv{suffix}_enable")
+                    cb.blockSignals(True)
+                    cb.setChecked(d.enabled)
+                    cb.blockSignals(False)
+                    getattr(self, f"_le_deriv{suffix}_label").setText(d.output_label)
+                    getattr(self, f"_le_deriv{suffix}_unit").setText(d.output_unit)
+                    getattr(self, f"_sb_deriv{suffix}_window").setValue(d.window_size)
+                    getattr(self, f"_le_deriv{suffix}_min_delta").setText(f"{d.min_delta:g}")
+                    if order == 1:
+                        method_idx = {"linear": 0, "savgol": 1}.get(d.method, 0)
+                        getattr(self, "_cmb_deriv_method").setCurrentIndex(method_idx)
+                    for cmb_key, key in [("a1", d.numerator_key), ("a2", d.denominator_key)]:
+                        cmb = getattr(self, f"_cmb_deriv{suffix}_{cmb_key}")
+                        idx = cmb.findData(key)
+                        if idx >= 0:
+                            cmb.setCurrentIndex(idx)
+                    setting_widgets = getattr(self, f"_deriv{suffix}_setting_widgets")
+                    for w in setting_widgets:
+                        w.setEnabled(d.enabled and not self._running)
         finally:
             self._loading_profile = False
 

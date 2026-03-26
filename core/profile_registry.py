@@ -313,33 +313,144 @@ class ProfileRegistry:
         drop_orphans: bool = True,
     ) -> MainUIProfile:
         """
-        selection의 (alias, description) 포인터로 라이브러리를 참조해
-        MainUIProfile을 재인스턴스화합니다.
+        라이브러리 변경 시 MainUIProfile을 재인스턴스화합니다.
 
-        drop_orphans=True  (기본): Parameter Manager Apply 등 사용자가 명시적으로
-            적용할 때. 라이브러리에 없는 항목(유령 데이터)은 결과와 selection
-            포인터에서 모두 제거합니다.
-        drop_orphans=False: 라이브러리 저장 등 상위 계층 변경 시 하위 계층을
-            재인스턴스화할 때. 라이브러리에서 찾은 항목은 새 데이터로 업데이트하고,
-            찾지 못한 항목은 기존 상태 그대로 보존합니다 (세팅 손실 방지).
+        drop_orphans=False (라이브러리 저장 트리거):
+            기존 main_ui 항목을 기준으로 이터레이션합니다.
+            라이브러리에서 찾으면 cmd/figure_axis/unit 등 라이브러리 유래 필드만 갱신하고,
+            사용자 설정(fill_params, safety, checked 등)은 보존합니다.
+            라이브러리에서 찾지 못한 항목도 그대로 유지합니다 (절대 삭제 없음).
+
+        drop_orphans=True (명시적 정리 — 현재 미사용):
+            selection 포인터를 기준으로 이터레이션하며 라이브러리에 없는 항목을
+            결과와 selection에서 모두 제거합니다.
         """
         active = self.get_active_profile()
-        sel = active.parameter_manager
         old_mui = active.main_ui
+
+        # ── drop_orphans=False: 기존 main_ui 기준, 라이브러리 필드만 갱신 ──────
+        if not drop_orphans:
+            # Measurements
+            new_measurements: list[InstantiatedMeasurement] = []
+            for m in old_mui.measurements:
+                lib = lib_registry.get_library(m.alias)
+                entry = next((e for e in lib.measurements if e.description == m.description), None)
+                if entry:
+                    new_measurements.append(m.model_copy(update={
+                        "resolved_cmd": entry.cmd_query,
+                        "figure_axis":  entry.figure_axis,
+                        "unit":         entry.unit,
+                    }))
+                else:
+                    new_measurements.append(m)
+
+            # Sweep Values
+            new_sweep_values: list[InstantiatedSweepValue] = []
+            for sv in old_mui.sweep_values:
+                lib = lib_registry.get_library(sv.alias)
+                entry = next((e for e in lib.sweep_values if e.description == sv.description), None)
+                if entry:
+                    lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
+                    new_cmd_set = (
+                        entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}") if len(lib_phs) == 1
+                        else sv.cmd_set
+                    )
+                    new_sweep_values.append(sv.model_copy(update={
+                        "cmd_set":         new_cmd_set,
+                        "paired_read_cmd": entry.paired_read_cmd,
+                        "figure_axis":     entry.figure_axis,
+                        "unit":            entry.unit,
+                    }))
+                else:
+                    new_sweep_values.append(sv)
+
+            # Write Commands
+            new_write_cmds: list[InstantiatedWriteCmd] = []
+            for wc in old_mui.write_cmds:
+                lib = lib_registry.get_library(wc.alias)
+                entry = next((e for e in lib.write_cmds if e.description == wc.description), None)
+                if entry:
+                    lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
+                    if not lib_phs:
+                        new_cmd_set = entry.cmd_set
+                    elif len(lib_phs) == 1 and "{v}" in wc.cmd_set:
+                        new_cmd_set = entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}")
+                    else:
+                        new_cmd_set = wc.cmd_set
+                    new_write_cmds.append(wc.model_copy(update={
+                        "cmd_set":     new_cmd_set,
+                        "figure_axis": entry.figure_axis,
+                        "unit":        entry.unit,
+                    }))
+                else:
+                    new_write_cmds.append(wc)
+
+            # Second Sweep Channels
+            new_second: list[InstantiatedSecondSweepChannel] = []
+            for sc in old_mui.second_sweep_channels:
+                lib = lib_registry.get_library(sc.alias)
+                if sc.source_type == "sweep_value":
+                    entry = next((e for e in lib.sweep_values if e.description == sc.description), None)
+                    if entry:
+                        lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
+                        new_cmd_set = (
+                            entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}") if len(lib_phs) == 1
+                            else sc.cmd_set
+                        )
+                        new_second.append(sc.model_copy(update={
+                            "cmd_set":         new_cmd_set,
+                            "paired_read_cmd": entry.paired_read_cmd,
+                            "figure_axis":     entry.figure_axis,
+                            "unit":            entry.unit,
+                        }))
+                    else:
+                        new_second.append(sc)
+                elif sc.source_type == "write_cmd":
+                    entry = next((e for e in lib.write_cmds if e.description == sc.description), None)
+                    if entry:
+                        lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
+                        new_cmd_set = (
+                            entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}")
+                            if lib_phs and "{v}" in sc.cmd_set
+                            else (entry.cmd_set if not lib_phs else sc.cmd_set)
+                        )
+                        new_second.append(sc.model_copy(update={
+                            "cmd_set":     new_cmd_set,
+                            "figure_axis": entry.figure_axis,
+                            "unit":        entry.unit,
+                        }))
+                    else:
+                        new_second.append(sc)
+                else:
+                    new_second.append(sc)
+
+            new_mui = MainUIProfile(
+                measurements=new_measurements,
+                sweep_values=new_sweep_values,
+                write_cmds=new_write_cmds,
+                second_sweep_channels=new_second,
+                alarm_measurements=old_mui.alarm_measurements,
+                meta_data_measurements=old_mui.meta_data_measurements,
+            )
+            active.main_ui = new_mui
+            self.save_active_profile(active)
+            return new_mui
+
+        # ── drop_orphans=True: selection 기준, 유령 항목 정리 ─────────────────
+        sel = active.parameter_manager
 
         old_meas   = {(m.alias, m.description): m for m in old_mui.measurements}
         old_sweep  = {(s.alias, s.description): s for s in old_mui.sweep_values}
         old_write  = {(w.alias, w.description): w for w in old_mui.write_cmds}
         old_second = {(s.alias, s.description): s for s in old_mui.second_sweep_channels}
 
-        # 라이브러리에서 실제로 찾은 항목만 추적 (selection 정리용)
         found_meas:   set = set()
         found_sweep:  set = set()
         found_write:  set = set()
         found_second: set = set()
 
-        # ── Measurements ──────────────────────────────────────────────
-        new_measurements: list[InstantiatedMeasurement] = []
+        # Measurements
+        new_measurements = []
         for s in sel.measurements:
             lib = lib_registry.get_library(s.alias)
             entry = next((e for e in lib.measurements if e.description == s.description), None)
@@ -354,42 +465,34 @@ class ProfileRegistry:
                     unit=entry.unit,
                     fill_params=old.fill_params if old else {},
                 ))
-            elif not drop_orphans and old:
-                # 라이브러리에 없지만 보존 모드 → 기존 항목 유지
-                new_measurements.append(old)
 
-        # ── Sweep Values ───────────────────────────────────────────────
-        new_sweep_values: list[InstantiatedSweepValue] = []
+        # Sweep Values
+        new_sweep_values = []
         for s in sel.sweep_values:
             lib = lib_registry.get_library(s.alias)
             entry = next((e for e in lib.sweep_values if e.description == s.description), None)
             old = old_sweep.get((s.alias, s.description))
             if entry:
                 found_sweep.add((s.alias, s.description))
-                paired_cmd = entry.paired_read_cmd
                 lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
-                if len(lib_phs) == 1:
-                    new_cmd_set = entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}")
-                elif old:
-                    new_cmd_set = old.cmd_set
-                else:
-                    new_cmd_set = entry.cmd_set
+                new_cmd_set = (
+                    entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}") if len(lib_phs) == 1
+                    else (old.cmd_set if old else entry.cmd_set)
+                )
                 new_sweep_values.append(InstantiatedSweepValue(
                     alias=s.alias,
                     description=entry.description,
                     cmd_set=new_cmd_set,
-                    paired_read_cmd=paired_cmd,
+                    paired_read_cmd=entry.paired_read_cmd,
                     figure_axis=entry.figure_axis,
                     unit=entry.unit,
                     safety_steps=old.safety_steps if old else 0,
                     safety_interval_ms=old.safety_interval_ms if old else 0.0,
                     fill_params=old.fill_params if old else {},
                 ))
-            elif not drop_orphans and old:
-                new_sweep_values.append(old)
 
-        # ── Write Commands ─────────────────────────────────────────────
-        new_write_cmds: list[InstantiatedWriteCmd] = []
+        # Write Commands
+        new_write_cmds = []
         for s in sel.write_cmds:
             lib = lib_registry.get_library(s.alias)
             entry = next((e for e in lib.write_cmds if e.description == s.description), None)
@@ -413,11 +516,9 @@ class ProfileRegistry:
                     unit=entry.unit,
                     fill_params=old.fill_params if old else {},
                 ))
-            elif not drop_orphans and old:
-                new_write_cmds.append(old)
 
-        # ── Second Sweep Channels ──────────────────────────────────────
-        new_second: list[InstantiatedSecondSweepChannel] = []
+        # Second Sweep Channels
+        new_second = []
         for s in sel.second_sweep_channels:
             lib = lib_registry.get_library(s.alias)
             old = old_second.get((s.alias, s.description))
@@ -430,19 +531,16 @@ class ProfileRegistry:
                     sv_entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}") if len(lib_phs) == 1
                     else (old.cmd_set if old else sv_entry.cmd_set)
                 )
-                paired_cmd = sv_entry.paired_read_cmd
                 if old and old.source_type == "sweep_value":
                     new_second.append(old.model_copy(update={
-                        "cmd_set": new_cmd_set,
-                        "paired_read_cmd": paired_cmd,
-                        "figure_axis": sv_entry.figure_axis,
-                        "unit": sv_entry.unit,
+                        "cmd_set": new_cmd_set, "paired_read_cmd": sv_entry.paired_read_cmd,
+                        "figure_axis": sv_entry.figure_axis, "unit": sv_entry.unit,
                     }))
                 else:
                     new_second.append(InstantiatedSecondSweepChannel(
                         alias=s.alias, description=sv_entry.description,
                         source_type="sweep_value", cmd_set=new_cmd_set,
-                        paired_read_cmd=paired_cmd,
+                        paired_read_cmd=sv_entry.paired_read_cmd,
                         figure_axis=sv_entry.figure_axis, unit=sv_entry.unit,
                     ))
             elif wc_entry:
@@ -459,8 +557,7 @@ class ProfileRegistry:
                 if old and old.source_type == "write_cmd":
                     new_second.append(old.model_copy(update={
                         "cmd_set": new_cmd_set,
-                        "figure_axis": wc_entry.figure_axis,
-                        "unit": wc_entry.unit,
+                        "figure_axis": wc_entry.figure_axis, "unit": wc_entry.unit,
                     }))
                 else:
                     new_second.append(InstantiatedSecondSweepChannel(
@@ -468,31 +565,28 @@ class ProfileRegistry:
                         source_type="write_cmd", cmd_set=new_cmd_set,
                         figure_axis=wc_entry.figure_axis, unit=wc_entry.unit,
                     ))
-            elif not drop_orphans and old:
-                new_second.append(old)
 
         new_mui = MainUIProfile(
             measurements=new_measurements,
             sweep_values=new_sweep_values,
             write_cmds=new_write_cmds,
             second_sweep_channels=new_second,
+            alarm_measurements=old_mui.alarm_measurements,
+            meta_data_measurements=old_mui.meta_data_measurements,
         )
 
-        if drop_orphans:
-            # 유령 selection 포인터 제거
-            cleaned_sel = sel.model_copy(update={
-                "measurements":          [s for s in sel.measurements
-                                          if (s.alias, s.description) in found_meas],
-                "sweep_values":          [s for s in sel.sweep_values
-                                          if (s.alias, s.description) in found_sweep],
-                "write_cmds":            [s for s in sel.write_cmds
-                                          if (s.alias, s.description) in found_write],
-                "second_sweep_channels": [s for s in sel.second_sweep_channels
-                                          if (s.alias, s.description) in found_second],
-            })
-            active.parameter_manager = cleaned_sel
-
+        # 유령 selection 포인터 제거
+        cleaned_sel = sel.model_copy(update={
+            "measurements":          [s for s in sel.measurements
+                                      if (s.alias, s.description) in found_meas],
+            "sweep_values":          [s for s in sel.sweep_values
+                                      if (s.alias, s.description) in found_sweep],
+            "write_cmds":            [s for s in sel.write_cmds
+                                      if (s.alias, s.description) in found_write],
+            "second_sweep_channels": [s for s in sel.second_sweep_channels
+                                      if (s.alias, s.description) in found_second],
+        })
+        active.parameter_manager = cleaned_sel
         active.main_ui = new_mui
         self.save_active_profile(active)
-
         return new_mui

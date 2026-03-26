@@ -1262,6 +1262,11 @@ class DoubleSweepWindow(QDialog):
         self._last_write_value = None
         self._last_meas_values = {}
         self._trace_filepath = None
+        # Reconfigure derivative channels from current UI settings (single sweep과 동일하게)
+        mw = self._main_win
+        for order, ch in [(1, mw._deriv_channel), (2, mw._deriv_channel2), (3, mw._deriv_channel3)]:
+            ch.reconfigure(mw._build_deriv_config(order))
+            ch.reset()
         self._ctx = self._build_context()
         self._lbl_last_alarm.setText("(없음)")
         self._lbl_last_alarm.setStyleSheet("color: #888888; font-size: 10px;")
@@ -1653,8 +1658,11 @@ class DoubleSweepWindow(QDialog):
                 self._main_win._log("  First channel at start_point. Advancing second channel.", color="#4ec9b0")
                 self._advance_second(self._array[0], prev=None)
             else:
-                # no time_per_point delay during pre-init
-                self._sweep_timer.start(0)
+                # dummy phase와 동일한 time_per_point 간격으로 진행
+                t_before_timer = time.perf_counter()
+                elapsed_ms = int((t_before_timer - result.timing.t_emit) * 1000)
+                interval_ms = max(0, int(self._cfg.time_per_point * 1000) - elapsed_ms)
+                self._sweep_timer.start(interval_ms)
             return
 
         if self._phase not in (DoubleSweepPhase.DUMMY,

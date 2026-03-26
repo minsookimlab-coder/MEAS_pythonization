@@ -315,6 +315,18 @@ class MainUIProfile(BaseModel):
     meta_data_measurements: List[InstantiatedMeasurement] = Field(default_factory=list)
 
 
+class DerivConfigData(BaseModel):
+    """Derivative channel 설정 — FullProfile 저장용."""
+    enabled: bool = False
+    numerator_key: str = ""
+    denominator_key: str = ""
+    output_label: str = ""
+    output_unit: str = ""
+    window_size: int = 10
+    method: str = "linear"        # "linear" | "savgol"
+    min_delta: float = 1e-10
+
+
 class FullProfile(BaseModel):
     """사용자별 프로파일 — 실험 간에 달라지는 모든 설정."""
     parameter_manager: ParameterManagerProfile = Field(default_factory=ParameterManagerProfile)
@@ -334,6 +346,10 @@ class FullProfile(BaseModel):
     double_sweep: DoubleSweepConfig = Field(default_factory=DoubleSweepConfig)
     # Meta data
     meta_data: MetaDataConfig = Field(default_factory=MetaDataConfig)
+    # Derivative channels
+    deriv1: DerivConfigData = Field(default_factory=DerivConfigData)
+    deriv2: DerivConfigData = Field(default_factory=DerivConfigData)
+    deriv3: DerivConfigData = Field(default_factory=DerivConfigData)
 
 
 # ---------------------------------------------------------------------------
