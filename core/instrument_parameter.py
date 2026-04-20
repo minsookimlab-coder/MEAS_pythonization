@@ -4,11 +4,35 @@ InstrumentParameter: 기기 내 개별 파라미터의 읽기/쓰기 추상화.
 MeasurementParameter — 읽기 전용 (측정값)
 SweepParameter       — 쓰기 + 1:1 대응 readback
 """
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.instrument_session import InstrumentSession
+
+# 응답 문자열에서 부동소수점 숫자를 추출하는 정규식.
+# Mercury iTC/iPS 등은 'STAT:DEV:MB1.T1:TEMP:SIG:TEMP:235.7446K' 형식으로 응답.
+_NUMERIC_RE = re.compile(r'[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?')
+
+
+def _parse_float(raw: str) -> float:
+    """
+    응답 문자열을 float로 변환합니다.
+
+    1. 직접 float() 변환 시도.
+    2. 실패 시 Mercury iTC/iPS 형식 처리:
+       'STAT:DEV:MB1.T1:TEMP:SIG:TEMP:235.7446K' → 마지막 ':' 이후 숫자 추출.
+    """
+    try:
+        return float(raw)
+    except ValueError:
+        # 마지막 ':' 구분자 이후 토큰에서 숫자 추출 (단위 접미사 무시)
+        last_token = raw.split(":")[-1]
+        m = _NUMERIC_RE.search(last_token)
+        if m:
+            return float(m.group())
+        raise
 
 
 @dataclass
@@ -18,6 +42,7 @@ class MeasurementParameter:
 
     TSP:  cmd_query = "print(smua.measure.i())"
     SCPI: cmd_query = "MEAS:CURR?"
+    Mercury iTC/iPS: 응답이 'PATH:VALUE[UNIT]' 형식이어도 자동 파싱.
     """
     name: str
     cmd_query: str
@@ -25,7 +50,7 @@ class MeasurementParameter:
     def read(self, session: "InstrumentSession", alias: str) -> float:
         if not session.is_open(alias):
             session.open(alias)
-        return float(session.query(alias, self.cmd_query).strip())
+        return _parse_float(session.query(alias, self.cmd_query).strip())
 
 
 @dataclass

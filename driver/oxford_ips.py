@@ -1,43 +1,47 @@
 from core.instrument_base import BaseInstrument
 
 
-class OxfordITC(BaseInstrument):
+class OxfordIPS(BaseInstrument):
     """
-    Oxford Instruments ITC503 (Intelligent Temperature Controller) 드라이버입니다.
-    비표준(Non-SCPI) Oxford 프로토콜과 CR(\\r) 종단 문자를 사용합니다.
+    Oxford Instruments IPS120 (Intelligent Power Supply) 드라이버입니다.
+    ITC503과 동일한 비표준 Oxford 프로토콜과 CR(\\r) 종단 문자를 사용합니다.
 
     지원 인터페이스: GPIB, RS232
     - 종단 문자: CR('\\r') — Oxford 장비 공통
     - RS232 기본 보드레이트: 9600 (extra_params 'baud_rate'로 덮어쓰기 가능)
-    - ISOBUS 사용 시: extra_params 'isobus' 에 장비 ID 지정 (예: isobus=2)
+    - ISOBUS 사용 시: extra_params 'isobus' 에 장비 ID 지정 (예: isobus=3)
 
     주요 커맨드 (실제 측정/설정은 visa_libraries.yaml 에 정의):
       R{n}   — 변수 읽기
-                 R0: 설정 온도 (K)
-                 R1: 센서 1 온도 (K) — 보통 제어 센서
-                 R2: 센서 2 온도 (K)
-                 R3: 센서 3 온도 (K)
-                 R4: 온도 오차 (설정값 - 실측값) (K)
-                 R5: 히터 출력 (% of max)
-                 R6: 히터 출력 (V)
-                 R7: 가스 유량 설정값 (%)
-                 R8: 가스 유량 실측값 (%)
-                 R9: PID - 비례 대역 (P)
-                 R10: PID - 적분 시간 (I)
-                 R11: PID - 미분 시간 (D)
-      S{val} — 목표 온도 설정 (K), 예: S4.200
-      H{val} — 히터 출력 수동 설정 (%), 예: H25.0
-      G{val} — 가스 유량 수동 설정 (%), 예: G50.0
-      O{n}   — 출력 제어 모드  0=자동/자동  1=수동/자동  2=자동/수동  3=수동/수동
-      C{n}   — 제어 모드       0=Local  1=Remote  2=Local+Locked  3=Remote+Locked
-      P{val} — PID 비례 대역 설정
-      I{val} — PID 적분 시간 설정
-      D{val} — PID 미분 시간 설정
-      X      — 상태 읽기 (X-status word)
+                 R0: 설정 전류 (A) — demand current / set point
+                 R1: 설정 전압 (V) — demand voltage
+                 R2: 측정 전류 (A) — measured current
+                 R3: 측정 전압 (V) — measured voltage
+                 R5: 목표 자기장 (T) — set point field
+                 R7: 자기장 세기 (T) — persistent/current magnet field
+                 R8: 목표 자기장 (T) — target field (sweeping toward)
+                 R9: 스윕 속도 (A/min)
+      S{val} — 목표 자기장/전류 설정, 예: S1.500 (단위: T 또는 A, 장비 모드 따라 다름)
+      T{val} — 스윕 속도 설정 (A/min), 예: T0.100
+      A{n}   — 활동(Activity) 제어
+                 A0: Hold (현재 위치 유지)
+                 A1: Go to Set Point (목표값으로 스윕)
+                 A2: Go to Zero (0으로 스윕)
+                 A4: Clamp (출력 차단)
+      C{n}   — 제어 모드
+                 C0: Local/Locked
+                 C1: Remote/Unlocked  ← 측정 전 반드시 설정
+                 C2: Local/Locked (대체)
+                 C3: Remote/Locked
+      H{n}   — Persistent 스위치 히터 제어
+                 H0: Heater Off
+                 H1: Heater On  (전환 전 반드시 magnet current = power supply current 확인!)
+                 H2: Heater On (강제, 전류 확인 건너뜀)
+      X      — 상태 읽기 (X-status word, 시스템 상태 비트필드)
       V      — 버전 읽기
     """
 
-    _default_timeout = 3000
+    _default_timeout = 5000
     _default_read_termination = '\r'
     _default_write_termination = '\r'
 
@@ -70,16 +74,16 @@ class OxfordITC(BaseInstrument):
                 raise TimeoutError(
                     f"응답 대기 시간 초과! (명령어 '{cmd}'에 대답이 없습니다.)\n\n"
                     f"체크포인트:\n"
-                    f"1. 장비 전면부 버튼이 'Local' 이 아니라 'Remote' (혹은 RS232) 모드인지 확인하세요.\n"
-                    f"2. GUI에서 동적 변수로 baud_rate를 (1200, 4800, 9600 등) 장비와 동일하게 추가했는지 확인하세요.\n"
-                    f"3. 뒷면에 여러 대가 묶여있는 ISOBUS 모드라면, 동적 변수에 'Key: isobus / Value: 1' 과 같이 장비 고유 ID를 추가해보세요."
+                    f"1. 장비가 Remote 모드인지 확인하세요 (C1 명령 필요).\n"
+                    f"2. GUI에서 동적 변수로 baud_rate를 장비와 동일하게 설정했는지 확인하세요.\n"
+                    f"3. ISOBUS 모드라면 'Key: isobus / Value: 장비ID' 를 동적 변수에 추가하세요."
                 ) from e
             raise
 
     def test_connection(self) -> str:
         """
-        Oxford ITC는 SCPI '*IDN?'을 지원하지 않으므로
-        버전 읽기 커맨드 'V'를 전송하여 응답을 받습니다.
+        Oxford IPS는 SCPI '*IDN?'을 지원하지 않으므로
+        버전 읽기 커맨드 'V'로 연결을 확인합니다.
 
         GPIB: clear() (SDC) 후 장비 복구 대기가 필요합니다.
         RS232: C1(Remote) 설정 후 V를 조회합니다.
@@ -94,7 +98,6 @@ class OxfordITC(BaseInstrument):
             pass
 
         # RS232의 경우 Remote 모드(C1) 설정 시도
-        # C1은 응답을 에코하므로 query()로 호출; 실패해도 계속 진행
         if self.interface_type == "RS232":
             try:
                 self.query("C1")
@@ -102,4 +105,4 @@ class OxfordITC(BaseInstrument):
                 pass
 
         response = self.query("V")
-        return f"Oxford ITC Response: {response}"
+        return f"Oxford IPS Response: {response}"

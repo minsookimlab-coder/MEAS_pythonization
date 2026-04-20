@@ -277,12 +277,20 @@ class DataStore:
 
     Structure:
       _meta : {col_key: (display_label, unit)}
-      _data : {phase_tag: {col_key: [float, ...]}}
+      _data : {phase_tag: {col_key: {"list": [float, ...], "arr": ndarray|None}}}
+
+    numpy 캐시 전략:
+      append() 시 해당 키의 "arr" 캐시를 None으로 무효화.
+      get_xy() 시 캐시가 None이면 한 번만 np.asarray()로 재생성.
+      → redraw 타이머(30fps)가 데이터 변경 없이 반복 호출해도 O(1) 반환.
+      → 스텝당 데이터 증가에 따른 GIL 점유 시간 증가 문제 해결.
     """
+
+    _EMPTY = np.empty(0, dtype=np.float64)
 
     def __init__(self) -> None:
         self._meta: Dict[str, Tuple[str, str]] = {}
-        self._data: Dict[str, Dict[str, List[float]]] = {}
+        self._data: Dict[str, Dict[str, dict]] = {}
 
     # Schema ------------------------------------------------------------------
 
@@ -310,12 +318,26 @@ class DataStore:
         tag = point.phase or "_"
         bucket = self._data.setdefault(tag, {})
         for k, v in point.values.items():
-            bucket.setdefault(k, []).append(v)
+            entry = bucket.get(k)
+            if entry is None:
+                bucket[k] = {"list": [v], "arr": None}
+            else:
+                entry["list"].append(v)
+                entry["arr"] = None  # 캐시 무효화 — 다음 get_xy()에서 재생성
+
+    def _get_arr(self, bucket: dict, key: str) -> np.ndarray:
+        """캐시된 numpy 배열 반환. 캐시 없으면 재생성 (스텝당 최대 1회)."""
+        entry = bucket.get(key)
+        if entry is None:
+            return self._EMPTY
+        if entry["arr"] is None:
+            entry["arr"] = np.asarray(entry["list"], dtype=np.float64)
+        return entry["arr"]
 
     def get_xy(self, x_key: str, y_key: str, phase: str) -> Tuple[np.ndarray, np.ndarray]:
         d = self._data.get(phase, {})
-        xs = np.asarray(d.get(x_key, []), dtype=np.float64)
-        ys = np.asarray(d.get(y_key, []), dtype=np.float64)
+        xs = self._get_arr(d, x_key)
+        ys = self._get_arr(d, y_key)
         n = min(len(xs), len(ys))
         return xs[:n], ys[:n]
 
