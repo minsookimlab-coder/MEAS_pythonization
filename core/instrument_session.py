@@ -28,6 +28,11 @@ class InstrumentSession:
         with InstrumentSession() as session:
             session.open("M81")
             print(session.query("M81", "*IDN?"))
+
+    락 구조:
+        _lock     : write / read / query 직렬화 (VISA 통신 보호)
+        _open_lock: open / close 원자성 보장 (중복 연결 방지)
+        두 락을 동시에 잡을 때는 항상 _open_lock → _lock 순서로 획득.
     """
 
     def __init__(self, registry: Optional[InstrumentRegistry] = None):
@@ -37,12 +42,10 @@ class InstrumentSession:
         self._instruments: Dict[str, BaseInstrument] = {}
         self._log_callbacks = []
         self._shut_down = False
-        self._log_enabled = True # log_enabled 플래그 추가
-        self._lock = threading.Lock()
-        atexit.register(self.shutdown) # atexit에 shutdown 등록 - 프로그램이 정상적으로 종료될 때뿐만 아니라, 예외로 인해 비정상적으로 종료될 때도 호출됩니다.
-
-        # 비정상 종료(크래시, 강제 종료) 시에도 VISA 세션이 해제되도록 등록
-        atexit.register(self.shutdown)
+        self._log_enabled = True
+        self._lock = threading.Lock()       # VISA 통신 직렬화
+        self._open_lock = threading.Lock()  # open/close 원자성 (중복 연결 방지)
+        atexit.register(self.shutdown)      # 한 번만 등록
 
     def set_log_enabled(self, enabled: bool):  # ← 새 메서드 추가
         """VISA 로깅 활성/비활성화"""
@@ -67,24 +70,32 @@ class InstrumentSession:
 
     def open(self, alias: str):
         """alias 장비에 연결합니다. 이미 열려 있으면 재사용합니다."""
-        if alias in self._instruments:
-            return
+        with self._open_lock:
+            # 이미 연결된 경우 즉시 반환 (중복 연결 방지)
+            if alias in self._instruments:
+                return
 
-        self._registry.reload()
-        config = self._registry.get_config(alias)
-        if config is None:
-            raise KeyError(f"Alias '{alias}' not found in instruments.yaml")
+            self._registry.reload()
+            config = self._registry.get_config(alias)
+            if config is None:
+                raise KeyError(f"Alias '{alias}' not found in instruments.yaml")
 
-        inst = self._factory.create_instrument(config)
-        inst.connect()
-        self._instruments[alias] = inst
-        print(f"[Session] '{alias}' connected.")
+            inst = self._factory.create_instrument(config)
+            inst.connect()
+            self._instruments[alias] = inst
+            print(f"[Session] '{alias}' connected.")
 
     def close(self, alias: str):
         """alias 장비 연결을 닫습니다."""
-        inst = self._instruments.pop(alias, None)
+        with self._open_lock:
+            # 진행 중인 VISA 통신이 끝날 때까지 대기 후 제거
+            with self._lock:
+                inst = self._instruments.pop(alias, None)
         if inst:
-            inst.disconnect()
+            try:
+                inst.disconnect()
+            except Exception:
+                pass
             print(f"[Session] '{alias}' disconnected.")
 
     def close_all(self):
@@ -117,6 +128,34 @@ class InstrumentSession:
     # VISA commands
     # ------------------------------------------------------------------
 
+    def _evict_broken(self, alias: str, exc: Exception) -> None:
+        """
+        VISA 연결 수준의 오류 발생 시 세션을 제거합니다.
+        다음 write/query 시 open()이 자동으로 호출되어 재연결됩니다.
+
+        timeout(VI_ERROR_TMO)은 연결 자체는 살아있으므로 제거하지 않습니다.
+        그 외 VisaIOError (연결 끊김, invalid object 등)는 제거합니다.
+        호출 시점: _lock 보유 중 — disconnect는 락 해제 후 별도 처리.
+        """
+        if not isinstance(exc, pyvisa.errors.VisaIOError):
+            return
+        if exc.error_code == pyvisa.errors.StatusCode.error_timeout:
+            return  # timeout은 세션 유지 (재연결 불필요)
+        # 연결 오류: _instruments에서 제거 (락 보유 중이므로 dict.pop만 수행)
+        inst = self._instruments.pop(alias, None)
+        if inst:
+            # disconnect는 데몬 스레드에서 — _lock을 오래 붙잡지 않도록
+            import threading as _t
+            _t.Thread(target=self._safe_disconnect, args=(inst,), daemon=True).start()
+            print(f"[Session] '{alias}' session evicted due to: {exc}")
+
+    @staticmethod
+    def _safe_disconnect(inst: BaseInstrument) -> None:
+        try:
+            inst.disconnect()
+        except Exception:
+            pass
+
     def write(self, alias: str, cmd: str):
         """alias 장비에 VISA 명령어를 전송합니다 (응답 없음)."""
         with self._lock:
@@ -125,8 +164,8 @@ class InstrumentSession:
                 self._emit_log(alias, "write", cmd)
             except Exception as e:
                 self._emit_log(alias, "write_err", cmd, f"{type(e).__name__}: {e}")
+                self._evict_broken(alias, e)
                 raise
-
 
     def read(self, alias: str) -> str:
         """alias 장비로부터 응답을 읽어 반환합니다."""
@@ -137,6 +176,7 @@ class InstrumentSession:
                 return result
             except Exception as e:
                 self._emit_log(alias, "read_err", "", f"{type(e).__name__}: {e}")
+                self._evict_broken(alias, e)
                 raise
 
     def query(self, alias: str, cmd: str) -> str:
@@ -148,6 +188,7 @@ class InstrumentSession:
                 return result
             except Exception as e:
                 self._emit_log(alias, "query_err", cmd, f"{type(e).__name__}: {e}")
+                self._evict_broken(alias, e)
                 raise
 
     # ------------------------------------------------------------------

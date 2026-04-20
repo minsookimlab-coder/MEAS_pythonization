@@ -1315,24 +1315,27 @@ class DoubleSweepWindow(QDialog):
                 map_base = f"{base}/{sub}" if sub else base
                 self._main_win._graph_window.update_map_base(map_base)
 
-        # Graph: begin fresh session with the same columns as the sweep context
-        if self._main_win._graph_window is not None:
-            try:
-                cols = [("__sweep__", self._ctx.sweep_col[0], self._ctx.sweep_col[1])]
-                for (row, alias, desc, cmd), (fig_ax, unit) in zip(
-                    self._ctx.active_measurements, self._ctx.meas_cols
-                ):
-                    cols.append((desc, fig_ax, unit))
-                for ch in (
-                    self._main_win._deriv_channel,
-                    self._main_win._deriv_channel2,
-                    self._main_win._deriv_channel3,
-                ):
-                    if ch._cfg.enabled:
-                        cols.append(ch.col_info())
-                self._main_win._graph_window.begin_session(cols)
-            except Exception as _e:
-                self._main_win._log(f"  [Graph] begin_session failed: {_e}", color="#f44747")
+        # Graph: begin fresh session — 창 유무 관계없이 history/columns 갱신
+        try:
+            cols = [("__sweep__", self._ctx.sweep_col[0], self._ctx.sweep_col[1])]
+            for (row, alias, desc, cmd), (fig_ax, unit) in zip(
+                self._ctx.active_measurements, self._ctx.meas_cols
+            ):
+                cols.append((desc, fig_ax, unit))
+            for ch in (
+                self._main_win._deriv_channel,
+                self._main_win._deriv_channel2,
+                self._main_win._deriv_channel3,
+            ):
+                if ch._cfg.enabled:
+                    cols.append(ch.col_info())
+            mw = self._main_win
+            mw._graph_history.clear()
+            mw._graph_columns = cols
+            if mw._graph_window is not None:
+                mw._graph_window.begin_session(cols)
+        except Exception as _e:
+            self._main_win._log(f"  [Graph] begin_session failed: {_e}", color="#f44747")
 
         # Reset derivative sliding windows for a clean new sweep
         for ch in (self._main_win._deriv_channel, self._main_win._deriv_channel2, self._main_win._deriv_channel3):
@@ -1462,19 +1465,22 @@ class DoubleSweepWindow(QDialog):
         if prev is not None:
             for _dc in (self._main_win._deriv_channel, self._main_win._deriv_channel2, self._main_win._deriv_channel3):
                 _dc.reset()
-            if self._main_win._graph_window is not None:
-                try:
-                    cols = [("__sweep__", self._ctx.sweep_col[0], self._ctx.sweep_col[1])]
-                    for (row, alias, desc, cmd), (fig_ax, unit) in zip(
-                        self._ctx.active_measurements, self._ctx.meas_cols
-                    ):
-                        cols.append((desc, fig_ax, unit))
-                    for deriv_ch in (self._main_win._deriv_channel, self._main_win._deriv_channel2, self._main_win._deriv_channel3):
-                        if deriv_ch._cfg.enabled:
-                            cols.append(deriv_ch.col_info())
-                    self._main_win._graph_window.begin_session(cols)
-                except Exception as _e:
-                    self._main_win._log(f"  [Graph] clear failed: {_e}", color="#f44747")
+            try:
+                cols = [("__sweep__", self._ctx.sweep_col[0], self._ctx.sweep_col[1])]
+                for (row, alias, desc, cmd), (fig_ax, unit) in zip(
+                    self._ctx.active_measurements, self._ctx.meas_cols
+                ):
+                    cols.append((desc, fig_ax, unit))
+                for deriv_ch in (self._main_win._deriv_channel, self._main_win._deriv_channel2, self._main_win._deriv_channel3):
+                    if deriv_ch._cfg.enabled:
+                        cols.append(deriv_ch.col_info())
+                mw = self._main_win
+                mw._graph_history.clear()
+                mw._graph_columns = cols
+                if mw._graph_window is not None:
+                    mw._graph_window.begin_session(cols)
+            except Exception as _e:
+                self._main_win._log(f"  [Graph] clear failed: {_e}", color="#f44747")
 
         self.request_advance.emit(SecondChannelRequest(
             channel=ch,
@@ -1726,35 +1732,35 @@ class DoubleSweepWindow(QDialog):
         # DataWindow 갱신 (main_window의 데이터창에 현재 측정값 표시)
         self._main_win._data_window.update_values(row_vals)
 
-        # Graph update (includes derivatives if enabled in main window)
-        if self._main_win._graph_window is not None:
-            try:
-                from gui.graph_window import GraphDataPoint
-                from core.derivative_channel import OUTPUT_KEY as _DERIV_KEY, OUTPUT_KEY_2 as _DERIV2_KEY, OUTPUT_KEY_3 as _DERIV3_KEY
-                _phase_str = {
-                    DoubleSweepPhase.DUMMY:   "dummy",
-                    DoubleSweepPhase.TRACE:   "trace",
-                    DoubleSweepPhase.RETRACE: "retrace",
-                }.get(self._phase, "")
-                gvals = {"__sweep__": result.next_v}
-                # Use context snapshot to avoid stale profile reference
-                for row, alias, desc, cmd in self._ctx.active_measurements:
-                    val = meas_map.get(row)
-                    if val is not None:
-                        gvals[desc] = val
-                # Derivatives from shared channels (uses main_win's deriv_channel instances)
-                mw = self._main_win
-                for ch, key, fn in [
-                    (mw._deriv_channel,  _DERIV_KEY,  mw._deriv_val_for_step),
-                    (mw._deriv_channel2, _DERIV2_KEY, mw._deriv_val_for_step2),
-                    (mw._deriv_channel3, _DERIV3_KEY, mw._deriv_val_for_step3),
-                ]:
-                    if ch._cfg.enabled:
-                        dv = fn(result, meas_map)
-                        gvals[key] = dv if dv is not None else float("nan")
-                self._main_win._graph_window.append_point(GraphDataPoint(values=gvals, phase=_phase_str))
-            except Exception as _e:
-                self._main_win._log(f"  [Graph] append_point failed: {_e}", color="#f44747")
+        # Graph update — 창 유무 관계없이 항상 history에 축적
+        try:
+            from gui.graph_window import GraphDataPoint
+            from core.derivative_channel import OUTPUT_KEY as _DERIV_KEY, OUTPUT_KEY_2 as _DERIV2_KEY, OUTPUT_KEY_3 as _DERIV3_KEY
+            _phase_str = {
+                DoubleSweepPhase.DUMMY:   "dummy",
+                DoubleSweepPhase.TRACE:   "trace",
+                DoubleSweepPhase.RETRACE: "retrace",
+            }.get(self._phase, "")
+            gvals = {"__sweep__": result.next_v}
+            for row, alias, desc, cmd in self._ctx.active_measurements:
+                val = meas_map.get(row)
+                if val is not None:
+                    gvals[desc] = val
+            mw = self._main_win
+            for ch, key, fn in [
+                (mw._deriv_channel,  _DERIV_KEY,  mw._deriv_val_for_step),
+                (mw._deriv_channel2, _DERIV2_KEY, mw._deriv_val_for_step2),
+                (mw._deriv_channel3, _DERIV3_KEY, mw._deriv_val_for_step3),
+            ]:
+                if ch._cfg.enabled:
+                    dv = fn(result, meas_map)
+                    gvals[key] = dv if dv is not None else float("nan")
+            gpoint = GraphDataPoint(values=gvals, phase=_phase_str)
+            mw._graph_history.append(gpoint)
+            if mw._graph_window is not None:
+                mw._graph_window.append_point(gpoint)
+        except Exception as _e:
+            self._main_win._log(f"  [Graph] append_point failed: {_e}", color="#f44747")
 
         self._last_write_value = result.next_v
 

@@ -93,6 +93,8 @@ class MainWindow(QMainWindow):
         self._visa_lib_window = None
         self._double_sweep_window = None
         self._graph_window = None
+        self._graph_history: list = []   # GraphDataPoint 누적 — 창 없이도 저장, 열릴 때 replay
+        self._graph_columns: list = []   # 현재 세션의 컬럼 스키마 — replay 시 begin_session에 재사용
         self._registry = InstrumentRegistry()
         self._visa_lib_registry = VisaLibraryRegistry()
         self._session = InstrumentSession(self._registry)
@@ -812,9 +814,12 @@ class MainWindow(QMainWindow):
         from gui.graph_window import GraphWindow
         if self._graph_window is None:
             self._graph_window = GraphWindow()
-            # If a sweep is already running, initialise with current columns
-            if self._running:
-                self._graph_window.begin_session(self._build_graph_columns())
+            if self._graph_columns:
+                # 컬럼 스키마 + 지금까지 쌓인 데이터를 한 번에 replay
+                # (측정 중·측정 후 모두 올바르게 표시)
+                self._graph_window.begin_session(self._graph_columns)
+                for pt in self._graph_history:
+                    self._graph_window.append_point(pt)
         self._graph_window.show()
         self._graph_window.raise_()
 
@@ -1517,8 +1522,10 @@ class MainWindow(QMainWindow):
             for w in getattr(self, f"_deriv{suffix}_setting_widgets"):
                 w.setEnabled(False)
 
+        self._graph_history.clear()
+        self._graph_columns = self._build_graph_columns()
         if self._graph_window is not None:
-            self._graph_window.begin_session(self._build_graph_columns())
+            self._graph_window.begin_session(self._graph_columns)
         # MetaDataManager: configure T/B buffer for this sweep
         _meas_labels = [
             self._meas_label_for(idx, self._active_profile.measurements[idx])
@@ -1736,24 +1743,26 @@ class MainWindow(QMainWindow):
         # MetaDataManager: T/B 버퍼에 이번 스텝 값 누적
         self._meta_manager.record_step(result.meas_results)
 
-        # Graph update
+        # Graph update — 창 유무와 관계없이 항상 히스토리에 축적
+        from gui.graph_window import GraphDataPoint
+        gvals = {"__sweep__": result.next_v}
+        for idx in self._active_meas_indices:
+            val = meas_map.get(idx)
+            # None (측정 실패 또는 threshold 초과) → nan으로 그래프에 공백 표시
+            gvals[self._active_profile.measurements[idx].description] = (
+                val if val is not None else float("nan")
+            )
+        for ch, key, val in [
+            (self._deriv_channel,  _DERIV_KEY,  deriv_val),
+            (self._deriv_channel2, _DERIV2_KEY, deriv_val2),
+            (self._deriv_channel3, _DERIV3_KEY, deriv_val3),
+        ]:
+            if ch._cfg.enabled:
+                gvals[key] = val if val is not None else float("nan")
+        gpoint = GraphDataPoint(values=gvals, phase="")
+        self._graph_history.append(gpoint)
         if self._graph_window is not None:
-            from gui.graph_window import GraphDataPoint
-            gvals = {"__sweep__": result.next_v}
-            for idx in self._active_meas_indices:
-                val = meas_map.get(idx)
-                # None (측정 실패 또는 threshold 초과) → nan으로 그래프에 공백 표시
-                gvals[self._active_profile.measurements[idx].description] = (
-                    val if val is not None else float("nan")
-                )
-            for ch, key, val in [
-                (self._deriv_channel,  _DERIV_KEY,  deriv_val),
-                (self._deriv_channel2, _DERIV2_KEY, deriv_val2),
-                (self._deriv_channel3, _DERIV3_KEY, deriv_val3),
-            ]:
-                if ch._cfg.enabled:
-                    gvals[key] = val if val is not None else float("nan")
-            self._graph_window.append_point(GraphDataPoint(values=gvals, phase=""))
+            self._graph_window.append_point(gpoint)
 
         next_display = None if result.is_done else calculate_next_step(
             result.next_v,
