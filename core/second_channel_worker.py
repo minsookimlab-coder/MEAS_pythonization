@@ -14,10 +14,23 @@ from PySide6.QtCore import QObject, Signal, Slot
 from config.config_models import InstantiatedSecondSweepChannel, SecondSweepAdvanceType
 from core.sweep import calculate_next_step
 from core.sweep_channel import SweepChannel
-from core.instrument_parameter import MeasurementParameter
+from core.instrument_parameter import MeasurementParameter, _parse_float
 
 if TYPE_CHECKING:
     from core.instrument_session import InstrumentSession
+
+
+# ── second advance 무한 지속 감지용 워치독 타임아웃 ───────────────────────────
+# threshold(목표 도달)까지 너무 오래 걸리면 명령이 무시됐을 가능성을 의심해 1회
+# 재전송 후 다시 대기하고, 그래도 안 되면 실패 처리한다. feedback(안정화) 과정이
+# 너무 오래 지속돼도 실패 처리한다. 실패 시 측정 중지 + 알람.
+_PHASE1_TIMEOUT_S = 20 * 60   # threshold 도달 최대 대기 (재전송 시 1회 더 → 총 최대 40분)
+_PHASE2_TIMEOUT_S = 5 * 60    # feedback 안정화 과정 최대 지속
+
+
+class SecondAdvanceTimeout(Exception):
+    """second channel advance가 워치독 시간 내에 완료되지 못함 (측정 중지 + 알람 대상)."""
+    pass
 
 
 @dataclass
@@ -35,8 +48,11 @@ class SecondChannelWorker(QObject):
     완료 시 done, 오류 시 error Signal을 emit합니다.
     """
 
-    done  = Signal()
-    error = Signal(str)
+    done             = Signal()
+    error            = Signal(str)
+    feedback_progress = Signal(float)   # Phase 2 안정화 metric (std / scale); 매 평가 시 emit
+    advance_failed   = Signal(str)      # 워치독 타임아웃 → 측정 중지 + 알람 (comm 오류와 구분)
+    status           = Signal(str)      # 진행 상태 메시지 (예: 명령 재전송)
 
     def __init__(self):
         super().__init__()
@@ -75,6 +91,9 @@ class SecondChannelWorker(QObject):
 
             self.done.emit()
 
+        except SecondAdvanceTimeout as te:
+            # 워치독 타임아웃 — comm 오류 자동재개가 아니라 즉시 중지 + 알람 경로로
+            self.advance_failed.emit(str(te))
         except Exception as e:
             self.error.emit(str(e))
 
@@ -170,13 +189,44 @@ class SecondChannelWorker(QObject):
         # sliding window for Phase 2
         window: deque = deque(maxlen=ch.feedback_std_window) if use_std else deque(maxlen=1)
 
+        # ── 워치독 타이머 ────────────────────────────────────────────────────
+        # Phase 1: threshold 도달까지 _PHASE1_TIMEOUT_S 내. 초과 시 명령 무시를
+        #          의심해 1회 재전송 후 재대기, 그래도 초과면 실패(SecondAdvanceTimeout).
+        # Phase 2: 안정화가 _PHASE2_TIMEOUT_S 내 수렴하지 않으면 실패.
+        phase1_deadline = _time.monotonic() + _PHASE1_TIMEOUT_S
+        phase2_deadline = (_time.monotonic() + _PHASE2_TIMEOUT_S
+                           if threshold_reached else None)
+        retried = False
+
         while True:
             if self._stop_event.is_set():
                 break
+
+            # ── 워치독 점검 (query 실패로 continue되더라도 항상 평가되도록 루프 상단에) ──
+            now = _time.monotonic()
+            if not threshold_reached:
+                if now > phase1_deadline:
+                    if not retried:
+                        # 명령이 한 번 무시됐을 가능성 → 다시 한 번 전송 후 재대기
+                        retried = True
+                        self.status.emit(
+                            f"second '{alias}' threshold {_PHASE1_TIMEOUT_S // 60}분 미도달 "
+                            f"— 명령 재전송 후 재대기")
+                        self._session.write(alias, ch.cmd_set.format(v=next_v))
+                        phase1_deadline = _time.monotonic() + _PHASE1_TIMEOUT_S
+                        continue
+                    raise SecondAdvanceTimeout(
+                        f"second channel '{alias}': 명령 재전송 후에도 "
+                        f"{_PHASE1_TIMEOUT_S // 60}분 내 목표값({next_v:g})에 도달하지 못함")
+            elif phase2_deadline is not None and now > phase2_deadline:
+                raise SecondAdvanceTimeout(
+                    f"second channel '{alias}': feedback 안정화가 "
+                    f"{_PHASE2_TIMEOUT_S // 60}분 내 수렴하지 않음")
+
             _time.sleep(ch.feedback_poll_interval)
             try:
                 raw = self._session.query(alias, ch.feedback_read_cmd).strip()
-                v_read = float(raw.split()[0])
+                v_read = _parse_float(raw)
             except Exception:
                 continue
 
@@ -185,21 +235,27 @@ class SecondChannelWorker(QObject):
                 ratio = abs(v_read - (prev_v or 0.0)) / denom
                 if ratio >= ch.feedback_tolerance_pct / 100.0:
                     threshold_reached = True
+                    phase2_deadline = _time.monotonic() + _PHASE2_TIMEOUT_S  # Phase 2 타이머 시작
                     window.clear()   # reset window for Phase 2
                     if not use_std:
                         break        # no std check needed — done
+                    continue         # Phase 2 fresh start: threshold-crossing sample 제외
                 else:
                     continue         # still in Phase 1, don't accumulate yet
 
             # Phase 2: accumulate + normalized stability metric
-            # metric = SD / (max(|mean|, |next_v|) + noisefloor) < std_threshold
+            # metric = SD / (|next_v| + noisefloor) < std_threshold
+            # next_v를 고정 기준으로 사용: mean(측정값)은 overshoot 등으로 편향될 수 있으므로
+            # 목표값(next_v)을 정규화 기준으로 삼아 일관된 상대적 척도를 제공.
+            # next_v ≈ 0 일 때는 feedback_noisefloor 를 반드시 설정해야 함.
             window.append(v_read)
             if len(window) < ch.feedback_std_window:
                 continue             # not enough samples yet
             mean = sum(window) / len(window)
             std = math.sqrt(sum((v - mean) ** 2 for v in window) / len(window))
-            scale = max(abs(mean), abs(next_v)) + ch.feedback_noisefloor
+            scale = abs(next_v) + ch.feedback_noisefloor
             metric = std / scale if scale > 1e-30 else float("inf")
+            self.feedback_progress.emit(metric)
             if metric < ch.feedback_std_threshold:
                 break                # stable enough — advance
 

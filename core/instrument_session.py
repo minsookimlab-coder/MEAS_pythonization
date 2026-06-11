@@ -43,9 +43,24 @@ class InstrumentSession:
         self._log_callbacks = []
         self._shut_down = False
         self._log_enabled = True
-        self._lock = threading.Lock()       # VISA 통신 직렬화
-        self._open_lock = threading.Lock()  # open/close 원자성 (중복 연결 방지)
-        atexit.register(self.shutdown)      # 한 번만 등록
+        # 계측기(alias)별 VISA 통신 직렬화 락.
+        # 같은 계측기(같은 TCP 연결)는 직렬화하지만, 서로 다른 계측기는
+        # 독립 연결이라 동시 통신이 안전 → 병렬 측정을 가능하게 한다.
+        self._alias_locks: Dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()  # _alias_locks dict 보호 (락 생성 직렬화)
+        self._open_lock = threading.Lock()    # open/close 원자성 (중복 연결 방지)
+        atexit.register(self.shutdown)        # 한 번만 등록
+
+    def _alias_lock(self, alias: str) -> threading.Lock:
+        """alias별 통신 락을 lazily 생성/반환한다."""
+        lk = self._alias_locks.get(alias)
+        if lk is None:
+            with self._locks_guard:
+                lk = self._alias_locks.get(alias)
+                if lk is None:
+                    lk = threading.Lock()
+                    self._alias_locks[alias] = lk
+        return lk
 
     def set_log_enabled(self, enabled: bool):  # ← 새 메서드 추가
         """VISA 로깅 활성/비활성화"""
@@ -80,16 +95,66 @@ class InstrumentSession:
             if config is None:
                 raise KeyError(f"Alias '{alias}' not found in instruments.yaml")
 
-            inst = self._factory.create_instrument(config)
-            inst.connect()
+            try:
+                inst = self._factory.create_instrument(config)
+                inst.connect()
+            except Exception as e:
+                # 통신 오류 + IP가 바뀐 정황이면 MAC으로 현재 IP를 재감지하고
+                # 저장된 IP를 갱신한 뒤 1회 재연결을 시도한다.
+                inst = self._reconnect_via_mac(alias, config, e)
+                if inst is None:
+                    raise   # IP 변경 없음/재시도 실패 → 기존 방식대로 전파
             self._instruments[alias] = inst
             print(f"[Session] '{alias}' connected.")
+
+    def _reconnect_via_mac(self, alias, config, exc):
+        """
+        통신 오류로 연결에 실패했을 때, 등록된 MAC 주소로 현재 IP를 다시 찾아
+        저장된 IP와 다르면 instruments.yaml의 IP를 갱신한 뒤 재연결을 시도한다.
+
+        기존 MAC 추적 로직(network_utils.resolve_address)은 '연결 시점'에 ARP로
+        IP를 알아내 쓰지만 그 결과를 저장하지는 않는다. 이 메서드는 그 위에서
+        '연결 실패 후' 변경된 IP를 영구 저장(yaml)하고 한 번 더 시도하는 보강 단계다.
+
+        반환값: 재연결에 성공한 BaseInstrument, 아니면 None
+                (None이면 호출부가 원래 예외를 그대로 전파 — 기존 방식대로 처리).
+        """
+        from core.visa_errors import is_comm_error
+        from core.network_utils import find_ip_for_mac
+
+        # 통신 오류가 아니거나, IP 재감지가 의미 없는 인터페이스/설정이면 패스
+        if not is_comm_error(exc):
+            return None
+        if getattr(config, "interface_type", "") != "LAN":
+            return None
+        mac = (getattr(config, "mac_address", "") or "").strip()
+        if not mac:
+            return None
+
+        saved_ip = (getattr(config, "address", "") or "").strip()
+        new_ip = find_ip_for_mac(mac)
+        if not new_ip or new_ip == saved_ip:
+            # IP 변경이 확인되지 않음 → 기존 방식대로 처리
+            return None
+
+        print(f"[Session] '{alias}' 통신 오류 감지 → MAC({mac}) 기준 IP 재감지: "
+              f"{saved_ip or '(없음)'} → {new_ip}. 저장된 IP를 갱신하고 재시도합니다.")
+        self._registry.update_address(alias, new_ip)
+        self._registry.reload()
+        new_config = self._registry.get_config(alias) or config
+        try:
+            inst = self._factory.create_instrument(new_config)
+            inst.connect()
+            return inst
+        except Exception as e2:
+            print(f"[Session] '{alias}' IP 갱신 후 재연결도 실패: {e2}")
+            return None
 
     def close(self, alias: str):
         """alias 장비 연결을 닫습니다."""
         with self._open_lock:
-            # 진행 중인 VISA 통신이 끝날 때까지 대기 후 제거
-            with self._lock:
+            # 진행 중인 해당 계측기 통신이 끝날 때까지 대기 후 제거
+            with self._alias_lock(alias):
                 inst = self._instruments.pop(alias, None)
         if inst:
             try:
@@ -124,6 +189,10 @@ class InstrumentSession:
     def is_open(self, alias: str) -> bool:
         return alias in self._instruments
 
+    def get_instrument(self, alias: str):
+        """alias에 연결된 BaseInstrument 인스턴스를 반환합니다. 없으면 None."""
+        return self._instruments.get(alias)
+
     # ------------------------------------------------------------------
     # VISA commands
     # ------------------------------------------------------------------
@@ -135,7 +204,7 @@ class InstrumentSession:
 
         timeout(VI_ERROR_TMO)은 연결 자체는 살아있으므로 제거하지 않습니다.
         그 외 VisaIOError (연결 끊김, invalid object 등)는 제거합니다.
-        호출 시점: _lock 보유 중 — disconnect는 락 해제 후 별도 처리.
+        호출 시점: 해당 alias 락 보유 중 — disconnect는 락 해제 후 별도 처리.
         """
         if not isinstance(exc, pyvisa.errors.VisaIOError):
             return
@@ -158,7 +227,7 @@ class InstrumentSession:
 
     def write(self, alias: str, cmd: str):
         """alias 장비에 VISA 명령어를 전송합니다 (응답 없음)."""
-        with self._lock:
+        with self._alias_lock(alias):
             try:
                 self._instruments[alias].write(cmd)
                 self._emit_log(alias, "write", cmd)
@@ -169,7 +238,7 @@ class InstrumentSession:
 
     def read(self, alias: str) -> str:
         """alias 장비로부터 응답을 읽어 반환합니다."""
-        with self._lock:
+        with self._alias_lock(alias):
             try:
                 result = self._instruments[alias].read()
                 self._emit_log(alias, "read", "", result)
@@ -181,7 +250,7 @@ class InstrumentSession:
 
     def query(self, alias: str, cmd: str) -> str:
         """alias 장비에 명령어를 전송하고 응답을 읽어 반환합니다."""
-        with self._lock:
+        with self._alias_lock(alias):
             try:
                 result = self._instruments[alias].query(cmd)
                 self._emit_log(alias, "query", cmd, result)

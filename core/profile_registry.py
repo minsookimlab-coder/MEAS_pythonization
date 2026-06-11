@@ -336,8 +336,12 @@ class ProfileRegistry:
                 lib = lib_registry.get_library(m.alias)
                 entry = next((e for e in lib.measurements if e.description == m.description), None)
                 if entry:
+                    try:
+                        resolved = entry.cmd_query.format(**m.fill_params) if m.fill_params else entry.cmd_query
+                    except (KeyError, ValueError):
+                        resolved = entry.cmd_query
                     new_measurements.append(m.model_copy(update={
-                        "resolved_cmd": entry.cmd_query,
+                        "resolved_cmd": resolved,
                         "figure_axis":  entry.figure_axis,
                         "unit":         entry.unit,
                     }))
@@ -457,13 +461,18 @@ class ProfileRegistry:
             old = old_meas.get((s.alias, s.description))
             if entry:
                 found_meas.add((s.alias, s.description))
+                fill = old.fill_params if old else {}
+                try:
+                    resolved = entry.cmd_query.format(**fill) if fill else entry.cmd_query
+                except (KeyError, ValueError):
+                    resolved = entry.cmd_query
                 new_measurements.append(InstantiatedMeasurement(
                     alias=s.alias,
                     description=entry.description,
-                    resolved_cmd=entry.cmd_query,
+                    resolved_cmd=resolved,
                     figure_axis=entry.figure_axis,
                     unit=entry.unit,
-                    fill_params=old.fill_params if old else {},
+                    fill_params=fill,
                 ))
 
         # Sweep Values

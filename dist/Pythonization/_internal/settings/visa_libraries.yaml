@@ -13,7 +13,7 @@
     figure_axis: smua_voltage
     unit: V
   - description: read_smub_voltage
-    cmd_query: print(smub.measure.i())
+    cmd_query: print(smub.measure.v())
     figure_axis: smub_voltage
     unit: V
   sweep_values:
@@ -24,7 +24,7 @@
     unit: V
   - description: write_smub_voltage
     cmd_set: smub.source.levelv={v}
-    paired_read_cmd: reading=smub.measure.i()print(reading)
+    paired_read_cmd: reading=smub.measure.v()print(reading)
     figure_axis: target_smub_voltage
     unit: V
   write_cmds: []
@@ -58,8 +58,17 @@ IPS:
     cmd_query: READ:DEV:GRPZ:PSU:SIG:FLD
     figure_axis: B
     unit: T
-  sweep_values: []
-  write_cmds: []
+  sweep_values:
+  - description: set_z_field
+    cmd_set: SET:DEV:GRPZ:PSU:SIG:FSET:{v}
+    paired_read_cmd: READ:DEV:GRPZ:PSU:SIG:FLD
+    figure_axis: B
+    unit: T
+  write_cmds:
+  - description: ramp_to_setpoint
+    cmd_set: SET:DEV:GRPZ:PSU:ACTN:RTOS
+  - description: hold
+    cmd_set: SET:DEV:GRPZ:PSU:ACTN:HOLD
 SIGGEN:
   measurements: []
   sweep_values: []

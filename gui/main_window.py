@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton,
     QFormLayout, QFrame, QMessageBox,
     QButtonGroup, QRadioButton, QCheckBox, QFileDialog,
-    QComboBox, QInputDialog, QScrollArea,
+    QComboBox, QInputDialog, QScrollArea, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QAction, QFont
@@ -118,6 +118,14 @@ class MainWindow(QMainWindow):
         self._tick_start: float = 0.0
         self._last_write_value: "float | None" = None
         self._step_context: str = ""   # 마지막 sweep tick 컨텍스트 (오류 시 참조)
+        # 통신 오류 자동 재개 상태
+        from core.resume_log import ResumeLog
+        self._resume_log = ResumeLog()
+        self._last_step_request = None        # 자동 재개 시 재전송할 StepRequest
+        self._auto_retry_used = False         # 연속 자동 재개 1회 제한 (성공 시 리셋)
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._auto_resume_step)
         self._data_saver = DataSaver()
         self._data_saver.set_error_callback(
             lambda msg: self._log(f"  [DataSaver] {msg}", color="#f44747")
@@ -135,6 +143,7 @@ class MainWindow(QMainWindow):
         self._worker = SweepWorker()
         self._worker.set_session(self._session)
         self._worker.set_threshold(self._app_config.global_threshold)
+        self._worker.set_parallel(self._app_config.parallel_measurement)
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self.request_step.connect(self._worker.run_step)
@@ -158,8 +167,9 @@ class MainWindow(QMainWindow):
         self._sweep_status_window = SweepArrayWindow(self)
         from gui.timing_window import TimingWindow
         from gui.data_window import DataWindow
-        self._timing_window = TimingWindow(self)
-        self._data_window = DataWindow(self)
+        # parent를 주지 않음 → 독립 top-level 창 → Windows 작업표시줄에 개별 표시
+        self._timing_window = TimingWindow(None)
+        self._data_window = DataWindow(None)
         self._debug_window.set_visa_log_callback(self._session.set_log_enabled) # Debug 창의 토글과 세션의 로그 활성화 상태 연결
 
         # 콘솔 입력 → 메인 핸들러 연결
@@ -185,48 +195,63 @@ class MainWindow(QMainWindow):
     def _setup_menu(self):
         menubar = self.menuBar()
 
+        # 단축키는 '창 열기' 전용 — 측정 Start/Stop/Resume에는 의도적으로 부여하지 않음
+        # (키보드 실수로 장비가 구동되는 것을 막기 위함). Ctrl+S는 프로파일 저장이라 회피.
         settings_menu = menubar.addMenu("Settings")
         act_instruments = QAction("Instrument Settings...", self)
+        act_instruments.setShortcut("Ctrl+I")
         act_instruments.triggered.connect(self._open_instrument_settings)
         settings_menu.addAction(act_instruments)
         act_visa_lib = QAction("VISA Library...", self)
+        act_visa_lib.setShortcut("Ctrl+L")
         act_visa_lib.triggered.connect(self._open_visa_library)
         settings_menu.addAction(act_visa_lib)
         act_pm = QAction("Parameter Manager...", self)
+        act_pm.setShortcut("Ctrl+M")
         act_pm.triggered.connect(self._open_parameter_manager)
         settings_menu.addAction(act_pm)
         settings_menu.addSeparator()
         act_config = QAction("Config...", self)
+        act_config.setShortcut("Ctrl+,")
         act_config.triggered.connect(self._open_config)
         settings_menu.addAction(act_config)
 
         view_menu = menubar.addMenu("View")
         act_debug = QAction("Debug Window", self)
+        act_debug.setShortcut("Ctrl+Shift+D")
         act_debug.triggered.connect(lambda: self._debug_window.show())
         view_menu.addAction(act_debug)
         act_status = QAction("Sweep Status", self)
+        act_status.setShortcut("Ctrl+Shift+S")
         act_status.triggered.connect(lambda: self._sweep_status_window.show())
         view_menu.addAction(act_status)
         act_timing = QAction("Timing", self)
+        act_timing.setShortcut("Ctrl+T")
         act_timing.triggered.connect(lambda: self._timing_window.show())
         view_menu.addAction(act_timing)
         act_data = QAction("Data", self)
+        act_data.setShortcut("Ctrl+Shift+A")
         act_data.triggered.connect(lambda: self._data_window.show())
         view_menu.addAction(act_data)
         act_graph = QAction("Graph...", self)
+        act_graph.setShortcut("Ctrl+G")
         act_graph.triggered.connect(self._open_graph_window)
         view_menu.addAction(act_graph)
         view_menu.addSeparator()
         act_double = QAction("Double Sweep...", self)
+        act_double.setShortcut("Ctrl+D")
         act_double.triggered.connect(self._open_double_sweep)
         view_menu.addAction(act_double)
         act_meta = QAction("Meta Data Config...", self)
+        act_meta.setShortcut("Ctrl+Shift+M")
         act_meta.triggered.connect(self._open_meta_data_config)
         view_menu.addAction(act_meta)
         act_cmd = QAction("Command Window...", self)
+        act_cmd.setShortcut("Ctrl+K")
         act_cmd.triggered.connect(self._open_command_window)
         view_menu.addAction(act_cmd)
         act_vna = QAction("VNA Control...", self)
+        act_vna.setShortcut("Ctrl+Shift+V")
         act_vna.triggered.connect(self._open_vna_window)
         view_menu.addAction(act_vna)
 
@@ -285,14 +310,31 @@ class MainWindow(QMainWindow):
         self._combo_profile.setCurrentIndex(max(idx, 0))
         self._combo_profile.blockSignals(False)
 
+    def _notify_profile_changed_windows(self):
+        """프로파일 전환 후, 보조 창들도 새 활성 프로파일 기준으로 다시 읽게 한다.
+
+        - VNA / Double Sweep 창은 보관형(한 번 만들어 재사용)이라 show 시 자동
+          재로딩되지 않으므로 여기서 명시적으로 다시 읽힌다. (Double Sweep은
+          숨겨져 있어도 갱신 — 안 하면 옛 프로파일 값에 고정되어 덮어쓴다.)
+        - Meta Data / Parameter Manager 창은 showEvent에서 재로딩되므로,
+          전환 시점에 떠 있는 경우에만 즉시 갱신한다.
+        """
+        if self._vna_window is not None:
+            self._vna_window.on_profile_changed()
+        if self._double_sweep_window is not None:
+            self._double_sweep_window.reload_from_profile()
+        if self._meta_data_window is not None and self._meta_data_window.isVisible():
+            self._meta_data_window._populate()
+        if self._param_manager_window is not None and self._param_manager_window.isVisible():
+            self._param_manager_window._load_from_profile()
+
     def _on_profile_combo_changed(self, name: str):
         if not name or name == self._param_manager_reg.active_name:
             return
         self._save_current_to_active_profile()
         self._param_manager_reg.set_active(name)
         self._apply_active_profile()
-        if self._vna_window is not None:
-            self._vna_window.on_profile_changed()
+        self._notify_profile_changed_windows()
 
     def _profile_add(self):
         name, ok = QInputDialog.getText(self, "Add Profile", "프로파일 이름:")
@@ -306,8 +348,7 @@ class MainWindow(QMainWindow):
         self._combo_profile.setCurrentText(actual)
         self._combo_profile.blockSignals(False)
         self._apply_active_profile()
-        if self._vna_window is not None:
-            self._vna_window.on_profile_changed()
+        self._notify_profile_changed_windows()
 
     def _profile_duplicate(self):
         new_name = self._param_manager_reg.duplicate_profile(
@@ -319,8 +360,7 @@ class MainWindow(QMainWindow):
         self._combo_profile.blockSignals(True)
         self._combo_profile.setCurrentText(new_name)
         self._combo_profile.blockSignals(False)
-        if self._vna_window is not None:
-            self._vna_window.on_profile_changed()
+        self._notify_profile_changed_windows()
 
     def _profile_rename(self):
         old = self._param_manager_reg.active_name
@@ -595,10 +635,23 @@ class MainWindow(QMainWindow):
             "QPushButton:disabled { background-color: #3a1a1a; color: #553d3d; border-radius: 4px; }"
         )
         self._btn_stop.setEnabled(False)
-        self._btn_stop.clicked.connect(self._on_stop)
+        self._btn_stop.clicked.connect(self._on_stop_clicked)
+
+        # 통신 오류로 중단된 측정을 저장된 지점부터 재개
+        self._btn_resume = QPushButton("Resume")
+        self._btn_resume.setMinimumHeight(44)
+        self._btn_resume.setToolTip("통신 오류로 중단된 측정을 저장된 지점부터 재개")
+        self._btn_resume.setStyleSheet(
+            "QPushButton { font-weight: bold; font-size: 14px;"
+            "background-color: #b8860b; color: white; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #3a3010; color: #55502d; border-radius: 4px; }"
+        )
+        self._btn_resume.clicked.connect(self._on_resume_clicked)
+        self._update_resume_btn_enabled()
 
         btn_row.addWidget(self._btn_start)
         btn_row.addWidget(self._btn_stop)
+        btn_row.addWidget(self._btn_resume)
         layout.addLayout(btn_row)
 
         # --- Quick-access buttons: Graph / Double Sweep / Connection Test ---
@@ -646,6 +699,7 @@ class MainWindow(QMainWindow):
         btn_browse = QPushButton("Browse")
         btn_browse.setFixedWidth(60)
         btn_browse.clicked.connect(self._browse_save_folder)
+        self._btn_save_browse = btn_browse
         mf_row.addWidget(self._le_main_folder)
         mf_row.addWidget(btn_browse)
         save_form.addRow("Main Folder:", mf_row)
@@ -675,6 +729,12 @@ class MainWindow(QMainWindow):
         self._lbl_save_preview.setFont(_MONO)
         self._lbl_save_preview.setStyleSheet("color: #555555; font-size: 9px;")
         self._lbl_save_preview.setWordWrap(True)
+        # 긴 경로가 잘리지 않도록 약 3줄 높이 확보 + 위쪽 정렬
+        self._lbl_save_preview.setMinimumHeight(46)
+        self._lbl_save_preview.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._lbl_save_preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._btn_copy_path = QPushButton("Copy")
         self._btn_copy_path.setFixedWidth(46)
         self._btn_copy_path.setFixedHeight(20)
@@ -686,10 +746,12 @@ class MainWindow(QMainWindow):
         self._btn_open_folder.setFont(QFont("Consolas", 8))
         self._btn_open_folder.clicked.connect(self._open_save_folder)
         btn_open_folder = self._btn_open_folder
-        preview_row.addWidget(QLabel("→"))
+        _arrow = QLabel("→")
+        _arrow.setAlignment(Qt.AlignmentFlag.AlignTop)
+        preview_row.addWidget(_arrow)
         preview_row.addWidget(self._lbl_save_preview, stretch=1)
-        preview_row.addWidget(btn_copy_path)
-        preview_row.addWidget(btn_open_folder)
+        preview_row.addWidget(btn_copy_path, alignment=Qt.AlignmentFlag.AlignTop)
+        preview_row.addWidget(btn_open_folder, alignment=Qt.AlignmentFlag.AlignTop)
         save_layout.addLayout(preview_row)
 
         self._cb_save_enable = QCheckBox("Auto-save 활성화")
@@ -738,9 +800,14 @@ class MainWindow(QMainWindow):
         meas_outer = QVBoxLayout(self._meas_panel)
         meas_outer.setContentsMargins(8, 6, 8, 6)
         meas_outer.setSpacing(4)
+        m_title_row = QHBoxLayout()
         m_title = QLabel("Active Measurements")
         m_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #56d364;")
-        meas_outer.addWidget(m_title)
+        m_title_row.addWidget(m_title)
+        m_title_row.addStretch()
+        from gui.help_button import make_help_button
+        m_title_row.addWidget(make_help_button(self._meas_help_html(), "Active Measurements 도움말"))
+        meas_outer.addLayout(m_title_row)
         self._meas_scroll = QScrollArea()
         self._meas_scroll.setWidgetResizable(True)
         self._meas_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -809,6 +876,11 @@ class MainWindow(QMainWindow):
     def _on_config_applied(self, cfg: AppConfig):
         self._app_config = cfg
         self._worker.set_threshold(cfg.global_threshold)
+        self._worker.set_parallel(cfg.parallel_measurement)
+        # Double Sweep의 자체 worker에도 동일 적용
+        if self._double_sweep_window is not None:
+            self._double_sweep_window._sweep_worker.set_threshold(cfg.global_threshold)
+            self._double_sweep_window._sweep_worker.set_parallel(cfg.parallel_measurement)
 
     def _open_graph_window(self):
         from gui.graph_window import GraphWindow
@@ -860,16 +932,18 @@ class MainWindow(QMainWindow):
     def _open_vna_window(self):
         from gui.vna_window import VnaWindow
         if self._vna_window is None:
+            # parent=None → 독립 top-level → 작업표시줄에 개별 표시
             self._vna_window = VnaWindow(
                 self._session, self._visa_lib_registry,
-                param_manager_reg=self._param_manager_reg, parent=self)
+                param_manager_reg=self._param_manager_reg, parent=None)
         self._vna_window.show()
         self._vna_window.raise_()
 
     def _open_double_sweep(self):
         from gui.double_sweep_window import DoubleSweepWindow
         if self._double_sweep_window is None:
-            self._double_sweep_window = DoubleSweepWindow(self, self._param_manager_reg, self)
+            # 3rd arg(parent)=None → 독립 top-level → 작업표시줄에 개별 표시 (main_win은 1st arg로 전달)
+            self._double_sweep_window = DoubleSweepWindow(self, self._param_manager_reg, None)
             self._double_sweep_window.sweep_started.connect(self._on_double_sweep_started)
             self._double_sweep_window.sweep_finished.connect(self._on_double_sweep_finished)
         self._double_sweep_window.show()
@@ -952,7 +1026,8 @@ class MainWindow(QMainWindow):
                     idn = self._session.query_once(alias, "*IDN?")
                     results[alias] = (True, idn.strip())
                 except Exception as exc:
-                    results[alias] = (False, str(exc))
+                    from core.visa_errors import humanize_error
+                    results[alias] = (False, humanize_error(exc))
 
         all_ok = all(ok for ok, _ in results.values())
 
@@ -960,7 +1035,7 @@ class MainWindow(QMainWindow):
             lines = []
             for alias, (ok, msg) in results.items():
                 icon = "✓" if ok else "✗"
-                short = msg[:100] + ("…" if len(msg) > 100 else "")
+                short = msg if ok else (msg[:200] + ("…" if len(msg) > 200 else ""))
                 lines.append(f"{icon}  {alias}\n    {short}")
             body = "\n\n".join(lines)
             if all_ok:
@@ -977,6 +1052,34 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Derivative Channel UI
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _deriv_help_html() -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>Derivative — 두 값의 기울기(미분) 자동 계산</b><hr>"
+            "측정하는 동안 두 값 A₁, A₂의 <b>기울기(A₁을 A₂로 미분한 값)</b>를 매 단계 계산해 "
+            "데이터·그래프에 함께 기록합니다. 패널 3개 = 1·2·3차(기울기·기울기의 기울기 …).<hr>"
+            "<b>A₁ (위) / A₂ (아래)</b><br>"
+            "가로축으로 쓰는 sweep 값, 또는 체크된 측정값 중에서 고릅니다.<br>"
+            "&nbsp;&nbsp;예: A₁=전압, A₂=전류로 고르면 <b>dV/dI</b>(미분 저항)이 됩니다.<hr>"
+            "<b>Window (몇 점을 묶어 볼지, 3~50)</b><br>"
+            "가장 최근 몇 개 점을 묶어 기울기를 구합니다.<br>"
+            "크게 하면 매끄럽지만(노이즈에 강함) 변화에 늦게 반응합니다. 처음 몇 단계는 값이 없습니다(—).<hr>"
+            "<b>Method (계산 방식)</b><br>"
+            "&nbsp;&nbsp;• <b>Linear Regression</b>: 묶은 점들에 직선·곡선을 맞춰 기울기를 구함 (모든 차수 가능).<br>"
+            "&nbsp;&nbsp;• <b>Savitzky-Golay</b>: 매끄럽게 다듬어 기울기를 구하는 방식 (1차 전용).<br>"
+            "신호에 노이즈가 많으면 SG 방식이나 Window를 키우면 도움이 됩니다.<hr>"
+            "<b>Min delta (아래값 최소 변화)</b><br>"
+            "아래값(A₂)이 거의 안 변하면(이 값보다 작게 변하면) 기울기를 계산하지 않고 — 로 둡니다. "
+            "(거의 0으로 나눠 값이 튀는 것을 막기 위함)<hr>"
+            "<b>Label / Unit</b><br>"
+            "그래프·파일에 쓸 이름과 단위. 비워두면 자동으로 만듭니다(예: dV/dI).<hr>"
+            "<b>참고</b><br>"
+            "• Enable을 켜야 계산·저장됩니다.<br>"
+            "• 2·3차는 점이 더 많이 쌓여야 값이 나오기 시작합니다."
+            "</body></html>"
+        )
 
     def _build_deriv_panel(self, order: int) -> QWidget:
         """d^n A1/dA2^n 실시간 파생 채널 설정 패널 (order = 1/2/3)."""
@@ -998,6 +1101,8 @@ class MainWindow(QMainWindow):
         lbl.setStyleSheet("font-weight: bold; font-size: 12px;")
         title_row.addWidget(lbl)
         title_row.addStretch()
+        from gui.help_button import make_help_button
+        title_row.addWidget(make_help_button(self._deriv_help_html(), "Derivative 도움말"))
         cb_enable = QCheckBox("Enable")
         title_row.addWidget(cb_enable)
         vbox.addLayout(title_row)
@@ -1206,11 +1311,46 @@ class MainWindow(QMainWindow):
             self._alias_color_map[alias] = _ALIAS_PALETTE[n % len(_ALIAS_PALETTE)]
         return self._alias_color_map[alias]
 
+    @staticmethod
+    def _meas_help_html() -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>Active Measurements — 무엇을 읽어 기록할지</b><hr>"
+            "여기서 <b>체크한 측정</b>들이 매 측정 단계마다 읽혀서 데이터 파일·그래프에 기록됩니다.<br>"
+            "각 줄: <code>[장비] 이름 (단위)</code> + <b>Class</b> 선택 + <b>Suffix</b> 입력칸.<hr>"
+            "<b>Suffix — 이름 뒤에 붙이는 꼬리말</b><br>"
+            "데이터 열 이름과 그래프 축 이름 뒤에 <b>_꼬리말</b>이 붙습니다.<br>"
+            "&nbsp;&nbsp;예: 이름이 <code>smua_current</code>이고 꼬리말이 <code>ch1</code>이면 → "
+            "<code>smua_current_ch1</code><br>"
+            "같은 명령으로 여러 채널을 잴 때 서로 구분하려고 씁니다.<br>"
+            "&nbsp;&nbsp;• 꼬리말이 비어 있으면 원래 이름 그대로 씁니다.<br>"
+            "&nbsp;&nbsp;• Class가 <b>Contact</b>일 때는 특별합니다:<br>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;– 꼬리말이 <b>비어 있으면</b> 원래 이름(figure_axis) 그대로 저장됩니다.<br>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;– 꼬리말에 <b>내용이 있으면</b> 이름이 그 꼬리말 <b>한 단어로 완전히 바뀝니다</b>. "
+            "예: 꼬리말이 <code>A1</code>이면 열 이름·축 이름이 그냥 <code>A1</code> (← <code>contact_A1</code> 아님).<hr>"
+            "<b>Class (측정 종류) ↔ 메타데이터 연계</b><br>"
+            "Class를 <b>Temperature(온도)</b> 또는 <b>Bfield(자기장)</b>로 지정하면, 그 값은 "
+            "측정 내내 모아져서 <b>끝날 때 평균·표준편차</b>가 자동으로 요약 파일(.json)에 저장됩니다.<br>"
+            "이 자동 평균·표준편차 저장은 아래 <b>3가지를 모두</b> 만족할 때만 됩니다:<br>"
+            "&nbsp;&nbsp;1) Class = 온도 또는 자기장<br>"
+            "&nbsp;&nbsp;2) 그 측정이 <b>여기서 체크</b>되어 있음<br>"
+            "&nbsp;&nbsp;3) <b>Meta Data Config</b> 창에서 해당 항목 체크 + 메타데이터 켜짐<br>"
+            "&nbsp;&nbsp;→ 조건이 안 맞으면, '끝날 때 한 번 읽은 값'으로만 저장될 수 있습니다.<hr>"
+            "<b>참고</b><br>"
+            "• 체크 상태는 저장되어 다음 실행 때 그대로 복원됩니다.<br>"
+            "• 측정 항목의 등록·순서는 <b>Parameter Manager</b>에서 관리합니다.<br>"
+            "• Class·메타데이터 설정은 주로 온도·자기장 센서의 통계 기록에 씁니다."
+            "</body></html>"
+        )
+
     def _meas_label_for(self, idx: int, m) -> str:
         """Return column header for data-file.
 
-        contact type → base = "contact" (suffix completely replaces figure_axis).
-        other types  → base = figure_axis (suffix appended as before).
+        contact type:
+            suffix 비어있음 → figure_axis (기존 그대로)
+            suffix 있음     → suffix 값으로 통째로 대체 ('contact_' 접두어 없이 xxx 만)
+        other types:
+            figure_axis 에 _suffix 를 덧붙임 (기존 동작)
         """
         from config.config_models import MeasType
         suffix = ""
@@ -1219,10 +1359,10 @@ class MainWindow(QMainWindow):
         meas_type_val = MeasType.NONE.value
         if idx < len(self._meas_type_combos):
             meas_type_val = self._meas_type_combos[idx].currentData() or MeasType.NONE.value
+        base = m.figure_axis or m.description
         if meas_type_val == MeasType.CONTACT.value:
-            base = "contact"
-        else:
-            base = m.figure_axis or m.description
+            # contact: suffix 가 있으면 figure_axis 를 그 값으로 완전히 대체
+            return suffix if suffix else base
         return f"{base}_{suffix}" if suffix else base
 
     def _rebuild_sweep_channel_panel(self, sweep_values: list):
@@ -1362,8 +1502,8 @@ class MainWindow(QMainWindow):
                 return _wb
             le_suffix.textChanged.connect(_make_suffix_wb(m, le_suffix))
             le_suffix.setToolTip(
-                "contact: 컬럼명 = contact_{suffix}\n"
-                "기타 type: 컬럼명 = {figure_axis}_{suffix}"
+                "기타 type: 컬럼명 = {figure_axis}_{suffix}\n"
+                "contact: 비어있으면 {figure_axis}, 내용 있으면 {suffix} 한 단어로 완전 대체"
             )
             self._meas_suffix_edits.append(le_suffix)
             row_h.addWidget(le_suffix)
@@ -1470,6 +1610,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Sweep Channel",
                 "Parameter Manager에서 Sweep Value를 선택하세요.")
             return
+        # 저장 비활성 경고 — 장시간 측정이 저장 없이 진행되는 사고 방지
+        if not self._cb_save_enable.isChecked():
+            ans = QMessageBox.question(
+                self, "Auto-save 비활성화",
+                "Auto-save가 꺼져 있습니다. 측정 데이터가 파일로 저장되지 않습니다.\n\n"
+                "저장 없이 진행하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
         # 연결 상태 확인 — 실패 시 측정 중단
         if not self._run_connection_test(include_second=False, show_success=False):
             return
@@ -1477,6 +1628,7 @@ class MainWindow(QMainWindow):
         self._sweep_step_count = 0
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
+        self._btn_resume.setEnabled(False)
         self._glow_phase = 0.0
         self._glow_timer.start()
         self._sweep_status_window.reset()
@@ -1490,11 +1642,10 @@ class MainWindow(QMainWindow):
         ]
         self._sync_data_window_columns()
         # sweep channel / measurement / save 컨트롤 비활성화
+        # (단, Copy / Open Folder 버튼은 측정 중에도 사용 가능하도록 유지)
         self._sweep_channel_panel.setEnabled(False)
         self._meas_panel.setEnabled(False)
-        self._save_settings_frame.setEnabled(False)
-        self._btn_copy_path.setEnabled(True)
-        self._btn_open_folder.setEnabled(True)
+        self._set_save_inputs_enabled(False)
         # Double Sweep window UI 잠금
         if self._double_sweep_window is not None:
             self._double_sweep_window.lock_ui(True)
@@ -1509,6 +1660,18 @@ class MainWindow(QMainWindow):
         self._lbl_remaining.setText("—")
         if filepath:
             self._log(f"  Data → {filepath}", color="#888888")
+        elif self._data_saver.start_error() is not None:
+            # 저장이 활성인데 실패 → 데이터 유실 위험. 측정 시작 중단.
+            err = self._data_saver.start_error()
+            self._log(f"  ✗ 데이터 저장 시작 실패 — 측정 취소: {err}", color="#f44747")
+            self._on_stop()
+            QMessageBox.critical(
+                self, "데이터 저장 실패 — 측정 취소",
+                f"데이터 파일을 시작할 수 없어 측정을 시작하지 않았습니다.\n\n"
+                f"사유: {err}\n\n"
+                "Main Folder 경로·권한·디스크 공간을 확인하세요.",
+            )
+            return
         # disable Double Sweep while single sweep is running
         if self._double_sweep_window is not None:
             self._double_sweep_window._btn_start.setEnabled(False)
@@ -1561,7 +1724,8 @@ class MainWindow(QMainWindow):
              self._active_profile.measurements[row].resolved_cmd)
             for row in self._active_meas_indices
         ]
-        self.request_step.emit(StepRequest(
+        self._auto_retry_used = False
+        _init_req = StepRequest(
             sweep_channel=self._sweep_channel,
             sweep_to=self._sweep_config.sweep_to,
             sweep_rate=self._sweep_config.sweep_rate,
@@ -1570,7 +1734,15 @@ class MainWindow(QMainWindow):
             last_write_value=None,
             active_measurements=active_init,
             measure_only=True,
-        ))
+        )
+        self._last_step_request = _init_req
+        self.request_step.emit(_init_req)
+
+    def _on_stop_clicked(self):
+        """사용자가 Stop 버튼을 누른 경우 — 직전 지점을 resume 로그에 저장 후 중단."""
+        if self._running and self._last_write_value is not None:
+            self._save_resume_point("사용자 중단(Stop)")
+        self._on_stop()
 
     def _on_stop(self):
         if not self._running:
@@ -1579,11 +1751,13 @@ class MainWindow(QMainWindow):
         self._last_write_value = None
         self._worker.request_stop()
         self._sweep_step_timer.stop()
+        self._retry_timer.stop()
+        self._update_resume_btn_enabled()
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._sweep_channel_panel.setEnabled(True)
         self._meas_panel.setEnabled(True)
-        self._save_settings_frame.setEnabled(True)
+        self._set_save_inputs_enabled(True)
         # re-enable Double Sweep if it's not actively running
         if self._double_sweep_window is not None:
             from gui.double_sweep_window import DoubleSweepPhase
@@ -1640,7 +1814,7 @@ class MainWindow(QMainWindow):
         ] if self._sweep_radio_group.checkedId() >= 0 else None
 
         t_emit = time.perf_counter()
-        self.request_step.emit(StepRequest(
+        req = StepRequest(
             sweep_channel=self._sweep_channel,
             sweep_to=self._sweep_config.sweep_to,
             sweep_rate=self._sweep_config.sweep_rate,
@@ -1650,7 +1824,9 @@ class MainWindow(QMainWindow):
             safety_steps=sv.safety_steps if sv else 0,
             safety_interval_ms=sv.safety_interval_ms if sv else 0.0,
             active_measurements=active,
-        ))
+        )
+        self._last_step_request = req   # 자동 재개 시 재전송용
+        self.request_step.emit(req)
         # 여기서 즉시 리턴 → Qt 이벤트 루프 반환 → UI 반응 가능
 
     def _on_step_done(self, result: StepResult):
@@ -1708,10 +1884,29 @@ class MainWindow(QMainWindow):
                 f"실패 채널: {', '.join(err_descs)}"
             )
             self._log_sweep(f"  {err_msg}", color="#f44747")
-            self._on_stop()
-            QMessageBox.critical(self, "Measurement Error", err_msg)
+            # 측정 실패 원인이 통신 오류면 자동 재개 경로로, 그 외(파싱 등)는 즉시 중단
+            from core.resume_log import is_comm_error
+            comm = any(
+                is_comm_error(result.meas_errors.get(idx, ""))
+                for idx in self._active_meas_indices
+                if meas_map.get(idx) is None
+            )
+            if comm:
+                self._handle_comm_error("; ".join(err_descs))
+            else:
+                self._on_stop()
+                from core.visa_errors import humanize_error
+                detail = "; ".join(
+                    result.meas_errors.get(idx, "")
+                    for idx in self._active_meas_indices if meas_map.get(idx) is None
+                )
+                QMessageBox.critical(
+                    self, "Measurement Error",
+                    f"{err_msg}\n\n원인: {humanize_error(detail)}")
             return
         else:
+            # 정상 스텝 — 자동 재개 예산 리셋
+            self._auto_retry_used = False
             # verbose: 측정값 요약 (None/nan 제외)
             val_summary = "  ".join(
                 f"{self._active_profile.measurements[idx].description}="
@@ -1738,7 +1933,16 @@ class MainWindow(QMainWindow):
                 row_vals.append(f"{val:.6g}" if val is not None else "—")
 
         self._data_window.update_values(row_vals)
-        self._data_saver.append_row(row_vals)
+        # 데이터 한 줄 기록 — 저장 활성인데 실패하면 측정 중단 (유실 방지)
+        if not self._data_saver.append_row(row_vals) and self._data_saver.is_enabled():
+            self._log("  ✗ 데이터 기록 실패 — 측정 중단 (디스크/권한 확인).", color="#f44747")
+            self._on_stop()
+            QMessageBox.critical(
+                self, "데이터 기록 실패 — 측정 중단",
+                "측정값을 파일에 기록하지 못해 측정을 중단했습니다.\n"
+                "디스크 공간·파일 권한을 확인한 뒤 다시 시작하세요.",
+            )
+            return
 
         # MetaDataManager: T/B 버퍼에 이번 스텝 값 누적
         self._meta_manager.record_step(result.meas_results)
@@ -1828,12 +2032,154 @@ class MainWindow(QMainWindow):
     def _on_step_error(self, msg: str):
         """Worker에서 예외 발생 시 메인 스레드에서 처리."""
         ctx = getattr(self, "_step_context", "unknown step")
-        self._log(f"  ERROR (sweep tick): {msg}", color="#f44747")
+        from core.visa_errors import is_comm_error, humanize_error
+        cause = humanize_error(msg)
+        self._log(f"  ERROR (sweep tick): {cause}", color="#f44747")
         self._log_sweep(
-            f"  ✗ EXCEPTION @ {ctx}\n    {msg}",
+            f"  ✗ EXCEPTION @ {ctx}\n    원인: {cause}\n    [상세] {msg}",
             color="#f44747",
         )
-        self._on_stop()
+        if is_comm_error(msg):
+            self._handle_comm_error(msg)
+        else:
+            self._on_stop()
+
+    # ------------------------------------------------------------------
+    # 통신 오류 자동 재개 / 수동 재개
+    # ------------------------------------------------------------------
+
+    _AUTO_RESUME_DELAY_MS = 10_000   # 통신 오류 후 자동 재개 대기 (10초)
+
+    def _handle_comm_error(self, reason: str):
+        """통신 오류 처리: 1회는 10초 후 자동 재개, 재차 발생 시 중단 + 재개 지점 저장."""
+        if not self._running:
+            return
+        if not self._auto_retry_used:
+            # 1차: 10초 후 자동 재개
+            self._auto_retry_used = True
+            self._sweep_step_timer.stop()
+            self._log(
+                f"  ⏳ 통신 오류 감지 — {self._AUTO_RESUME_DELAY_MS // 1000}초 후 자동 재개합니다.",
+                color="#d7ba7d",
+            )
+            self._log_sweep(
+                f"  ⏳ 통신 오류 — {self._AUTO_RESUME_DELAY_MS // 1000}초 후 자동 재개  ({reason})",
+                color="#d7ba7d",
+            )
+            self._retry_timer.start(self._AUTO_RESUME_DELAY_MS)
+        else:
+            # 2차: 중단 + 재개 지점 저장
+            self._save_resume_point(reason)
+            from core.visa_errors import humanize_error
+            cause = humanize_error(reason)
+            self._log(
+                "  ✗ 자동 재개 후 재차 통신 오류 — 측정을 중단합니다. "
+                "[Resume] 버튼으로 저장된 지점부터 재개할 수 있습니다.",
+                color="#f44747",
+            )
+            self._log(f"     원인: {cause}", color="#f44747")
+            self._on_stop()
+            QMessageBox.warning(
+                self, "통신 오류 — 측정 중단",
+                "자동 재개 후에도 통신 오류가 반복되어 측정을 중단했습니다.\n\n"
+                f"원인: {cause}\n\n"
+                "현재 지점이 재개 로그에 저장되었습니다.\n"
+                "[Resume] 버튼으로 해당 지점부터 다시 시작할 수 있습니다.",
+            )
+
+    def _auto_resume_step(self):
+        """10초 경과 후 마지막 StepRequest를 재전송하여 측정을 이어간다."""
+        if not self._running or self._last_step_request is None:
+            return
+        self._log("  ▶ 자동 재개 — 측정을 재시작합니다.", color="#4ec9b0")
+        self._log_sweep("  ▶ 자동 재개", color="#4ec9b0")
+        self.request_step.emit(self._last_step_request)
+
+    def _save_resume_point(self, reason: str):
+        """현재 단일 sweep 위치를 재개 로그에 저장."""
+        from datetime import datetime
+        from core.resume_log import ResumePoint
+        fp = self._data_saver.get_filepath()
+        pos = self._last_write_value
+        label = (
+            f"step#{self._sweep_step_count}  pos={pos:.6g}  "
+            f"target={self._sweep_config.sweep_to:.4g}  ({reason[:40]})"
+            if pos is not None else
+            f"step#{self._sweep_step_count}  target={self._sweep_config.sweep_to:.4g}"
+        )
+        point = ResumePoint(
+            sweep_type="single",
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            label=label,
+            data_filepath=str(fp) if fp else "",
+            payload={
+                "last_write_value": pos,
+                "step_count": self._sweep_step_count,
+                "sweep_to": self._sweep_config.sweep_to,
+                "sweep_rate": self._sweep_config.sweep_rate,
+                "time_per_point": self._sweep_config.time_per_point,
+                "active_meas_indices": list(self._active_meas_indices),
+            },
+        )
+        self._resume_log.add(point)
+        self._update_resume_btn_enabled()
+
+    def _update_resume_btn_enabled(self):
+        """재개 로그에 단일 sweep 지점이 있고, 현재 측정 중이 아니면 Resume 활성화."""
+        if not hasattr(self, "_btn_resume"):
+            return
+        has_point = self._resume_log.latest("single") is not None
+        self._btn_resume.setEnabled(has_point and not self._running)
+
+    def _on_resume_clicked(self):
+        """[Resume] 버튼: 저장된 지점 목록에서 선택 후 재개."""
+        if self._running:
+            return
+        from gui.resume_dialog import ResumePickerDialog
+        points = self._resume_log.all()
+        dlg = ResumePickerDialog(points, parent=self, sweep_type="single")
+        if dlg.exec() and dlg.selected_point is not None:
+            self._resume_from_point(dlg.selected_point)
+
+    def _resume_from_point(self, point):
+        """선택된 재개 지점부터 단일 sweep을 이어서 시작한다 (기존 파일 이어쓰기)."""
+        if self._sweep_channel is None:
+            QMessageBox.warning(self, "No Sweep Channel",
+                "Parameter Manager에서 Sweep Value를 선택하세요.")
+            return
+        if not self._run_connection_test(include_second=False, show_success=False):
+            return
+
+        p = point.payload
+        # 데이터 파일 이어쓰기 복원
+        resumed_fp = self._data_saver.resume_session(point.data_filepath)
+
+        self._running = True
+        self._auto_retry_used = False
+        self._sweep_step_count = int(p.get("step_count", 0))
+        self._last_write_value = p.get("last_write_value")
+        self._active_meas_indices = list(p.get("active_meas_indices", self._active_meas_indices))
+
+        self._btn_start.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        self._btn_resume.setEnabled(False)
+        self._glow_phase = 0.0
+        self._glow_timer.start()
+        self._sweep_channel_panel.setEnabled(False)
+        self._meas_panel.setEnabled(False)
+        self._set_save_inputs_enabled(False)
+        if self._double_sweep_window is not None:
+            self._double_sweep_window.lock_ui(True)
+            self._double_sweep_window._btn_start.setEnabled(False)
+
+        self._log(
+            f"  ▶ 수동 재개 — pos={self._last_write_value}, step#{self._sweep_step_count}"
+            + (f", 파일 이어쓰기: {resumed_fp}" if resumed_fp else ""),
+            color="#4ec9b0",
+        )
+        self._log_sweep(f"━━ 재개 (resume) — step#{self._sweep_step_count}", color="#4ec9b0")
+        # 다음 스텝부터 정상 루프 진입
+        self._sweep_step_timer.start(0)
 
     def _browse_save_folder(self):
         folder = QFileDialog.getExistingDirectory(
@@ -1863,6 +2209,17 @@ class MainWindow(QMainWindow):
             folder = str(p) if p and p.is_dir() else ""
         if folder:
             subprocess.Popen(f'explorer "{folder}"')
+
+    def _set_save_inputs_enabled(self, enabled: bool):
+        """저장 설정 입력 위젯만 잠금/해제. Copy/Open Folder 버튼·미리보기는 항상 사용 가능.
+
+        (프레임 전체를 disable하면 자식인 Copy/Open 버튼도 비활성화되므로,
+         입력 위젯만 개별적으로 토글한다.)
+        """
+        for w in (self._le_main_folder, self._btn_save_browse,
+                  self._le_custom_folder, self._le_custom_word,
+                  self._cb_save_date, self._cb_save_enable):
+            w.setEnabled(enabled)
 
     def _update_save_preview(self):
         self._data_saver.set_main_folder(self._le_main_folder.text())

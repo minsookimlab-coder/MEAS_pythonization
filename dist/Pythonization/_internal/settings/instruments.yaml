@@ -10,14 +10,16 @@
   address: 192.168.0.5
   mac_address: 00-10-A5-20-30-4A
   port: 7020
-  extra_params: {}
+  extra_params:
+    split_semicolons: true
 - alias: IPS
   class_name: core.generic_scpi.GenericSCPIInstrument
   interface_type: LAN
-  address: 192.168.0.3
+  address: 192.168.0.8
   mac_address: ''
   port: 7020
-  extra_params: {}
+  extra_params:
+    split_semicolons: true
 - alias: M81
   class_name: core.m81.M81Instrument
   interface_type: LAN

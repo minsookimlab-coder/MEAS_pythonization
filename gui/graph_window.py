@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -94,6 +95,7 @@ class _ExtraYState:
         self.uses_main_vb: bool = True   # True → same unit as main Y, shares left axis
         self.vb: Optional[pg.ViewBox] = None   # right-side VB when uses_main_vb=False
         self.curves: Dict[str, pg.PlotDataItem] = {}   # phase → PlotDataItem
+        self.disp_bufs: Dict[str, "_DisplayBuf"] = {}  # phase → pre-scaled display buffer
         self.y_div: float = 1.0
         self.y_pfx: str = ""
         self.color: str = color
@@ -236,6 +238,120 @@ _SI_TABLE: List[Tuple[float, float, str]] = [
 ]
 
 
+class _DisplayBuf:
+    """GraphPanel의 phase별 pre-scaled 표시 버퍼.
+
+    구조:
+      history [0 .. n-1] : step 압축 이력 (오래된 데이터일수록 해상도 낮아짐)
+      live    [n]         : 항상 최신 포인트 (step에 무관하게 매 push 갱신)
+
+    get()은 history + live를 합쳐서 반환 → 오래된 데이터 손실 없음 + 최신값 항상 표시.
+
+    live_committed 플래그:
+      True  → 최신 포인트가 이미 history에 들어 있음 → get()은 history[:n]만 반환
+      False → history에 없음 → get()은 history[:n] + live 한 점 추가
+
+    복잡도:
+      push()     : O(1) amortized  (버퍼 만참 시 O(max_pts) 압축, O(log N)회)
+      get()      : O(1) view
+      rescale()  : O(max_pts), 극히 드물게 실행
+      push_bulk(): O(N) numpy, 축 변경 시에만 실행
+    """
+    __slots__ = (
+        '_max', '_x', '_y', '_n', '_step', '_total',
+        '_live_x', '_live_y', '_has_live', '_live_committed',
+    )
+
+    def __init__(self, max_pts: int):
+        self._max  = max_pts
+        # +1: get()이 live 포인트를 overflow 슬롯에 쓰기 위한 여유 공간
+        self._x    = np.empty(max_pts + 1, dtype=np.float64)
+        self._y    = np.empty(max_pts + 1, dtype=np.float64)
+        self._n    = 0
+        self._step = 1
+        self._total = 0
+        self._live_x: float = 0.0
+        self._live_y: float = 0.0
+        self._has_live: bool = False
+        self._live_committed: bool = True   # 초기: live 없음 → history만 반환
+
+    def push(self, x: float, y: float) -> bool:
+        """O(1) amortized. 항상 live 갱신; history는 step 스케줄에 따라 커밋."""
+        self._total += 1
+        self._live_x = x
+        self._live_y = y
+        self._has_live = True
+
+        if self._total % self._step == 0:
+            # 이번 포인트를 history에 커밋
+            if self._n >= self._max:
+                half = self._max // 2
+                self._x[:half] = self._x[::2][:half]
+                self._y[:half] = self._y[::2][:half]
+                self._n   = half
+                self._step *= 2
+            self._x[self._n] = x
+            self._y[self._n] = y
+            self._n += 1
+            self._live_committed = True   # history에 포함됨
+        else:
+            self._live_committed = False  # history에 없음 → get()이 덧붙임
+
+        return True   # live는 항상 갱신 → 항상 dirty
+
+    def get(self) -> Tuple[np.ndarray, np.ndarray]:
+        """O(1) view. history[:n] + (live if not committed)."""
+        n = self._n
+        if not self._has_live or self._live_committed:
+            return self._x[:n], self._y[:n]
+        # live 포인트를 overflow 슬롯(index n)에 기록해 view로 반환
+        self._x[n] = self._live_x
+        self._y[n] = self._live_y
+        return self._x[:n + 1], self._y[:n + 1]
+
+    def reset(self) -> None:
+        self._n = 0
+        self._step = 1
+        self._total = 0
+        self._has_live = False
+        self._live_committed = True
+
+    def push_bulk(self, xs: np.ndarray, ys: np.ndarray) -> None:
+        """축 변경 시 DataStore 전체를 일괄 로드. O(N) numpy 벡터 연산."""
+        n = len(xs)
+        if n == 0:
+            return
+        if n <= self._max:
+            self._x[:n] = xs
+            self._y[:n] = ys
+            self._n     = n
+            self._step  = 1
+            self._total = n
+        else:
+            step = n // self._max
+            idx  = np.arange(0, n, step)[:self._max]
+            m    = len(idx)
+            self._x[:m] = xs[idx]
+            self._y[:m] = ys[idx]
+            self._n     = m
+            self._step  = step
+            self._total = n
+        if n > 0:
+            self._live_x = float(xs[-1])
+            self._live_y = float(ys[-1])
+            self._has_live = True
+            self._live_committed = True   # 마지막 점은 이미 history에 있음
+
+    def rescale(self, x_factor: float, y_factor: float) -> None:
+        """SI prefix 변경 시 호출. O(max_pts)."""
+        if self._n > 0:
+            self._x[:self._n] *= x_factor
+            self._y[:self._n] *= y_factor
+        if self._has_live:
+            self._live_x *= x_factor
+            self._live_y *= y_factor
+
+
 def _best_si(arr: np.ndarray) -> Tuple[float, str]:
     """Return (divisor, prefix) that best represents the data magnitude.
 
@@ -251,6 +367,17 @@ def _best_si(arr: np.ndarray) -> Tuple[float, str]:
         if max_abs >= threshold:
             return divisor, prefix
     return 1e-12, "p"    # below pico → still show as pico
+
+
+def _plot_subsample(
+    xs: np.ndarray, ys: np.ndarray, max_pts: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (xs, ys) subsampled to at most max_pts points for display."""
+    n = len(xs)
+    if n <= max_pts:
+        return xs, ys
+    idx = np.round(np.linspace(0, n - 1, max_pts)).astype(np.intp)
+    return xs[idx], ys[idx]
 
 
 # ──────────────────────────────────────────────────────────
@@ -314,25 +441,48 @@ class DataStore:
 
     # Data --------------------------------------------------------------------
 
+    _INIT_CAP = 256  # 초기 프리알로케이션 크기
+
     def append(self, point: GraphDataPoint) -> None:
         tag = point.phase or "_"
         bucket = self._data.setdefault(tag, {})
         for k, v in point.values.items():
+            fv = float(v) if v is not None else float("nan")
+            av = abs(fv) if fv == fv else 0.0  # nan check: nan != nan
             entry = bucket.get(k)
             if entry is None:
-                bucket[k] = {"list": [v], "arr": None}
+                arr = np.empty(self._INIT_CAP, dtype=np.float64)
+                arr[0] = fv
+                bucket[k] = {"arr": arr, "len": 1, "cap": self._INIT_CAP, "abs_max": av}
             else:
-                entry["list"].append(v)
-                entry["arr"] = None  # 캐시 무효화 — 다음 get_xy()에서 재생성
+                n = entry["len"]
+                if n >= entry["cap"]:
+                    # capacity 두 배 확장 — amortized O(1)
+                    new_cap = entry["cap"] * 2
+                    new_arr = np.empty(new_cap, dtype=np.float64)
+                    new_arr[:n] = entry["arr"][:n]
+                    entry["arr"] = new_arr
+                    entry["cap"] = new_cap
+                entry["arr"][n] = fv
+                entry["len"] = n + 1
+                if av > entry["abs_max"]:
+                    entry["abs_max"] = av
+
+    def col_abs_max(self, key: str) -> float:
+        """컬럼 key의 전체 phase에 걸친 최대 절댓값을 O(phases) 시간에 반환."""
+        result = 0.0
+        for bucket in self._data.values():
+            entry = bucket.get(key)
+            if entry and entry["abs_max"] > result:
+                result = entry["abs_max"]
+        return result
 
     def _get_arr(self, bucket: dict, key: str) -> np.ndarray:
-        """캐시된 numpy 배열 반환. 캐시 없으면 재생성 (스텝당 최대 1회)."""
+        """유효 범위 numpy view 반환 — O(1), 변환 없음."""
         entry = bucket.get(key)
         if entry is None:
             return self._EMPTY
-        if entry["arr"] is None:
-            entry["arr"] = np.asarray(entry["list"], dtype=np.float64)
-        return entry["arr"]
+        return entry["arr"][:entry["len"]]
 
     def get_xy(self, x_key: str, y_key: str, phase: str) -> Tuple[np.ndarray, np.ndarray]:
         d = self._data.get(phase, {})
@@ -379,6 +529,9 @@ class GraphPanel(QFrame):
         self._y_div: float = 1.0
         self._x_pfx: str = ""
         self._y_pfx: str = ""
+        # Display buffers: phase → _DisplayBuf (pre-scaled, bounded O(max_pts))
+        self._disp_bufs: Dict[str, _DisplayBuf] = {}
+        self._disp_buf_keys: Tuple[Optional[str], Optional[str]] = (None, None)
         # Hold state
         self._held: bool = False
         # Regression state
@@ -467,6 +620,10 @@ class GraphPanel(QFrame):
         self._pw.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._pw.setMinimumHeight(220)
         self._pi = self._pw.getPlotItem()
+        # 앱이 자체적으로 SI 접두어를 계산해 단위에 붙이므로 pyqtgraph의
+        # autoSIPrefix를 끈다. (끄지 않으면 'mV'에 또 'k'가 붙어 'kmV'가 됨)
+        self._pi.getAxis("bottom").enableAutoSIPrefix(False)
+        self._pi.getAxis("left").enableAutoSIPrefix(False)
         self._pi.addLegend(offset=(10, 10))
         root.addWidget(self._pw)
 
@@ -658,12 +815,16 @@ class GraphPanel(QFrame):
 
         state.key = new_key
         state.y_div, state.y_pfx = 1.0, ""
+        state.disp_bufs.clear()   # 키 변경 시 기존 display buffer 폐기
         if not new_uses_main and new_unit:
             state.vb = self._get_or_create_unit_vb(new_unit)
         else:
             state.vb = None
 
         self._ensure_phases_for_extra(state, list(self._curves.keys()))
+        # 이미 측정된 기존 이력을 메모리(DataStore)에서 즉시 백필 →
+        # 측정 도중 추가해도 처음부터의 데이터가 모두 보인다 (파일 읽기·측정 지연 없음).
+        self._backfill_extra_y(state)
         self._dirty = True
 
     def _ensure_phases_for_extra(self, state: _ExtraYState, phases: List[str]) -> None:
@@ -725,6 +886,7 @@ class GraphPanel(QFrame):
         self._pi.scene().addItem(vb)
         vb.setXLink(self._pi.getViewBox())
         axis = pg.AxisItem('right')
+        axis.enableAutoSIPrefix(False)   # 앱이 직접 접두어를 붙이므로 이중 접두어 방지
         axis.linkToView(vb)
         self._pi.layout.addItem(axis, 2, col)
         axis.setLabel(unit)
@@ -788,9 +950,11 @@ class GraphPanel(QFrame):
         self._act_hold.setChecked(held)
         self._act_hold.setText("Resume" if held else "Hold")
         if not held:
-            # Reset SI divisors so the next redraw recomputes the prefix fresh
-            self._x_div, self._x_pfx = 1.0, ""
-            self._y_div, self._y_pfx = 1.0, ""
+            # SI divisor는 여기서 리셋하지 않는다.
+            # 표시 버퍼는 항상 현재 _x_div/_y_div 로 미리 나눠진 값을 담는 불변식을 갖는다.
+            # divisor만 1.0으로 바꾸고 버퍼를 그대로 두면 스케일이 어긋나,
+            # Resume 이후 들어오는 새 점이 0 근처로 찍히는 버그가 생긴다.
+            # prefix 재적응은 redraw()의 auto SI 블록이 rescale로 안전하게 처리한다.
             self._dirty = True
 
     def _on_manual_range_change(self, _axes) -> None:
@@ -930,17 +1094,130 @@ class GraphPanel(QFrame):
             # Anchor text at the top of the fit line inside the region
             self._lr_text.setPos(rmin, float(np.max(y_plot)))
 
+    # Display buffer ----------------------------------------------------------
+
+    def on_new_point(self, phase: str, values: Dict[str, float]) -> None:
+        """새 데이터 포인트 — display buffer에 O(1) 삽입.
+
+        push()가 True를 반환(=화면에 표시할 버퍼가 바뀐 경우)할 때만 _dirty=True.
+        """
+        x_key, y_key = self._x_key, self._y_key
+        if not x_key or not y_key:
+            self._dirty = True
+            return
+
+        if self._disp_buf_keys != (x_key, y_key):
+            self._rebuild_disp_bufs()
+
+        x_raw = values.get(x_key)
+        y_raw = values.get(y_key)
+        if x_raw is None or y_raw is None:
+            return
+
+        max_pts = max(self._pw.width(), 200)
+        x_scaled = x_raw / self._x_div
+
+        # 메인 Y 버퍼
+        buf = self._disp_bufs.get(phase)
+        if buf is None:
+            buf = _DisplayBuf(max_pts)
+            self._disp_bufs[phase] = buf
+        if buf.push(x_scaled, y_raw / self._y_div):
+            self._dirty = True
+
+        # Extra Y 버퍼 (같은 x_scaled 재사용)
+        for state in self._extra_ys:
+            if not state.key:
+                continue
+            ey_raw = values.get(state.key)
+            if ey_raw is None:
+                continue
+            y_div = self._y_div if state.uses_main_vb else state.y_div
+            ey_buf = state.disp_bufs.get(phase)
+            if ey_buf is None:
+                ey_buf = _DisplayBuf(max_pts)
+                state.disp_bufs[phase] = ey_buf
+            if ey_buf.push(x_scaled, ey_raw / y_div):
+                self._dirty = True
+
+    def _backfill_extra_y(self, state: "_ExtraYState") -> None:
+        """Extra Y 한 개를 DataStore의 기존 이력 전체로 채운다 (모든 phase 포함).
+
+        - 데이터는 이미 메모리(DataStore)에 있으므로 .dat 파일 읽기가 전혀 필요 없다.
+        - 측정 루프(on_new_point)가 아니라 '축 변경·Extra Y 추가/변경' 같은
+          사용자 조작 시에만 호출된다 → 측정 주기/측정 시간에 영향 없음.
+        - 비용은 해당 컬럼 1개에 대한 O(N) 1회뿐 (push_bulk = numpy 벡터 연산).
+        """
+        state.disp_bufs.clear()
+        x_key = self._x_key
+        if not x_key or not state.key:
+            return
+        max_pts = max(self._pw.width(), 200)
+        x_div = self._x_div or 1.0
+        # uses_main_vb면 메인 Y와 같은 divisor, 아니면 자기 divisor 사용
+        ey_y_div = self._y_div if state.uses_main_vb else (state.y_div or 1.0)
+        for phase in self._store.phases():
+            xs, ys = self._store.get_xy(x_key, state.key, phase)
+            n = min(len(xs), len(ys))
+            if n == 0:
+                continue
+            ey_buf = _DisplayBuf(max_pts)
+            ey_buf.push_bulk(xs[:n] / x_div, ys[:n] / ey_y_div)
+            state.disp_bufs[phase] = ey_buf
+
+    def _rebuild_disp_bufs(self) -> None:
+        """축 변경 / 세션 재시작 시 DataStore 전체를 읽어 버퍼 재구성.
+        O(N) 이지만 사용자 인터랙션 시에만 호출됨.
+        push_bulk()로 numpy 벡터 연산 사용 → Python 루프 제거.
+        """
+        self._disp_bufs.clear()
+        for state in self._extra_ys:
+            state.disp_bufs.clear()
+
+        x_key, y_key = self._x_key, self._y_key
+        self._disp_buf_keys = (x_key, y_key)
+        if not x_key or not y_key:
+            return
+
+        max_pts = max(self._pw.width(), 200)
+        x_div = self._x_div or 1.0
+        y_div = self._y_div or 1.0
+
+        for phase in self._store.phases():
+            xs, ys = self._store.get_xy(x_key, y_key, phase)
+            if len(xs) == 0:
+                continue
+            buf = _DisplayBuf(max_pts)
+            buf.push_bulk(xs / x_div, ys / y_div)   # numpy 벡터 연산, O(N) 이지만 빠름
+            self._disp_bufs[phase] = buf
+
+        # Extra Y들도 같은 DataStore 이력으로 백필 (각 state별 1회, trace/retrace/dummy 포함)
+        for state in self._extra_ys:
+            self._backfill_extra_y(state)
+
+    def _rescale_disp_bufs(self, x_factor: float, y_factor: float) -> None:
+        """SI prefix 변경 시 메인 Y + Extra Y 버퍼 재스케일. O(max_pts), 드물게 실행."""
+        for buf in self._disp_bufs.values():
+            buf.rescale(x_factor, y_factor)
+        # Extra Y는 X 축이 메인과 동일하므로 x_factor만 적용
+        if x_factor != 1.0:
+            for state in self._extra_ys:
+                for buf in state.disp_bufs.values():
+                    buf.rescale(x_factor, 1.0)
+
     # Redraw ------------------------------------------------------------------
 
     def mark_dirty(self) -> None:
         self._dirty = True
 
     def redraw(self) -> None:
-        # When held: curves are frozen; regression still tracks region drags
-        # (those come directly via sigRegionChanged, no action needed here)
+        """30 fps 렌더링 타이머에서 호출. display buffer 기반 O(1) 렌더링.
+
+        측정 루프(on_new_point)와 렌더링이 완전히 분리되어 있어
+        N이 아무리 커져도 렌더링 비용이 일정(O(max_pts))을 유지한다.
+        """
         if self._held:
             return
-
         if not self._dirty:
             return
         self._dirty = False
@@ -949,92 +1226,72 @@ class GraphPanel(QFrame):
         if not x_key or not y_key:
             return
 
+        # 축이 바뀐 경우 버퍼 재구성 (on_new_point가 호출되지 않아도 즉시 반영)
+        if self._disp_buf_keys != (x_key, y_key):
+            self._x_div, self._x_pfx = 1.0, ""
+            self._y_div, self._y_pfx = 1.0, ""
+            self._rebuild_disp_bufs()
+
         auto = self._cb_auto.isChecked()
 
-        # Collect all phase arrays
-        all_xy = {
-            phase: self._store.get_xy(x_key, y_key, phase)
-            for phase in self._curves
-        }
-
-        # ── SI prefix (only when auto-range is on) ───────────────────────
+        # ── SI prefix 갱신 (auto-range 시) ──────────────────────────────────
+        # col_abs_max()는 append() 시 incremental로 관리 → O(phases) = O(1)
         if auto:
             _, x_unit = self._store.col_meta(x_key)
             _, y_unit = self._store.col_meta(y_key)
-
-            if x_unit:
-                all_x = np.concatenate(
-                    [xs for xs, _ in all_xy.values() if len(xs) > 0] or [np.empty(0)]
-                )
-                x_div, x_pfx = _best_si(all_x)
-            else:
-                x_div, x_pfx = 1.0, ""
-
-            if y_unit:
-                all_y = np.concatenate(
-                    [ys for _, ys in all_xy.values() if len(ys) > 0] or [np.empty(0)]
-                )
-                y_div, y_pfx = _best_si(all_y)
-            else:
-                y_div, y_pfx = 1.0, ""
+            x_div, x_pfx = _best_si(np.array([self._store.col_abs_max(x_key)])) if x_unit else (1.0, "")
+            y_div, y_pfx = _best_si(np.array([self._store.col_abs_max(y_key)])) if y_unit else (1.0, "")
 
             if x_pfx != self._x_pfx or y_pfx != self._y_pfx:
+                # 기존 버퍼를 새 prefix에 맞게 인플레이스 재스케일 — O(max_pts)
+                x_factor = self._x_div / x_div if x_div else 1.0
+                y_factor = self._y_div / y_div if y_div else 1.0
                 self._x_div, self._x_pfx = x_div, x_pfx
                 self._y_div, self._y_pfx = y_div, y_pfx
+                self._rescale_disp_bufs(x_factor, y_factor)
                 self._update_axis_labels(x_pfx, y_pfx)
 
-        # ── Push scaled data to main Y curves ───────────────────────────────
+        # ── 메인 Y 커브: display buffer → setData (O(max_pts) = O(const)) ──
         for phase, curve in self._curves.items():
-            xs, ys = all_xy[phase]
-            if len(xs) > 0 and len(ys) > 0:
-                curve.setData(xs / self._x_div, ys / self._y_div)
+            buf = self._disp_bufs.get(phase)
+            if buf is not None and buf._n > 0:
+                curve.setData(*buf.get())   # buf.get()은 numpy view, 복사 없음
             else:
                 curve.setData([], [])
 
         if auto:
             self._pw.enableAutoRange()
 
-        # ── Extra Y curves ───────────────────────────────────────────────
+        # ── Extra Y 커브 ─────────────────────────────────────────────────────
         for state in self._extra_ys:
             if not state.key:
                 continue
-            all_xy_extra = {
-                phase: self._store.get_xy(x_key, state.key, phase)
-                for phase in state.curves
-            }
+            # separate-scale Extra Y: SI prefix 갱신
             if auto and not state.uses_main_vb:
                 _, ey_unit = self._store.col_meta(state.key)
-                if ey_unit:
-                    all_ey = np.concatenate(
-                        [ys for _, ys in all_xy_extra.values() if len(ys) > 0]
-                        or [np.empty(0)]
-                    )
-                    ey_div, ey_pfx = _best_si(all_ey)
-                else:
-                    ey_div, ey_pfx = 1.0, ""
+                ey_div, ey_pfx = _best_si(np.array([self._store.col_abs_max(state.key)])) if ey_unit else (1.0, "")
                 if ey_pfx != state.y_pfx:
+                    ey_factor = state.y_div / ey_div if ey_div else 1.0
                     state.y_div, state.y_pfx = ey_div, ey_pfx
+                    for buf in state.disp_bufs.values():
+                        buf.rescale(1.0, ey_factor)
                     if state.unit in self._unit_vbs:
                         _, axis, _ = self._unit_vbs[state.unit]
-                        full = f"{ey_pfx}{state.unit}" if ey_pfx else state.unit
-                        axis.setLabel(full)
+                        axis.setLabel(f"{ey_pfx}{state.unit}" if ey_pfx else state.unit)
 
-            # Same-VB extra Ys reuse the main Y's SI divisor (same unit)
-            y_div = self._y_div if state.uses_main_vb else state.y_div
             for phase, curve in state.curves.items():
-                xs, ys = all_xy_extra.get(phase, (np.empty(0), np.empty(0)))
-                if len(xs) > 0 and len(ys) > 0:
-                    curve.setData(xs / self._x_div, ys / y_div)
+                buf = state.disp_bufs.get(phase)
+                if buf is not None and buf._n > 0:
+                    curve.setData(*buf.get())
                 else:
                     curve.setData([], [])
 
-        # Auto-range + geometry sync for right-side ViewBoxes
         if auto:
-            for vb, axis, col in self._unit_vbs.values():
+            for vb, _axis, _col in self._unit_vbs.values():
                 vb.enableAutoRange()
         self._sync_extra_vb_geometry()
 
-        # Regression line tracks new data even when not held
+        # 선형 회귀: 정확도를 위해 DataStore 전체 데이터 사용 (사용자 드래그 시에만 호출)
         if self._regression_active and self._lr_region is not None:
             self._update_regression()
 
@@ -1060,8 +1317,11 @@ class GraphPanel(QFrame):
             for curve in state.curves.values():
                 curve.setData([], [])
             state.y_div, state.y_pfx = 1.0, ""
+            state.disp_bufs.clear()
         self._x_div, self._x_pfx = 1.0, ""
         self._y_div, self._y_pfx = 1.0, ""
+        self._disp_bufs.clear()
+        self._disp_buf_keys = (None, None)
         self._update_axis_labels("", "")
         self._set_held(False)
         self._dirty = False
@@ -1072,12 +1332,14 @@ class GraphPanel(QFrame):
         for item in self._curves.values():
             self._pi.removeItem(item)
         self._curves.clear()
-        # Also reset extra Y curves (remove from their VBs, then recreate empty)
         for state in self._extra_ys:
             self._remove_extra_y_curves(state)
             state.y_div, state.y_pfx = 1.0, ""
+            state.disp_bufs.clear()
         self._x_div, self._x_pfx = 1.0, ""
         self._y_div, self._y_pfx = 1.0, ""
+        self._disp_bufs.clear()
+        self._disp_buf_keys = (None, None)
         self._set_held(False)
         self._dirty = False
 
@@ -1125,69 +1387,77 @@ class MapPanel(QFrame):
         base_row.addWidget(btn_browse)
         root.addLayout(base_row)
 
-        # ── Phase / Date row ─────────────────────────────
+        # ── 컨트롤 영역: 좌(X/Y/Z 넓게, 한 줄씩) | 우(자잘한 컨트롤, 우측 정렬) ──
+        ctrl_area = QHBoxLayout()
+        ctrl_area.setSpacing(12)
+
+        # 좌측 컬럼 — X / Y / Z 축 선택 (각 한 줄, 콤보 넓게)
+        left_col = QFormLayout()
+        left_col.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        left_col.setHorizontalSpacing(8)
+        left_col.setVerticalSpacing(6)
+        left_col.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self._cb_x = QComboBox(); self._cb_x.setFont(_MONO); self._cb_x.setMinimumWidth(220)
+        self._cb_y = QComboBox(); self._cb_y.setFont(_MONO); self._cb_y.setMinimumWidth(220)
+        self._cb_z = QComboBox(); self._cb_z.setFont(_MONO); self._cb_z.setMinimumWidth(220)
+        for cb in (self._cb_x, self._cb_y, self._cb_z):
+            cb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        left_col.addRow("X:", self._cb_x)
+        left_col.addRow("Y:", self._cb_y)
+        left_col.addRow("Z:", self._cb_z)
+        ctrl_area.addLayout(left_col, stretch=1)
+
+        # 우측 컬럼 — phase / Z min·max / Auto Z / Colormap (우측 정렬, 컴팩트)
+        right_col = QVBoxLayout()
+        right_col.setSpacing(4)
+
         phase_row = QHBoxLayout()
+        phase_row.addStretch()
         phase_row.addWidget(QLabel("Phase:"))
         self._cb_phase = QComboBox()
         self._cb_phase.setFont(_MONO)
         self._cb_phase.setMinimumWidth(90)
-        self._cb_phase.currentTextChanged.connect(self._on_phase_changed)
+        # date 콤보 제거: phase만 선택, 모든 date 폴더의 .dat를 한꺼번에 로드
         phase_row.addWidget(self._cb_phase)
-        phase_row.addSpacing(8)
-        phase_row.addWidget(QLabel("Date:"))
-        self._cb_date = QComboBox()
-        self._cb_date.setFont(_MONO)
-        self._cb_date.setMinimumWidth(110)
-        phase_row.addWidget(self._cb_date)
         btn_refresh = QPushButton("↻")
         btn_refresh.setFixedWidth(28)
         btn_refresh.setToolTip("폴더 다시 스캔")
         btn_refresh.clicked.connect(lambda: self._on_base_changed(self._le_base.text()))
         phase_row.addWidget(btn_refresh)
-        phase_row.addStretch()
-        root.addLayout(phase_row)
+        right_col.addLayout(phase_row)
 
-        # ── Column selectors ────────────────────────────
-        col_row = QHBoxLayout()
-        col_row.addWidget(QLabel("X:"))
-        self._cb_x = QComboBox(); self._cb_x.setFont(_MONO); self._cb_x.setMinimumWidth(100)
-        col_row.addWidget(self._cb_x)
-        col_row.addSpacing(8)
-        col_row.addWidget(QLabel("Y:"))
-        self._cb_y = QComboBox(); self._cb_y.setFont(_MONO); self._cb_y.setMinimumWidth(100)
-        col_row.addWidget(self._cb_y)
-        col_row.addSpacing(8)
-        col_row.addWidget(QLabel("Z:"))
-        self._cb_z = QComboBox(); self._cb_z.setFont(_MONO); self._cb_z.setMinimumWidth(100)
-        col_row.addWidget(self._cb_z)
-        col_row.addStretch()
-        root.addLayout(col_row)
-
-        # ── Range / colormap controls ────────────────────
-        ctrl_row = QHBoxLayout()
-
-        ctrl_row.addWidget(QLabel("Z min:"))
+        z_row = QHBoxLayout()
+        z_row.addStretch()
+        z_row.addWidget(QLabel("Z min:"))
         self._le_zmin = QLineEdit(); self._le_zmin.setFont(_MONO); self._le_zmin.setFixedWidth(72)
-        ctrl_row.addWidget(self._le_zmin)
-        ctrl_row.addWidget(QLabel("max:"))
+        z_row.addWidget(self._le_zmin)
+        z_row.addWidget(QLabel("max:"))
         self._le_zmax = QLineEdit(); self._le_zmax.setFont(_MONO); self._le_zmax.setFixedWidth(72)
-        ctrl_row.addWidget(self._le_zmax)
+        z_row.addWidget(self._le_zmax)
         self._cb_auto_z = QCheckBox("Auto Z")
         self._cb_auto_z.setFont(_MONO)
         self._cb_auto_z.setChecked(True)
+        self._cb_auto_z.setToolTip("자동 범위: 2~98 퍼센타일 (이상치에 강건). 끄면 아래 min/max 수동 사용.")
         self._cb_auto_z.stateChanged.connect(self._on_auto_z_changed)
-        ctrl_row.addWidget(self._cb_auto_z)
+        z_row.addWidget(self._cb_auto_z)
+        self._cb_sym_z = QCheckBox("Sym")
+        self._cb_sym_z.setFont(_MONO)
+        self._cb_sym_z.setToolTip("0 중심 대칭 범위 (±max). 파랑-흰색-빨강 diverging colormap에 적합.")
+        z_row.addWidget(self._cb_sym_z)
+        right_col.addLayout(z_row)
 
-        ctrl_row.addSpacing(12)
-        ctrl_row.addWidget(QLabel("Colormap:"))
+        cmap_row = QHBoxLayout()
+        cmap_row.addStretch()
+        cmap_row.addWidget(QLabel("Colormap:"))
         self._cb_cmap = QComboBox()
         self._cb_cmap.setFont(_MONO)
         for name in _CMAP_NAMES:
             self._cb_cmap.addItem(name)
-        ctrl_row.addWidget(self._cb_cmap)
+        cmap_row.addWidget(self._cb_cmap)
+        right_col.addLayout(cmap_row)
 
-        ctrl_row.addStretch()
-        root.addLayout(ctrl_row)
+        ctrl_area.addLayout(right_col)
+        root.addLayout(ctrl_area)
 
         # ── Action row ──────────────────────────────────
         act_row = QHBoxLayout()
@@ -1233,6 +1503,7 @@ class MapPanel(QFrame):
         manual = not self._cb_auto_z.isChecked()
         self._le_zmin.setEnabled(manual)
         self._le_zmax.setEnabled(manual)
+        self._cb_sym_z.setEnabled(not manual)   # Sym은 Auto Z일 때만 의미 있음
 
     def _browse_base(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -1249,6 +1520,7 @@ class MapPanel(QFrame):
     def _on_base_changed(self, text: str) -> None:
         """Base 폴더가 바뀌면 phase 콤보박스를 재스캔."""
         base = Path(text.strip()) if text.strip() else None
+        prev_phase = self._cb_phase.currentText()
         self._cb_phase.blockSignals(True)
         self._cb_phase.clear()
         if base and base.is_dir():
@@ -1257,39 +1529,18 @@ class MapPanel(QFrame):
                     self._cb_phase.addItem(name)
         if self._cb_phase.count() == 0:
             self._cb_phase.addItem("(없음)")
-        self._cb_phase.blockSignals(False)
-        self._on_phase_changed(self._cb_phase.currentText())
-
-    def _on_phase_changed(self, phase: str) -> None:
-        """Phase 콤보박스가 바뀌면 date 서브폴더를 재스캔."""
-        base = Path(self._le_base.text().strip())
-        phase_dir = base / phase if base and base.is_dir() else None
-        self._cb_date.blockSignals(True)
-        prev_date = self._cb_date.currentText()
-        self._cb_date.clear()
-        if phase_dir and phase_dir.is_dir():
-            date_dirs = sorted(
-                [d.name for d in phase_dir.iterdir() if d.is_dir()],
-                reverse=True,   # 최신 날짜 먼저
-            )
-            for d in date_dirs:
-                self._cb_date.addItem(d)
-        if self._cb_date.count() == 0:
-            self._cb_date.addItem("(없음)")
-        # Restore previous selection if still available
-        idx = self._cb_date.findText(prev_date)
+        idx = self._cb_phase.findText(prev_phase)
         if idx >= 0:
-            self._cb_date.setCurrentIndex(idx)
-        self._cb_date.blockSignals(False)
+            self._cb_phase.setCurrentIndex(idx)
+        self._cb_phase.blockSignals(False)
 
     def _get_target_folder(self) -> str:
-        """현재 선택된 base/phase/date로부터 실제 .dat 폴더 경로 반환."""
+        """현재 선택된 base/phase 폴더 반환. 로더가 하위 모든 date 폴더를 재귀 스캔한다."""
         base = self._le_base.text().strip()
         phase = self._cb_phase.currentText()
-        date = self._cb_date.currentText()
-        if not base or phase.startswith("(") or date.startswith("("):
+        if not base or phase.startswith("("):
             return ""
-        return str(Path(base) / phase / date)
+        return str(Path(base) / phase)
 
     def _update_column_combos(self, col_names: List[str]) -> None:
         if col_names == self._col_names:
@@ -1418,8 +1669,20 @@ class MapPanel(QFrame):
             return
 
         # Z range
+        auto_label = ""
         if self._cb_auto_z.isChecked():
-            z_min, z_max = float(finite.min()), float(finite.max())
+            # robust auto-scale: 2~98 퍼센타일로 이상치 영향 제거 (min/max보다 강건).
+            # Symmetric 옵션이 켜져 있고 diverging 계열 colormap이면 0 중심 대칭 범위.
+            lo, hi = np.percentile(finite, [2.0, 98.0])
+            z_min, z_max = float(lo), float(hi)
+            if z_min == z_max:   # 퍼센타일이 같으면 전체 min/max로 후퇴
+                z_min, z_max = float(finite.min()), float(finite.max())
+            if self._cb_sym_z.isChecked():
+                m = max(abs(z_min), abs(z_max))
+                z_min, z_max = -m, m
+                auto_label = " (sym)"
+            else:
+                auto_label = " (p2–98)"
         else:
             try:
                 z_min = float(self._le_zmin.text())
@@ -1469,7 +1732,7 @@ class MapPanel(QFrame):
         self._cbar.setLabel("right", z_col)
 
         self._lbl_status.setText(
-            f"{n_y} 파일 × {n_x} 포인트 | Z [{z_min:.4g}, {z_max:.4g}]"
+            f"{n_y} 파일 × {n_x} 포인트 | Z [{z_min:.4g}, {z_max:.4g}]{auto_label}"
         )
 
     # ── Save image ────────────────────────────────────────
@@ -1513,6 +1776,10 @@ class GraphWindow(QWidget):
     Rendering is decoupled from measurement rate via a 30-fps QTimer.
     """
 
+    # 렌더 모드 상수
+    MODE_SYNC = "sync"   # 측정마다 즉시 렌더 — 완전 동기화 (slow)
+    MODE_FAST = "fast"   # 5 fps 독립 타이머 — 측정 지연 없음 (fast)
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("Graph")
@@ -1520,14 +1787,14 @@ class GraphWindow(QWidget):
 
         self._store = DataStore()
         self._panels: List[GraphPanel] = []
+        self._render_mode: str = self.MODE_FAST   # 기본: Fast
 
         self._build_ui()
         self._add_panel()   # Start with one panel by default
 
         self._redraw_timer = QTimer(self)
-        self._redraw_timer.setInterval(33)      # ~30 fps
         self._redraw_timer.timeout.connect(self._redraw_all)
-        self._redraw_timer.start()
+        self._apply_render_mode(self._render_mode)
 
     # UI ----------------------------------------------------------------------
 
@@ -1555,6 +1822,20 @@ class GraphWindow(QWidget):
         self._btn_map.setToolTip("오른쪽 패널을 2D colour-map 모드로 전환")
         self._btn_map.toggled.connect(self._toggle_map)
         bar.addWidget(self._btn_map)
+        bar.addSpacing(16)
+
+        # ── Render mode toggle ────────────────────────────
+        self._btn_render_mode = QPushButton()
+        self._btn_render_mode.setCheckable(True)
+        self._btn_render_mode.setFixedWidth(90)
+        self._btn_render_mode.setToolTip(
+            "Sync: 측정 포인트마다 즉시 렌더 (그래프·측정 완전 동기화)\n"
+            "Fast: 5 fps 독립 렌더 타이머 — 측정 타이밍 우선"
+        )
+        self._btn_render_mode.toggled.connect(self._on_render_mode_toggled)
+        bar.addWidget(self._btn_render_mode)
+        self._update_render_mode_btn()   # 버튼 라벨 초기화
+
         bar.addStretch()
         bar.addWidget(btn_save_img)
         root.addLayout(bar)
@@ -1608,12 +1889,19 @@ class GraphWindow(QWidget):
     # Data entry point --------------------------------------------------------
 
     def append_point(self, point: GraphDataPoint) -> None:
-        """Append one measurement step.  Must be called from the GUI thread."""
+        """Append one measurement step.  Must be called from the GUI thread.
+
+        Sync mode: 이 호출 내에서 즉시 렌더 (측정 ↔ 그래프 완전 동기화).
+        Fast mode: on_new_point()로 버퍼만 갱신, 렌더는 독립 타이머가 담당.
+        """
         phase = point.phase or "_"
         self._store.append(point)
         for panel in self._panels:
-            panel.ensure_phases([phase])   # idempotent: no-op if curve exists
-            panel.mark_dirty()
+            panel.ensure_phases([phase])
+            panel.on_new_point(phase, point.values)
+
+        if self._render_mode == self.MODE_SYNC:
+            self._redraw_all()   # 즉시 렌더 — 측정 흐름과 동기
 
     def update_map_base(self, base_folder: str) -> None:
         """Double Sweep 시작 시 2D Map 패널의 base 폴더 자동 설정."""
@@ -1652,6 +1940,42 @@ class GraphWindow(QWidget):
             self._splitter.setSizes([w * 55 // 100, w * 45 // 100])
         else:
             self._splitter.setSizes([self.width(), 0])
+
+    # Render mode -------------------------------------------------------------
+
+    def _apply_render_mode(self, mode: str) -> None:
+        """타이머를 모드에 맞게 설정."""
+        self._redraw_timer.stop()
+        if mode == self.MODE_SYNC:
+            # 타이머 없음: append_point() 호출마다 inline 렌더
+            pass
+        else:  # MODE_FAST
+            # 5 fps 독립 렌더 타이머: 측정 루프와 완전 비동기
+            self._redraw_timer.setInterval(200)
+            self._redraw_timer.start()
+
+    def _on_render_mode_toggled(self, sync_active: bool) -> None:
+        self._render_mode = self.MODE_SYNC if sync_active else self.MODE_FAST
+        self._apply_render_mode(self._render_mode)
+        self._update_render_mode_btn()
+
+    def _update_render_mode_btn(self) -> None:
+        sync = (self._render_mode == self.MODE_SYNC)
+        self._btn_render_mode.blockSignals(True)
+        self._btn_render_mode.setChecked(sync)
+        self._btn_render_mode.blockSignals(False)
+        if sync:
+            self._btn_render_mode.setText("🔄 Sync")
+            self._btn_render_mode.setStyleSheet(
+                "QPushButton { background-color: #1a3a1a; color: #4ec9b0; "
+                "border: 1px solid #4ec9b0; border-radius: 3px; font-weight: bold; }"
+            )
+        else:
+            self._btn_render_mode.setText("⚡ Fast")
+            self._btn_render_mode.setStyleSheet(
+                "QPushButton { background-color: #1a1a3a; color: #79c0ff; "
+                "border: 1px solid #79c0ff; border-radius: 3px; font-weight: bold; }"
+            )
 
     # Redraw ------------------------------------------------------------------
 

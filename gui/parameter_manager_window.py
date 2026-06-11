@@ -62,6 +62,43 @@ class AddEntryDialog(QDialog):
     section_type: 'sweep' | 'measurement' | 'write' | 'second'
     """
 
+    @staticmethod
+    def _advance_help_html() -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>Advance Type — 2차 축(자기장 등)을 '어떻게' 옮길지</b><hr>"
+            "Double Sweep에서 2차 축 값을 다음 칸으로 옮기는 방식입니다. "
+            "값의 성질(즉시 적용되는지, 도달에 시간이 걸리는지)에 맞게 고르세요.<hr>"
+
+            "<b>Simple Hop — 즉시 한 번에</b><br>"
+            "값을 그냥 한 번 보내고 바로 다음 단계로 갑니다. 가장 단순.<br>"
+            "&nbsp;&nbsp;적합: 게이트 전압처럼 <b>보내면 바로 적용</b>되는 값.<hr>"
+
+            "<b>Sweep — 정해진 속도로 천천히</b><br>"
+            "목표값까지 일정 속도(rate)로 조금씩 이동합니다(이동 중 측정은 안 함). "
+            "급격한 변화로 인한 충격·스파이크를 피합니다.<br>"
+            "&nbsp;&nbsp;설정: Sweep Rate, (선택) Safety 단계.<br>"
+            "&nbsp;&nbsp;적합: 큰 전압 변화 등 <b>천천히 바꿔야 하는</b> 값.<hr>"
+
+            "<b>Feedback — 도달·안정될 때까지 기다림</b><br>"
+            "값을 보낸 뒤, 실제 값을 반복해 읽어 <b>목표에 도달하고 출렁임이 잦아들 때까지</b> "
+            "기다린 뒤 다음으로 갑니다.<br>"
+            "&nbsp;&nbsp;설정: 실제값을 읽는 명령(Feedback Read Cmd), 읽는 간격(Poll), "
+            "도달 판정 기준(Tolerance %), (선택) 안정 판정.<br>"
+            "&nbsp;&nbsp;적합: <b>자기장</b>처럼 명령을 줘도 실제 도달까지 시간이 걸리고 흔들리는 값.<br>"
+            "&nbsp;&nbsp;※ Tolerance·안정 판정 세부값 권장치는 Double Sweep 창의 FEEDBACK 설정 "
+            "도움말(?)에 있습니다.<hr>"
+
+            "<b>Wait for Time — 정해진 시간만큼 기다림</b><br>"
+            "값을 보낸 뒤 입력한 시간(초)만큼 무조건 기다린 다음 진행합니다.<br>"
+            "&nbsp;&nbsp;적합: 안정에 걸리는 시간이 <b>대략 일정</b>해서 시간만 정해두면 되는 경우. "
+            "Feedback보다 설정이 간단합니다.<hr>"
+
+            "<small>요약: 즉시 적용=Simple Hop, 천천히=Sweep, 도달 확인 필요=Feedback, "
+            "시간만 기다림=Wait for Time</small>"
+            "</body></html>"
+        )
+
     def __init__(
         self,
         lib_registry: VisaLibraryRegistry,
@@ -245,7 +282,13 @@ class AddEntryDialog(QDialog):
         self._combo_advance = QComboBox()
         for at, lbl in _ADVANCE_LABELS.items():
             self._combo_advance.addItem(lbl, at)
-        adv_form.addRow("Advance Type:", self._combo_advance)
+        from gui.help_button import make_help_button
+        _adv_row = QHBoxLayout()
+        _adv_row.setContentsMargins(0, 0, 0, 0)
+        _adv_row.addWidget(self._combo_advance, stretch=1)
+        _adv_row.addWidget(make_help_button(self._advance_help_html(), "Advance Type 도움말"))
+        _adv_cnt = QWidget(); _adv_cnt.setLayout(_adv_row)
+        adv_form.addRow("Advance Type:", _adv_cnt)
         second_layout.addLayout(adv_form)
 
         # FEEDBACK fields
@@ -1210,10 +1253,76 @@ class ParameterManagerWindow(QDialog):
     # UI
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _help_html() -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>Parameter Manager — 측정에 쓸 항목 고르기</b><hr>"
+            "<b>VISA Library</b>에 적어둔 명령들 중에서, 이번 실험에 실제로 쓸 것들을 "
+            "골라 '빈칸을 채워' 현재 프로파일에 등록하는 곳입니다.<br>"
+            "여기서 등록한 항목들이 Main 화면·Double Sweep·메타데이터·알람에서 고를 수 있는 "
+            "목록이 됩니다.<hr>"
+
+            "<b>■ 전체 흐름 (3단계)</b><br>"
+            "&nbsp;1) <b>VISA Library</b>: 장비에 보낼 명령을 '틀'로 적어둠 (빈칸 <code>{이름}</code> 포함 가능)<br>"
+            "&nbsp;2) <b>Parameter Manager</b>(여기): 그 틀을 골라 빈칸을 실제 값으로 채워 등록<br>"
+            "&nbsp;3) <b>Main 화면 / Double Sweep</b>: 등록된 항목을 체크해 실제 측정·sweep 실행<hr>"
+
+            "<b>■ 여기서 등록하는 항목들 (좌측)</b><br>"
+            "<table cellspacing='3' cellpadding='2'>"
+            "<tr valign='top'><td><b>Sweep&nbsp;Values</b><br>(바꾸며 측정<br>하는 축)</td>"
+            "<td>측정하면서 <b>쓸어가며 바꿀 값</b>(가로축). 예: 전압을 0→1V로.<br>"
+            "값을 바꾸는 명령의 빈칸 하나를 <b>[SWEEP]</b>로 지정하면, 거기에 단계별 값이 들어갑니다.<br>"
+            "<b>확인 읽기</b>: 값을 내보낸 뒤 실제 도달한 값을 다시 읽어 확인.<br>"
+            "<b>Safety</b>: 값을 급히 바꾸지 않도록 잘게 나눠 보내는 안전 기능.<br>"
+            "<i>역할: 측정의 가로축. Main 화면에서 어느 값을 쓸어갈지 고릅니다.</i></td></tr>"
+            "<tr valign='top'><td><b>Measurements</b><br>(읽는 값)</td>"
+            "<td>매 단계 <b>읽어올 값</b>(전류·전압·자기장·온도 등). 빈칸이 모두 채워진 완성된 명령입니다.<br>"
+            "<i>역할: 가로축 값을 바꾼 뒤 읽는 값들. Main 화면의 Active Measurements 후보가 됩니다.</i></td></tr>"
+            "<tr valign='top'><td><b>Second&nbsp;Sweep<br>Channels</b><br>(2차 축)</td>"
+            "<td>Double Sweep에서 쓰는 <b>두 번째 축</b>(예: 자기장·게이트 전압).<br>"
+            "값을 옮기는 방식(advance type)을 4가지 중 고릅니다 — 자세한 설명은 Double Sweep 창의 도움말 참고.<br>"
+            "<i>역할: 2차 축 값을 한 칸 옮긴 뒤, 그 자리에서 1차 축 sweep을 수행 (지도처럼 2차원 측정).</i></td></tr>"
+            "</table>"
+            "<small>※ VISA Library의 <b>설정 명령</b>(켜기/끄기 등 준비용)은 측정 반복에 자동으로 들어가지 "
+            "않으므로 여기 sweep·측정으로 등록하지 않습니다.</small><br>"
+
+            "<b>■ 우측 항목</b><br>"
+            "&nbsp;• <b>Alarm Measurements</b>: Double Sweep 알람의 '측정값 조건'에서 고를 수 있는 측정 목록.<br>"
+            "&nbsp;• <b>Meta Data Measurements</b>: 측정이 끝날 때 요약(.json)으로 저장할 후보 측정. "
+            "여기 등록한 뒤 <b>Meta Data Config</b> 창에서 체크하면 저장됩니다.<hr>"
+
+            "<b>■ 각 칸의 뜻</b><br>"
+            "&nbsp;• <b>Alias</b>: 어느 장비로 보낼지 (장비 이름).<br>"
+            "&nbsp;• <b>Description</b>: 알아보기 쉬운 이름 (목록·체크박스에 이 이름으로 보임).<br>"
+            "&nbsp;• <b>Figure Axis</b>: 그래프 축·데이터 열에 표시될 이름.<br>"
+            "&nbsp;• <b>Unit</b>: 단위(V/A/Ω/T …) — 그래프 눈금·파일 머리글에 사용.<br>"
+            "&nbsp;• <b>[SWEEP]</b>: Sweep Value에서 '쓸어갈 값'으로 쓸 빈칸 하나에만 표시.<hr>"
+
+            "<b>■ 사용 팁</b><br>"
+            "&nbsp;• 각 항목은 Add/Edit/Delete/Copy/▲▼ 버튼으로 추가·수정·정렬.<br>"
+            "&nbsp;• 같은 명령을 채널만 바꿔 여러 개 쓸 땐 Copy한 뒤 빈칸 값만 고치면 됩니다.<br>"
+            "&nbsp;• <b>Apply</b>: 프로파일에 저장하고 Main 화면을 새로 구성합니다. "
+            "메타데이터 체크 상태는 그대로 유지됩니다.<br>"
+            "&nbsp;• 명령의 글자(틀)는 여기가 아니라 <b>VISA Library</b>에서 만듭니다."
+            "</body></html>"
+        )
+
     def _build_ui(self):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(8)
+
+        # ── 상단 제목 + 도움말 ──
+        from gui.help_button import make_help_button
+        from PySide6.QtWidgets import QHBoxLayout as _QHBox, QLabel as _QLabel
+        hdr = _QHBox()
+        _title = _QLabel("Parameter Manager")
+        _title.setStyleSheet("font-weight: bold; font-size: 13px; color: #d2a8ff;")
+        hdr.addWidget(_title)
+        hdr.addStretch()
+        hdr.addWidget(make_help_button(self._help_html(), "Parameter Manager 도움말"))
+        outer.addLayout(hdr)
 
         # ── Horizontal splitter: 좌측(섹션 패널) / 우측(알람+메타데이터) ──
         splitter = QSplitter(Qt.Orientation.Horizontal)

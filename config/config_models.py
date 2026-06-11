@@ -299,6 +299,15 @@ class DoubleSweepConfig(BaseModel):
     second_use_safety: bool = False
     second_safety_steps: int = 0
     second_safety_interval_ms: float = 0.0
+    # FEEDBACK-type second channel params (adjustable in DoubleSweepWindow)
+    second_feedback_read_cmd: str = ""
+    second_feedback_poll_interval: float = 1.0
+    second_feedback_tolerance_pct: float = 95.0
+    second_feedback_std_window: int = 0
+    second_feedback_noisefloor: float = 0.0
+    second_feedback_std_threshold: float = 0.01
+    # WAIT_FOR_TIME-type second channel params (adjustable in DoubleSweepWindow)
+    second_wait_time: float = 1.0
     # Alarm
     alarm: AlarmConfig = Field(default_factory=AlarmConfig)
 

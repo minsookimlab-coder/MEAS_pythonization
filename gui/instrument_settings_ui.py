@@ -61,7 +61,13 @@ class InstrumentSettingsUI(QMainWindow):
         self.instrument_list = QListWidget()
         self.instrument_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.instrument_list.itemDoubleClicked.connect(self._on_item_double_clicked)
-        left_layout.addWidget(QLabel("Instruments:"))
+        from gui.help_button import make_help_button
+        list_hdr = QHBoxLayout()
+        list_hdr.setSpacing(6)
+        list_hdr.addWidget(QLabel("Instruments:"))
+        list_hdr.addWidget(make_help_button(self._settings_help_html(), "Instrument Settings 도움말"))
+        list_hdr.addStretch()
+        left_layout.addLayout(list_hdr)
         left_layout.addWidget(self.instrument_list)
         
         btn_layout = QHBoxLayout()
@@ -178,6 +184,49 @@ class InstrumentSettingsUI(QMainWindow):
         splitter.addWidget(right_panel)
         splitter.setSizes([250, 550])
         
+    @staticmethod
+    def _settings_help_html() -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>Instrument Settings — 측정 장비 등록·연결 설정</b><hr>"
+            "여기서 각 장비의 <b>연결 방법</b>을 등록합니다. 왼쪽 목록에서 장비를 "
+            "<b>더블클릭</b>하면 오른쪽에서 내용을 고칠 수 있고, 드래그로 순서를 바꿀 수 있습니다.<hr>"
+            "<b>입력 항목</b><br>"
+            "&nbsp;&nbsp;• <b>Alias</b>: 장비에 붙이는 <b>별명</b>입니다. 측정·파라미터 설정에서 "
+            "이 별명으로 장비를 부르므로, 알아보기 쉬운 이름으로 정하세요. (예: <code>K2636</code>)<br>"
+            "&nbsp;&nbsp;• <b>Device Type (Driver)</b>: 장비 종류(드라이버)를 고릅니다. 목록은 "
+            "프로그램이 자동으로 찾아 채웁니다.<br>"
+            "&nbsp;&nbsp;• <b>Interface Type</b>: 연결 방식 — <b>LAN</b>(랜선/IP), "
+            "<b>GPIB</b>, <b>RS232</b>(시리얼), <b>USB</b>.<br>"
+            "&nbsp;&nbsp;• <b>Address (IP)</b>: 연결 주소. LAN이면 IP(예: <code>192.168.0.2</code>), "
+            "GPIB면 숫자(예: <code>10</code>), RS232면 포트 이름(예: <code>COM3</code>).<br>"
+            "&nbsp;&nbsp;• <b>Port</b>: LAN에서 소켓 통신을 쓸 때만 입력합니다. 보통은 비워둡니다(None).<br>"
+            "&nbsp;&nbsp;• <b>Real Resource (VISA)</b>: 위 값으로 만들어지는 <b>실제 연결 문자열</b> "
+            "미리보기입니다. 직접 고치는 칸이 아니라 결과 확인용입니다.<hr>"
+            "<b>MAC Address &amp; Fetch MAC — IP가 바뀌어도 따라가기</b><br>"
+            "공유기(DHCP)를 쓰면 장비의 IP가 가끔 바뀝니다. 장비의 <b>MAC 주소</b>는 바뀌지 않으므로, "
+            "이걸 저장해 두면 IP가 달라져도 장비를 다시 찾아낼 수 있습니다.<br>"
+            "&nbsp;&nbsp;• <b>Fetch MAC</b> 버튼: 지금 입력한 IP로 연결된 장비의 MAC 주소를 자동으로 "
+            "찾아 채워 저장합니다. (장비가 켜져 있고 같은 네트워크에 있어야 합니다.)<br>"
+            "&nbsp;&nbsp;• 한번 MAC을 저장해두면, 연결할 때마다 그 MAC으로 <b>현재 IP를 자동 추적</b>합니다.<br>"
+            "&nbsp;&nbsp;• <b>(자동 복구)</b> 측정 중 <b>통신 오류</b>가 났는데 IP가 바뀐 정황이면, "
+            "저장된 MAC으로 <b>새 IP를 다시 찾아</b> 확인되면 <b>저장된 IP를 자동으로 바꾼 뒤 다시 연결</b>합니다. "
+            "IP 변경이 없으면 평소처럼 오류로 처리합니다.<hr>"
+            "<b>Dynamic Variables (extra_params)</b><br>"
+            "드라이버에 추가로 넘기는 <b>옵션</b>입니다. Key/Value 한 쌍씩 추가합니다. "
+            "(예: 시리얼 속도 <code>baud_rate</code>=<code>9600</code>, 또는 세미콜론 분리 옵션 등) "
+            "필요 없으면 비워두면 됩니다.<hr>"
+            "<b>아래 버튼</b><br>"
+            "&nbsp;&nbsp;• <b>Test Connection</b>: 지금 설정으로 실제 연결해 보고 장비 응답(*IDN? 등)을 "
+            "보여줍니다. 저장 전에 잘 되는지 확인할 때 씁니다. 실패하면 <b>원인을 쉬운 말로</b> 알려줍니다.<br>"
+            "&nbsp;&nbsp;• <b>Save &amp; Apply</b>: 설정을 파일에 저장합니다. (목록을 더블클릭해 옮겨다닐 때도 "
+            "자동 저장됩니다.)<hr>"
+            "<b>참고</b><br>"
+            "• 입력은 <code>instruments.yaml</code>에 저장되어 다음 실행 때 그대로 복원됩니다.<br>"
+            "• 장비 종류별로 어떤 명령을 쓰는지는 <b>VISA Library</b>·<b>Parameter Manager</b>에서 다룹니다."
+            "</body></html>"
+        )
+
     def _discover_drivers(self) -> Dict[str, str]:
         """
         [장비 드라이버 자동 검색 함수]
@@ -634,8 +683,9 @@ class InstrumentSettingsUI(QMainWindow):
             )
                 
         except Exception as e:
-            QMessageBox.critical(
-                self, 
-                "Test Failed", 
-                f"Failed to connect or query '{current_alias}':\n\n{str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-            )
+            from core.visa_errors import format_error
+            # 긴 traceback 대신 사람이 읽을 한국어 원인 + 한 줄 상세
+            msg = format_error(e, context=f"'{current_alias}' 연결/조회 실패:")
+            QMessageBox.critical(self, "Test Failed", msg)
+            # 개발자용 traceback은 콘솔에만 남김 (창에는 표시하지 않음)
+            print(f"[Test] {current_alias} 실패:\n{traceback.format_exc()}")

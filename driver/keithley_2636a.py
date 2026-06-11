@@ -114,3 +114,23 @@ class Keithley2636A(BaseInstrument):
     def test_connection(self) -> str:
         """2636A는 *IDN?를 지원합니다."""
         return self.query("*IDN?")
+
+    def drain_error_queue(self) -> list[tuple[int, str]]:
+        """에러 큐를 전부 읽고 비웁니다. (code, msg) 리스트 반환."""
+        errors = []
+        while True:
+            count = int(float(self.query("print(errorqueue.count)").strip()))
+            if count == 0:
+                break
+            raw = self.query(
+                'do local c,m,s,n = errorqueue.next()'
+                ' print(tostring(c) .. "\\t" .. tostring(m)) end'
+            ).strip()
+            parts = raw.split("\t", 1)
+            try:
+                code = int(float(parts[0]))
+                msg = parts[1] if len(parts) > 1 else ""
+                errors.append((code, msg))
+            except (ValueError, IndexError):
+                break
+        return errors

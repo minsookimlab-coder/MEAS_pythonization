@@ -483,10 +483,60 @@ class VnaConfigWindow(QDialog):
     # UI
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _help_html() -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>VNA Config — 측정 순서와 명령 정하기</b><hr>"
+            "VNA Control이 '한 번 측정(acquire)'할 때 어떤 명령을 어떤 순서로 보낼지 여기서 정합니다.<hr>"
+
+            "<b>■ Sections 탭 (자유 실행 묶음)</b><br>"
+            "버튼 한 번에 실행할 명령 묶음을 만들어 둡니다. 측정 전 장비 준비(초기화·설정 등)나 "
+            "수동 조작에 씁니다. 여러 묶음을 만들어 필요할 때 각각 실행할 수 있습니다.<hr>"
+
+            "<b>■ Acquire 탭 (한 번 측정의 4단계)</b><br>"
+            "한 번 측정할 때 아래 순서대로 명령이 실행됩니다:<br>"
+            "<table cellspacing='3' cellpadding='2'>"
+            "<tr valign='top'><td><b>Sweep</b></td>"
+            "<td>측정 전 보낼 설정값(예: 시작/끝 주파수). Sweep Acquire에서는 여기에 "
+            "단계별 값이 들어갑니다.</td></tr>"
+            "<tr valign='top'><td><b>Start</b></td>"
+            "<td>측정을 <b>시작</b>시키는 명령 (트리거).</td></tr>"
+            "<tr valign='top'><td><b>Wait (OPC)</b></td>"
+            "<td>측정이 <b>끝날 때까지 기다리는</b> 명령. 장비에 '다 끝났니?'를 반복해 묻고, "
+            "끝났다는 응답이 올 때까지 다음으로 넘어가지 않습니다.<br>"
+            "이게 없으면 측정이 끝나기 전에 값을 읽어 엉뚱한 결과가 나올 수 있습니다.</td></tr>"
+            "<tr valign='top'><td><b>Read</b></td>"
+            "<td>결과(곡선 S11·S21 등)를 <b>읽어 오는</b> 명령. 자기장·온도 같은 "
+            "한 개짜리 값도 함께 넣을 수 있고, 그 값은 곡선 길이에 맞춰 자동으로 채워집니다.<br>"
+            "<b>Stride</b>: 점이 너무 많을 때 몇 개에 하나씩만 추리는 간격(1=전부).</td></tr>"
+            "</table>"
+
+            "<b>■ 각 명령 칸</b><br>"
+            "&nbsp;• <b>Alias</b>: 어느 장비로 보낼지.<br>"
+            "&nbsp;• <b>VISA Command</b>: 장비에 보낼 명령 글자.<br>"
+            "&nbsp;• <b>Figure Axis / Unit</b>: 그래프·파일에 쓸 이름과 단위.<hr>"
+
+            "<b>■ 참고</b><br>"
+            "&nbsp;• 명령은 미리 <b>VISA Library</b>에 등록한 것 중에서 고릅니다.<br>"
+            "&nbsp;• <b>Save &amp; Apply</b>로 저장하면 VNA Control에 바로 반영됩니다.<br>"
+            "&nbsp;• 그래프에 무엇을 그릴지는 VNA Control 창에서 고릅니다."
+            "</body></html>"
+        )
+
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
+
+        from gui.help_button import make_help_button
+        hdr = QHBoxLayout()
+        _t = QLabel("VNA Config")
+        _t.setStyleSheet("font-weight: bold; font-size: 13px; color: #79c0ff;")
+        hdr.addWidget(_t)
+        hdr.addStretch()
+        hdr.addWidget(make_help_button(self._help_html(), "VNA Config 도움말"))
+        root.addLayout(hdr)
 
         self._tabs = QTabWidget()
         self._tabs.addTab(self._build_sections_tab(), "Sections")

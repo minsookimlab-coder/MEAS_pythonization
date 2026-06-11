@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from config.config_models import MetaDataConfig, MeasType, InstantiatedMeasurement
+from core.instrument_parameter import _parse_float
 
 _TSP_PRINT_RE = re.compile(r"^\s*print\((.+)\)\s*$", re.DOTALL)
 
@@ -83,17 +84,33 @@ class MetaDataManager:
     # Save
     # ------------------------------------------------------------------
 
-    def save(self, cfg: MetaDataConfig, dat_filepath: Optional[Path]) -> None:
+    def save(self, cfg: MetaDataConfig, dat_filepath: Optional[Path],
+             extra: Optional[dict] = None) -> None:
         """
         메타 데이터 JSON 파일을 저장합니다.
         dat_filepath: .dat 파일 경로 (확장자를 .json으로 교체).
-                      None이거나 cfg.enabled=False이면 저장하지 않습니다.
+                      None이면 저장하지 않습니다.
+        extra: 측정에 사용된 추가 설정(예: second channel advance 파라미터)을
+               담은 딕셔너리. 제공되면 metadata config 활성화 여부와 무관하게
+               JSON에 병합 저장합니다.
+
+        cfg.enabled=False 이고 extra도 없으면 저장하지 않습니다.
+        cfg.enabled=False 이지만 extra가 있으면 extra + timestamp만 저장합니다.
         """
-        if not cfg.enabled or dat_filepath is None:
+        if dat_filepath is None:
+            return
+        if not cfg.enabled and not extra:
             return
 
         json_path = Path(dat_filepath).with_suffix(".json")
         data: dict = {"timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")}
+
+        if not cfg.enabled:
+            # metadata config는 꺼져 있지만 추가 설정만 기록
+            if extra:
+                data.update(extra)
+            self._write_json(json_path, data)
+            return
 
         # T/B 조건 3개 모두 만족하는 description 집합
         # (active 체크는 configure()에서 이미 필터됨 — _tb_buffer에 있으면 조건1 만족)
@@ -116,7 +133,8 @@ class MetaDataManager:
                 if not self._session.is_open(entry.alias):
                     self._session.open(entry.alias)
                 raw = self._session.query(entry.alias, entry.resolved_cmd).strip()
-                val = float(raw.split()[0])
+                # _parse_float: 단위 접미사(T, A…)·':' 구분 응답(IPS 등)도 안전 파싱
+                val = _parse_float(raw)
                 data[key] = {"value": val, "unit": entry.unit}
             except Exception as e:
                 data[key] = {"error": str(e)}
@@ -134,6 +152,14 @@ class MetaDataManager:
             data[f"{label}_mean"] = {"value": round(mean, 9), "unit": unit}
             data[f"{label}_std"] = {"value": round(std, 9), "unit": unit}
 
+        # 3. 추가 설정 (second channel advance 파라미터 등)
+        if extra:
+            data.update(extra)
+
+        self._write_json(json_path, data)
+
+    @staticmethod
+    def _write_json(json_path: Path, data: dict) -> None:
         try:
             json_path.parent.mkdir(parents=True, exist_ok=True)
             with open(json_path, "w", encoding="utf-8") as f:

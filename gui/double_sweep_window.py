@@ -34,6 +34,7 @@ from core.alarm_manager import AlarmManager
 from core.data_saver import DataSaver
 from core.second_channel_worker import SecondChannelWorker, SecondChannelRequest
 from core.sweep_worker import SweepWorker, StepRequest, StepResult
+from gui.alarm_config_window import MeasCondPanel, AlarmConfigWindow
 
 if TYPE_CHECKING:
     from gui.main_window import MainWindow
@@ -160,457 +161,6 @@ def _fmt_hms(total_sec: float) -> str:
 # ---------------------------------------------------------------------------
 
 
-_OP_LABELS = [">", "<", ">=", "<=", "==", "!="]
-
-
-def _truncate(s: str, n: int = 40) -> str:
-    return s[:n] + ("…" if len(s) > n else "")
-
-
-class TelegramPanel(QFrame):
-    """
-    Double Sweep 창 우측 패널 — Telegram Bot 알람 설정.
-
-    수신자 목록(이름 → Chat ID)을 저장·관리하고,
-    콤보박스 선택 = 알람 전송 대상.
-    """
-
-    def __init__(self, alarm_manager, parent=None):
-        super().__init__(parent)
-        self._alarm_manager = alarm_manager
-        self._contacts: list = []   # [{"name": str, "chat_id": str}]
-        self.setFrameShape(QFrame.Shape.StyledPanel)
-        self._build_ui()
-
-    def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 6, 8, 6)
-        root.setSpacing(6)
-
-        title = QLabel("Telegram")
-        title.setStyleSheet("font-weight: bold; color: #58a6ff; font-size: 13px;")
-        root.addWidget(title)
-
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #30363d;"); root.addWidget(sep)
-
-        self._cb_enable = QCheckBox("활성화")
-        self._cb_enable.setStyleSheet("font-weight: bold;")
-        root.addWidget(self._cb_enable)
-
-        # Bot Token
-        form = QFormLayout()
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setHorizontalSpacing(6); form.setVerticalSpacing(4)
-        token_row = QHBoxLayout(); token_row.setSpacing(4)
-        self._le_token = QLineEdit()
-        self._le_token.setFont(_MONO)
-        self._le_token.setPlaceholderText("123456789:AAB...")
-        self._le_token.setEchoMode(QLineEdit.EchoMode.Password)
-        self._btn_show = QPushButton("Show")
-        self._btn_show.setFixedHeight(22); self._btn_show.setFixedWidth(44)
-        self._btn_show.setCheckable(True)
-        self._btn_show.toggled.connect(self._on_show_toggled)
-        token_row.addWidget(self._le_token, stretch=1); token_row.addWidget(self._btn_show)
-        form.addRow("Bot Token:", token_row)
-        root.addLayout(form)
-
-        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet("color: #30363d;"); root.addWidget(sep2)
-
-        # 수신자 선택 (알람 대상)
-        recv_lbl = QLabel("수신자 (알람 대상)")
-        recv_lbl.setStyleSheet("color: #79c0ff; font-weight: bold;")
-        root.addWidget(recv_lbl)
-
-        self._combo_contacts = QComboBox()
-        self._combo_contacts.setFont(_MONO)
-        self._combo_contacts.setPlaceholderText("(저장된 수신자 없음)")
-        self._combo_contacts.currentIndexChanged.connect(self._on_contact_selected)
-        root.addWidget(self._combo_contacts)
-
-        sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
-        sep3.setStyleSheet("color: #30363d;"); root.addWidget(sep3)
-
-        # 수신자 추가/편집 영역
-        add_lbl = QLabel("수신자 추가 / 편집")
-        add_lbl.setStyleSheet("color: #888; font-size: 10px;")
-        root.addWidget(add_lbl)
-
-        edit_form = QFormLayout()
-        edit_form.setContentsMargins(0, 0, 0, 0)
-        edit_form.setHorizontalSpacing(6); edit_form.setVerticalSpacing(3)
-        self._le_contact_name = QLineEdit()
-        self._le_contact_name.setFont(_MONO)
-        self._le_contact_name.setPlaceholderText("표시 이름 (예: 실험실)")
-        edit_form.addRow("이름:", self._le_contact_name)
-        self._le_new_chat_id = QLineEdit()
-        self._le_new_chat_id.setFont(_MONO)
-        self._le_new_chat_id.setPlaceholderText("-100123456789")
-        edit_form.addRow("Chat ID:", self._le_new_chat_id)
-        root.addLayout(edit_form)
-
-        btn_row = QHBoxLayout(); btn_row.setSpacing(4)
-        btn_save = QPushButton("저장"); btn_save.setFixedHeight(24)
-        btn_del  = QPushButton("삭제"); btn_del.setFixedHeight(24)
-        btn_save.clicked.connect(self._on_save_contact)
-        btn_del.clicked.connect(self._on_del_contact)
-        btn_row.addWidget(btn_save); btn_row.addWidget(btn_del); btn_row.addStretch()
-        root.addLayout(btn_row)
-
-        sep4 = QFrame(); sep4.setFrameShape(QFrame.Shape.HLine)
-        sep4.setStyleSheet("color: #30363d;"); root.addWidget(sep4)
-
-        test_row = QHBoxLayout()
-        self._btn_test = QPushButton("Test"); self._btn_test.setFixedHeight(24)
-        self._btn_test.clicked.connect(self._on_test)
-        test_row.addWidget(self._btn_test); test_row.addStretch()
-        root.addLayout(test_row)
-
-        self._lbl_status = QLabel("")
-        self._lbl_status.setFont(_MONO)
-        self._lbl_status.setStyleSheet("font-size: 10px;")
-        self._lbl_status.setWordWrap(True)
-        root.addWidget(self._lbl_status)
-
-        root.addStretch()
-
-    # ------------------------------------------------------------------
-
-    def _on_show_toggled(self, checked: bool):
-        self._le_token.setEchoMode(
-            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
-        )
-        self._btn_show.setText("Hide" if checked else "Show")
-
-    def _active_chat_id(self) -> str:
-        """콤보박스에서 선택된 수신자의 Chat ID 반환."""
-        idx = self._combo_contacts.currentIndex()
-        if 0 <= idx < len(self._contacts):
-            return self._contacts[idx]["chat_id"]
-        return ""
-
-    def _on_contact_selected(self, idx: int):
-        """콤보 선택 시 편집 필드에 해당 수신자 정보 채움."""
-        if 0 <= idx < len(self._contacts):
-            c = self._contacts[idx]
-            self._le_contact_name.setText(c["name"])
-            self._le_new_chat_id.setText(c["chat_id"])
-
-    def _on_save_contact(self):
-        name    = self._le_contact_name.text().strip()
-        chat_id = self._le_new_chat_id.text().strip()
-        if not name or not chat_id:
-            self._set_status("이름과 Chat ID를 입력하세요.", "#f44747"); return
-        for c in self._contacts:
-            if c["name"] == name:
-                c["chat_id"] = chat_id
-                self._refresh_combo(name)
-                self._set_status(f"'{name}' 업데이트됨.", "#56d364"); return
-        self._contacts.append({"name": name, "chat_id": chat_id})
-        self._refresh_combo(name)
-        self._set_status(f"'{name}' 저장됨.", "#56d364")
-
-    def _on_del_contact(self):
-        idx = self._combo_contacts.currentIndex()
-        if 0 <= idx < len(self._contacts):
-            name = self._contacts.pop(idx)["name"]
-            self._refresh_combo()
-            self._le_contact_name.clear(); self._le_new_chat_id.clear()
-            self._set_status(f"'{name}' 삭제됨.", "#e3b341")
-
-    def _refresh_combo(self, select_name: str = ""):
-        self._combo_contacts.blockSignals(True)
-        self._combo_contacts.clear()
-        for c in self._contacts:
-            self._combo_contacts.addItem(c["name"])
-        if select_name:
-            idx = self._combo_contacts.findText(select_name)
-            if idx >= 0:
-                self._combo_contacts.setCurrentIndex(idx)
-        self._combo_contacts.blockSignals(False)
-
-    def _set_status(self, msg: str, color: str):
-        self._lbl_status.setStyleSheet(f"color: {color}; font-size: 10px;")
-        self._lbl_status.setText(msg)
-
-    def _on_test(self):
-        token   = self._le_token.text().strip()
-        chat_id = self._active_chat_id()
-        if not token or not chat_id:
-            self._set_status("Token과 수신자를 설정하세요.", "#f44747"); return
-        self._btn_test.setEnabled(False)
-        self._set_status("전송 중...", "#888")
-        import threading
-        def _do():
-            err = self._alarm_manager.send_telegram_test(token, chat_id)
-            from PySide6.QtCore import QMetaObject, Qt as _Qt, Q_ARG
-            QMetaObject.invokeMethod(
-                self, "_on_test_result", _Qt.ConnectionType.QueuedConnection,
-                Q_ARG(str, err or ""), Q_ARG(bool, err is None),
-            )
-        threading.Thread(target=_do, daemon=True).start()
-
-    @Slot(str, bool)
-    def _on_test_result(self, err: str, ok: bool):
-        self._btn_test.setEnabled(True)
-        if ok:
-            self._set_status("✓ 메시지 전송 성공", "#56d364")
-        else:
-            self._set_status(f"✗ {err}", "#f44747")
-
-    # ------------------------------------------------------------------
-    # Config serialization
-    # ------------------------------------------------------------------
-
-    def get_config(self) -> dict:
-        return {
-            "use_telegram": self._cb_enable.isChecked(),
-            "telegram_bot_token": self._le_token.text().strip(),
-            "telegram_chat_id": self._active_chat_id(),   # 선택된 수신자
-            "telegram_contacts": list(self._contacts),
-        }
-
-    def load_config(self, cfg: "AlarmConfig"):
-        self._cb_enable.setChecked(cfg.use_telegram)
-        self._le_token.setText(cfg.telegram_bot_token)
-        self._contacts = [{"name": c.name, "chat_id": c.chat_id}
-                          for c in cfg.telegram_contacts]
-        # 저장된 chat_id와 일치하는 수신자를 선택 상태로 복원
-        self._refresh_combo()
-        if cfg.telegram_chat_id:
-            for i, c in enumerate(self._contacts):
-                if c["chat_id"] == cfg.telegram_chat_id:
-                    self._combo_contacts.setCurrentIndex(i)
-                    break
-
-
-class AlarmPanel(QFrame):
-    """
-    Double Sweep 창 우측 패널 — Alarm 세부 설정.
-
-    - Enable / Sound / Email 토글
-    - Fixed triggers: 통신 오류, 모든 측정 완료
-    - Measurement triggers: alarm_measurements 목록에서 조건 추가/삭제
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
-        self._trigger_rows: list = []
-        self._build_ui()
-
-    def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 6, 8, 6)
-        root.setSpacing(6)
-
-        title = QLabel("Alarm")
-        title.setStyleSheet("font-weight: bold; color: #ffa657; font-size: 13px;")
-        root.addWidget(title)
-
-        sep0 = QFrame(); sep0.setFrameShape(QFrame.Shape.HLine)
-        sep0.setStyleSheet("color: #30363d;"); root.addWidget(sep0)
-
-        self._cb_enable = QCheckBox("활성화")
-        self._cb_enable.setStyleSheet("font-weight: bold;")
-        self._cb_enable.toggled.connect(self._update_enabled_state)
-        root.addWidget(self._cb_enable)
-
-        notif = QHBoxLayout()
-        self._cb_sound = QCheckBox("사운드"); self._cb_sound.setChecked(True)
-        self._cb_email = QCheckBox("이메일")
-        self._cb_email.toggled.connect(self._on_email_toggled)
-        notif.addWidget(self._cb_sound); notif.addWidget(self._cb_email); notif.addStretch()
-        root.addLayout(notif)
-
-        self._email_widget = QWidget()
-        ef = QFormLayout(self._email_widget)
-        ef.setContentsMargins(12, 0, 0, 0); ef.setHorizontalSpacing(6); ef.setVerticalSpacing(3)
-        self._le_email_to  = QLineEdit(); self._le_email_to.setPlaceholderText("recipient@example.com")
-        self._le_smtp_host = QLineEdit("smtp.gmail.com")
-        self._sb_smtp_port = QSpinBox(); self._sb_smtp_port.setRange(1, 65535); self._sb_smtp_port.setValue(587)
-        self._le_smtp_user = QLineEdit(); self._le_smtp_user.setPlaceholderText("sender@gmail.com")
-        self._le_smtp_pass = QLineEdit(); self._le_smtp_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self._le_smtp_pass.setPlaceholderText("앱 비밀번호")
-        for le in (self._le_email_to, self._le_smtp_host, self._le_smtp_user, self._le_smtp_pass):
-            le.setFont(_MONO)
-        ef.addRow("수신:", self._le_email_to); ef.addRow("SMTP:", self._le_smtp_host)
-        ef.addRow("Port:", self._sb_smtp_port); ef.addRow("User:", self._le_smtp_user)
-        ef.addRow("Pass:", self._le_smtp_pass)
-        self._email_widget.setVisible(False)
-        root.addWidget(self._email_widget)
-
-        sep1 = QFrame(); sep1.setFrameShape(QFrame.Shape.HLine)
-        sep1.setStyleSheet("color: #30363d;"); root.addWidget(sep1)
-
-        fixed_lbl = QLabel("고정 트리거")
-        fixed_lbl.setStyleSheet("color: #79c0ff; font-weight: bold;")
-        root.addWidget(fixed_lbl)
-        self._cb_comm_error  = QCheckBox("통신 오류 / Timeout")
-        self._cb_meas_error  = QCheckBox("측정값 ERR (채널 실패)")
-        self._cb_on_complete = QCheckBox("모든 측정 완료 시")
-        root.addWidget(self._cb_comm_error)
-        root.addWidget(self._cb_meas_error)
-        root.addWidget(self._cb_on_complete)
-
-        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet("color: #30363d;"); root.addWidget(sep2)
-
-        meas_lbl = QLabel("측정값 조건")
-        meas_lbl.setStyleSheet("color: #79c0ff; font-weight: bold;")
-        root.addWidget(meas_lbl)
-
-        self._trig_scroll = QScrollArea()
-        self._trig_scroll.setWidgetResizable(True)
-        self._trig_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._trig_scroll.setMinimumHeight(60)
-        self._trig_scroll.setMaximumHeight(200)
-        self._trig_content = QWidget()
-        self._trig_layout = QVBoxLayout(self._trig_content)
-        self._trig_layout.setContentsMargins(0, 0, 0, 0); self._trig_layout.setSpacing(2)
-        self._trig_layout.addStretch()
-        self._trig_scroll.setWidget(self._trig_content)
-        root.addWidget(self._trig_scroll)
-
-        self._combo_meas = QComboBox()
-        self._combo_meas.setFont(_MONO)
-        self._combo_meas.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        root.addWidget(self._combo_meas)
-
-        add_row = QHBoxLayout(); add_row.setSpacing(4)
-        self._combo_op = QComboBox(); self._combo_op.addItems(_OP_LABELS); self._combo_op.setFixedWidth(52)
-        self._le_thresh = QLineEdit("0"); self._le_thresh.setFont(_MONO)
-        btn_add = QPushButton("+ 추가"); btn_add.setFixedHeight(24)
-        btn_add.clicked.connect(self._add_trigger_row)
-        add_row.addWidget(self._combo_op); add_row.addWidget(self._le_thresh, stretch=1); add_row.addWidget(btn_add)
-        root.addLayout(add_row)
-
-        root.addStretch()
-        self._update_enabled_state(False)
-
-    def _on_email_toggled(self, checked: bool):
-        self._email_widget.setVisible(checked)
-
-    def _update_enabled_state(self, enabled: bool):
-        for w in (self._cb_sound, self._cb_email, self._cb_comm_error, self._cb_meas_error,
-                  self._cb_on_complete, self._trig_scroll, self._combo_meas,
-                  self._combo_op, self._le_thresh):
-            w.setEnabled(enabled)
-
-    def _add_trigger_row(self, meas: str = "", op_str: str = "", thresh: float = 0.0):
-        if not meas:
-            meas = self._combo_meas.currentText().strip()
-        if not meas:
-            return
-        if not op_str:
-            op_str = self._combo_op.currentText()
-        if not thresh:
-            try:
-                thresh = float(self._le_thresh.text())
-            except ValueError:
-                thresh = 0.0
-
-        row_w = QWidget()
-        row_h = QHBoxLayout(row_w)
-        row_h.setContentsMargins(0, 0, 0, 0); row_h.setSpacing(3)
-
-        cb = QCheckBox(); cb.setChecked(True); cb.setFixedWidth(18)
-        lbl = QLabel(f"{_truncate(meas, 22)}  {op_str}  {thresh:.4g}")
-        lbl.setFont(_MONO); lbl.setStyleSheet("color: #c9d1d9; font-size: 10px;")
-        lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        btn_del = QPushButton("×"); btn_del.setFixedSize(18, 18)
-        btn_del.setStyleSheet("color: #f44747; font-weight: bold; border: none;")
-
-        row_h.addWidget(cb); row_h.addWidget(lbl, stretch=1); row_h.addWidget(btn_del)
-
-        entry = {"widget": row_w, "cb": cb, "meas": meas, "op": op_str, "thresh": thresh}
-        self._trigger_rows.append(entry)
-        self._trig_layout.insertWidget(self._trig_layout.count() - 1, row_w)
-        btn_del.clicked.connect(lambda: self._remove_trigger_row(entry))
-
-    def _remove_trigger_row(self, entry: dict):
-        if entry in self._trigger_rows:
-            self._trigger_rows.remove(entry)
-        w = entry["widget"]
-        self._trig_layout.removeWidget(w)
-        w.deleteLater()
-
-    def refresh_measurements(self, measurements: List[InstantiatedMeasurement]):
-        """alarm_measurements 목록으로 combo 갱신."""
-        cur = self._combo_meas.currentText()
-        self._combo_meas.blockSignals(True)
-        self._combo_meas.clear()
-        self._combo_meas.addItems([m.description for m in measurements])
-        idx = self._combo_meas.findText(cur)
-        if idx >= 0:
-            self._combo_meas.setCurrentIndex(idx)
-        self._combo_meas.blockSignals(False)
-
-    def get_config(self) -> AlarmConfig:
-        triggers = []
-        if self._cb_comm_error.isChecked():
-            triggers.append(AlarmTrigger(kind="comm_error", enabled=True))
-        if self._cb_meas_error.isChecked():
-            triggers.append(AlarmTrigger(kind="meas_error", enabled=True))
-        for entry in self._trigger_rows:
-            try:
-                op = AlarmOperator(entry["op"])
-            except ValueError:
-                op = AlarmOperator.GT
-            triggers.append(AlarmTrigger(
-                kind="measurement",
-                enabled=entry["cb"].isChecked(),
-                meas_description=entry["meas"],
-                operator=op,
-                threshold=entry["thresh"],
-            ))
-        return AlarmConfig(
-            enabled=self._cb_enable.isChecked(),
-            use_sound=self._cb_sound.isChecked(),
-            use_email=self._cb_email.isChecked(),
-            email_to=self._le_email_to.text().strip(),
-            smtp_host=self._le_smtp_host.text().strip(),
-            smtp_port=self._sb_smtp_port.value(),
-            smtp_user=self._le_smtp_user.text().strip(),
-            smtp_password=self._le_smtp_pass.text(),
-            fire_on_complete=self._cb_on_complete.isChecked(),
-            triggers=triggers,
-        )
-
-    def load_config(self, cfg: AlarmConfig):
-        self._cb_enable.setChecked(cfg.enabled)
-        self._cb_sound.setChecked(cfg.use_sound)
-        self._cb_email.setChecked(cfg.use_email)
-        self._le_email_to.setText(cfg.email_to)
-        self._le_smtp_host.setText(cfg.smtp_host)
-        self._sb_smtp_port.setValue(cfg.smtp_port)
-        self._le_smtp_user.setText(cfg.smtp_user)
-        self._le_smtp_pass.setText(cfg.smtp_password)
-        self._email_widget.setVisible(cfg.use_email)
-        self._cb_on_complete.setChecked(cfg.fire_on_complete)
-
-        has_comm = any(t.kind == "comm_error" and t.enabled for t in cfg.triggers)
-        self._cb_comm_error.setChecked(has_comm)
-        has_meas_err = any(t.kind == "meas_error" and t.enabled for t in cfg.triggers)
-        self._cb_meas_error.setChecked(has_meas_err)
-
-        for entry in list(self._trigger_rows):
-            self._remove_trigger_row(entry)
-
-        for t in cfg.triggers:
-            if t.kind != "measurement":
-                continue
-            if self._combo_meas.findText(t.meas_description) < 0 and t.meas_description:
-                self._combo_meas.addItem(t.meas_description)
-            self._add_trigger_row(meas=t.meas_description, op_str=t.operator.value, thresh=t.threshold)
-            if self._trigger_rows:
-                self._trigger_rows[-1]["cb"].setChecked(t.enabled)
-
-        self._update_enabled_state(cfg.enabled)
-
 
 # ---------------------------------------------------------------------------
 class DoubleSweepWindow(QDialog):
@@ -656,6 +206,18 @@ class DoubleSweepWindow(QDialog):
         self._last_meas_values: dict = {}  # {description: float} 최신 측정값 캐시
         self._trace_filepath = None        # TRACE 파일 경로 (meta data JSON 저장용)
         self._alarm_manager = AlarmManager()
+        # 알람 전달·텔레그램·고정트리거 설정 (Alarm Config 창에서 편집).
+        # 측정값 조건 트리거는 MeasCondPanel이 별도 관리.
+        self._alarm_cfg: AlarmConfig = AlarmConfig()
+
+        # 통신 오류 자동 재개 상태
+        from core.resume_log import ResumeLog
+        self._resume_log = ResumeLog()
+        self._auto_retry_used = False        # 연속 자동 재개 1회 제한 (성공 시 리셋)
+        self._last_emit = None               # ("step"|"advance", request) 자동 재개 재전송용
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._auto_resume)
 
         # DataSaver
         self._data_saver = DataSaver()
@@ -666,6 +228,9 @@ class DoubleSweepWindow(QDialog):
         # Sweep worker
         self._sweep_worker = SweepWorker()
         self._sweep_worker.set_session(main_win._session)
+        # 전역 설정(임계값·병렬 측정) 동기화 — main worker와 동일하게
+        self._sweep_worker.set_threshold(main_win._app_config.global_threshold)
+        self._sweep_worker.set_parallel(main_win._app_config.parallel_measurement)
         self._worker_thread = QThread(self)
         self._sweep_worker.moveToThread(self._worker_thread)
         self.request_step.connect(self._sweep_worker.run_step)
@@ -681,6 +246,10 @@ class DoubleSweepWindow(QDialog):
         self.request_advance.connect(self._second_worker.advance)
         self._second_worker.done.connect(self._on_advance_done)
         self._second_worker.error.connect(self._on_advance_error)
+        self._second_worker.advance_failed.connect(self._on_advance_timeout)
+        self._second_worker.status.connect(
+            lambda m: self._main_win._log(f"  [DoubleSweep] {m}", color="#d7ba7d"))
+        self._second_worker.feedback_progress.connect(self._on_feedback_metric)
         self._second_thread.start()
 
         # Step timer (single-shot)
@@ -724,27 +293,36 @@ class DoubleSweepWindow(QDialog):
         outer.setSpacing(8)
         glow_h.addWidget(left_widget, stretch=1)
 
-        # 우측 패널 (AlarmPanel)
+        # 상단 제목 + 도움말
+        from gui.help_button import make_help_button
+        _ds_hdr = QHBoxLayout()
+        _ds_title = QLabel("Double Sweep")
+        _ds_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #f78166;")
+        _ds_hdr.addWidget(_ds_title)
+        _ds_hdr.addStretch()
+        _ds_hdr.addWidget(make_help_button(self._ds_help_html(), "Double Sweep 도움말"))
+        outer.addLayout(_ds_hdr)
+
+        # 우측 패널 — 측정값 조건(여기 유지) + Alarm Config 버튼(전달·텔레그램은 별도 창)
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
         right_scroll.setFrameShape(QFrame.Shape.NoFrame)
         right_scroll.setMinimumWidth(260)
         right_scroll.setMaximumWidth(320)
-        self._alarm_panel = AlarmPanel()
-        right_scroll.setWidget(self._alarm_panel)
+        right_panel = QWidget()
+        right_v = QVBoxLayout(right_panel)
+        right_v.setContentsMargins(0, 0, 0, 0)
+        right_v.setSpacing(6)
+        btn_alarm_cfg = QPushButton("⚙ Alarm Config…")
+        btn_alarm_cfg.setToolTip("알람 활성화 / 사운드·이메일·텔레그램 / 고정 트리거 설정")
+        btn_alarm_cfg.clicked.connect(self._open_alarm_config)
+        right_v.addWidget(btn_alarm_cfg)
+        self._meascond_panel = MeasCondPanel()
+        right_v.addWidget(self._meascond_panel)
+        right_v.addStretch()
+        right_scroll.setWidget(right_panel)
         self._right_alarm_scroll = right_scroll
         glow_h.addWidget(right_scroll)
-
-        # 우측 패널 (TelegramPanel)
-        tg_scroll = QScrollArea()
-        tg_scroll.setWidgetResizable(True)
-        tg_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        tg_scroll.setMinimumWidth(200)
-        tg_scroll.setMaximumWidth(260)
-        self._telegram_panel = TelegramPanel(self._alarm_manager)
-        tg_scroll.setWidget(self._telegram_panel)
-        self._right_tg_scroll = tg_scroll
-        glow_h.addWidget(tg_scroll)
 
         # Second Channel selector
         ch_frame = QFrame()
@@ -824,9 +402,14 @@ class DoubleSweepWindow(QDialog):
         self._sweep_ch_frame.setFrameShape(QFrame.Shape.StyledPanel)
         sc_layout = QVBoxLayout(self._sweep_ch_frame)
         sc_layout.setContentsMargins(8, 6, 8, 6)
+        sc_hdr = QHBoxLayout()
+        sc_hdr.setSpacing(6)
         sc_title = QLabel("SWEEP Channel Settings")
         sc_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #c586c0;")
-        sc_layout.addWidget(sc_title)
+        sc_hdr.addWidget(sc_title)
+        sc_hdr.addWidget(make_help_button(self._safety_ramp_help_html(), "Safety Ramp 도움말"))
+        sc_hdr.addStretch()
+        sc_layout.addLayout(sc_hdr)
 
         sc_form = QFormLayout()
         sc_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -858,6 +441,148 @@ class DoubleSweepWindow(QDialog):
 
         self._sweep_ch_frame.setVisible(False)
         outer.addWidget(self._sweep_ch_frame)
+
+        # FEEDBACK Channel Settings (only visible when advance_type == FEEDBACK)
+        self._feedback_frame = QFrame()
+        self._feedback_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        fb_layout = QVBoxLayout(self._feedback_frame)
+        fb_layout.setContentsMargins(8, 6, 8, 6)
+
+        _FB_HELP = (
+            "<html><head/><body style='white-space:normal;'>"
+            "<b>FEEDBACK Channel Settings 도움말</b><hr>"
+            "<table cellspacing='4' cellpadding='2'>"
+            "<tr valign='top'><td><b>Read&nbsp;Cmd</b></td>"
+            "<td>안정화 감지용 VISA 쿼리 명령어.<br>"
+            "예&nbsp;①&nbsp;<code>print(smua.measure.v())</code>&nbsp;(Keithley TSP)<br>"
+            "예&nbsp;②&nbsp;<code>READ:DEV:GRPZ:PSU:SIG:FLD</code>&nbsp;(Mercury iPS)<br>"
+            "응답에 단위 접미사(T, A…)가 붙어도 자동 파싱됩니다.<br>"
+            "Profile에 이미 설정돼 있으면 자동 비활성화.</td></tr>"
+            "<tr valign='top'><td><b>Poll&nbsp;Interval</b></td>"
+            "<td>Read Cmd를 반복 실행하는 간격 (초).<br>"
+            "짧을수록 빠른 감지, 길수록 장비 부하 감소.<br>"
+            "권장: 0.5 ~ 5 s</td></tr>"
+            "<tr valign='top'><td><b>Tolerance</b></td>"
+            "<td><b>Phase 1</b> 조건 — 목표 근접도 판정.<br>"
+            "ratio = |읽은값 − 이전값| / |목표값 − 이전값|<br>"
+            "ratio ≥ tolerance/100 이면 안정화 체크(Phase 2) 시작.<br>"
+            "기본값: 95 %  ·  <b>자기장 권장: 98 %</b></td></tr>"
+            "<tr valign='top'><td><b>Std&nbsp;Window</b></td>"
+            "<td><b>Phase 2</b> 안정화 판정에 쓸 샘플 수.<br>"
+            "0 → 비활성화: Tolerance 통과만으로 다음 단계 진행.<br>"
+            "N&gt;0 → 최근 N개 샘플의 표준편차로 안정성 평가.</td></tr>"
+            "<tr valign='top'><td><b>Noise&nbsp;Floor</b></td>"
+            "<td>정규화 분모 하한 (측정값과 동일한 단위).<br>"
+            "<b>목표값이 0 근처이면 반드시 설정해야 합니다.</b><br>"
+            "<b>자기장 권장: 0.001 T</b>  ·  전류 → 1e-9 A</td></tr>"
+            "<tr valign='top'><td><b>Std&nbsp;Threshold</b></td>"
+            "<td>안정화 판정 임계값 (무차원).<br>"
+            "metric = std / (|목표값| + Noise Floor)<br>"
+            "metric &lt; Std Threshold 이면 안정화 완료 → 다음 단계 진행.<br>"
+            "기본값: 0.01 (목표값 대비 1 %)  ·  <b>자기장 권장: 0.0003</b><br>"
+            "옆의 <i>now</i> 숫자가 실시간으로 현재 metric을 표시합니다.</td></tr>"
+            "</table></body></html>"
+        )
+
+        fb_hdr = QHBoxLayout()
+        fb_hdr.setSpacing(6)
+        fb_title = QLabel("FEEDBACK Channel Settings")
+        fb_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #4ec9b0;")
+        fb_hdr.addWidget(fb_title)
+        fb_help_btn = QLabel("?")
+        fb_help_btn.setFixedSize(16, 16)
+        fb_help_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fb_help_btn.setStyleSheet(
+            "background-color: #4ec9b0; color: #1e1e1e; border-radius: 8px;"
+            "font-weight: bold; font-size: 10px;"
+        )
+        fb_help_btn.setToolTip(_FB_HELP)
+        fb_hdr.addWidget(fb_help_btn)
+        fb_hdr.addStretch()
+        fb_layout.addLayout(fb_hdr)
+
+        fb_form = QFormLayout()
+        fb_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        fb_form.setHorizontalSpacing(12)
+        fb_layout.addLayout(fb_form)
+
+        # Read Cmd: profile에 이미 설정된 경우 비활성화
+        fb_read_row = QWidget()
+        fb_read_lay = QHBoxLayout(fb_read_row)
+        fb_read_lay.setContentsMargins(0, 0, 0, 0)
+        fb_read_lay.setSpacing(6)
+        self._le_fb_read_cmd = QLineEdit()
+        self._le_fb_read_cmd.setFont(_MONO)
+        self._le_fb_read_cmd.setPlaceholderText("예: print(smua.measure.v())")
+        fb_read_lay.addWidget(self._le_fb_read_cmd)
+        self._lbl_fb_read_hint = QLabel("")
+        self._lbl_fb_read_hint.setFont(_MONO)
+        self._lbl_fb_read_hint.setStyleSheet("color: #888888; font-size: 9px;")
+        fb_read_lay.addWidget(self._lbl_fb_read_hint)
+        fb_form.addRow("Read Cmd:", fb_read_row)
+
+        self._le_fb_poll, _lbl_fb_poll_u, cnt_fb_poll = _lefield(100)
+        _lbl_fb_poll_u.setText("s")
+        fb_form.addRow("Poll Interval:", cnt_fb_poll)
+
+        self._le_fb_tol, _lbl_fb_tol_u, cnt_fb_tol = _lefield(100)
+        _lbl_fb_tol_u.setText("%")
+        fb_form.addRow("Tolerance:", cnt_fb_tol)
+
+        self._sb_fb_std_window = QSpinBox()
+        self._sb_fb_std_window.setRange(0, 10000)
+        self._sb_fb_std_window.setValue(0)
+        self._sb_fb_std_window.setFont(_MONO)
+        self._sb_fb_std_window.setFixedWidth(100)
+        self._sb_fb_std_window.setToolTip("0 = stability check 비활성화; N>0 = 최근 N개 샘플의 std 검사")
+        fb_form.addRow("Std Window:", self._sb_fb_std_window)
+
+        self._le_fb_noisefloor = QLineEdit()
+        self._le_fb_noisefloor.setFont(_MONO)
+        self._le_fb_noisefloor.setFixedWidth(100)
+        self._le_fb_noisefloor.setToolTip("next_v ≈ 0 일 때 반드시 설정. 예: 1e-6")
+        fb_form.addRow("Noise Floor:", self._le_fb_noisefloor)
+
+        self._le_fb_std_thresh, _lbl_fb_st_u, cnt_fb_st = _lefield(100)
+        _lbl_fb_st_u.setText("(dimensionless)")
+        # Std Threshold 행: 목표값 + 실시간 현재 metric 나란히 표시
+        fb_thresh_row = QWidget()
+        fb_thresh_lay = QHBoxLayout(fb_thresh_row)
+        fb_thresh_lay.setContentsMargins(0, 0, 0, 0)
+        fb_thresh_lay.setSpacing(8)
+        fb_thresh_lay.addWidget(cnt_fb_st)
+        fb_thresh_lay.addWidget(QLabel("now:"))
+        self._lbl_fb_metric = QLabel("—")
+        self._lbl_fb_metric.setFont(_MONO)
+        self._lbl_fb_metric.setMinimumWidth(70)
+        self._lbl_fb_metric.setStyleSheet("color: #888888;")
+        fb_thresh_lay.addWidget(self._lbl_fb_metric)
+        fb_thresh_lay.addStretch()
+        fb_form.addRow("Std Threshold:", fb_thresh_row)
+
+        self._feedback_frame.setVisible(False)
+        outer.addWidget(self._feedback_frame)
+
+        # WAIT_FOR_TIME Channel Settings (only visible when advance_type == WAIT_FOR_TIME)
+        self._wait_frame = QFrame()
+        self._wait_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        wt_layout = QVBoxLayout(self._wait_frame)
+        wt_layout.setContentsMargins(8, 6, 8, 6)
+        wt_title = QLabel("WAIT_FOR_TIME Channel Settings")
+        wt_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #dcdcaa;")
+        wt_layout.addWidget(wt_title)
+
+        wt_form = QFormLayout()
+        wt_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        wt_form.setHorizontalSpacing(12)
+        wt_layout.addLayout(wt_form)
+
+        self._le_wait_time, _lbl_wt_u, cnt_wt = _lefield(100)
+        _lbl_wt_u.setText("s")
+        wt_form.addRow("Wait Time:", cnt_wt)
+
+        self._wait_frame.setVisible(False)
+        outer.addWidget(self._wait_frame)
 
         # Second Channel Array
         arr_frame = QFrame()
@@ -999,11 +724,24 @@ class DoubleSweepWindow(QDialog):
             "QPushButton:disabled { background-color: #3a1a1a; color: #553d3d; border-radius: 4px; }"
         )
         self._btn_stop.setEnabled(False)
-        self._btn_stop.clicked.connect(self._on_stop)
+        self._btn_stop.clicked.connect(self._on_stop_clicked)
+
+        # 통신 오류로 중단된 Double Sweep을 저장된 array 지점부터 재개
+        self._btn_resume = QPushButton("Resume")
+        self._btn_resume.setMinimumHeight(40)
+        self._btn_resume.setToolTip("통신 오류로 중단된 Double Sweep을 저장된 array 지점부터 재개")
+        self._btn_resume.setStyleSheet(
+            "QPushButton { font-weight: bold; font-size: 13px;"
+            "background-color: #b8860b; color: white; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #3a3010; color: #55502d; border-radius: 4px; }"
+        )
+        self._btn_resume.clicked.connect(self._on_resume_clicked)
 
         btn_row.addWidget(self._btn_start)
         btn_row.addWidget(self._btn_stop)
+        btn_row.addWidget(self._btn_resume)
         outer.addLayout(btn_row)
+        self._update_resume_btn_enabled()
 
         # Save path preview (trace 폴더 기준)
         save_path_row = QHBoxLayout()
@@ -1015,6 +753,10 @@ class DoubleSweepWindow(QDialog):
         self._lbl_ds_save_path.setFont(QFont("Consolas", 8))
         self._lbl_ds_save_path.setStyleSheet("color: #555555;")
         self._lbl_ds_save_path.setWordWrap(True)
+        # 긴 경로가 잘리지 않도록 약 2줄 높이 확보 + 위쪽 정렬
+        self._lbl_ds_save_path.setMinimumHeight(28)
+        self._lbl_ds_save_path.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         save_path_row.addWidget(self._lbl_ds_save_path, stretch=1)
         btn_open_ds = QPushButton("📂")
         btn_open_ds.setFixedWidth(28)
@@ -1022,7 +764,7 @@ class DoubleSweepWindow(QDialog):
         btn_open_ds.setFont(_MONO)
         btn_open_ds.setToolTip("저장 폴더 열기")
         btn_open_ds.clicked.connect(self._open_ds_folder)
-        save_path_row.addWidget(btn_open_ds)
+        save_path_row.addWidget(btn_open_ds, alignment=Qt.AlignmentFlag.AlignTop)
         outer.addLayout(save_path_row)
         outer.addStretch()
 
@@ -1045,6 +787,8 @@ class DoubleSweepWindow(QDialog):
             self._second_ch_layout.addWidget(lbl)
             self._second_channel = None
             self._sweep_ch_frame.setVisible(False)
+            self._feedback_frame.setVisible(False)
+            self._wait_frame.setVisible(False)
             return
 
         for idx, ch in enumerate(channels):
@@ -1067,10 +811,90 @@ class DoubleSweepWindow(QDialog):
         channels = self._param_reg.main_ui_profile.second_sweep_channels
         if 0 <= btn_id < len(channels):
             self._second_channel = channels[btn_id]
-            self._sweep_ch_frame.setVisible(
-                self._second_channel.advance_type == SecondSweepAdvanceType.SWEEP
-            )
+            adv = self._second_channel.advance_type
+            self._sweep_ch_frame.setVisible(adv == SecondSweepAdvanceType.SWEEP)
+            self._feedback_frame.setVisible(adv == SecondSweepAdvanceType.FEEDBACK)
+            self._wait_frame.setVisible(adv == SecondSweepAdvanceType.WAIT_FOR_TIME)
+            self._update_feedback_read_cmd_state()
             self._update_unit_labels()
+
+    @staticmethod
+    def _safety_ramp_help_html() -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>Safety Ramp — 값을 한 번에 확 바꾸지 않고 천천히 올리기</b><hr>"
+            "두 번째 축(예: 전압·전류)을 다음 목표값으로 옮길 때, 보통은 <b>한 번에 훌쩍</b> "
+            "바뀝니다. 이 기능을 켜면 그 변화를 <b>여러 개의 작은 계단</b>으로 쪼개서 "
+            "한 칸씩 천천히 올리거나 내립니다.<hr>"
+            "<b>왜 쓰나요?</b><br>"
+            "값이 갑자기 크게 튀면 시료(샘플)나 장비에 충격이 가거나, 순간적으로 큰 전류가 "
+            "흘러 손상될 수 있습니다. 천천히 바꾸면 이런 위험을 줄여줍니다.<hr>"
+            "<b>설정 항목</b><br>"
+            "&nbsp;&nbsp;• <b>Safety Steps</b>: 목표값까지 가는 데 몇 개의 계단으로 나눌지. "
+            "예를 들어 0V→1V로 갈 때 10으로 두면 0.1V씩 10번에 걸쳐 올립니다. "
+            "숫자가 클수록 더 부드럽지만 그만큼 느려집니다.<br>"
+            "&nbsp;&nbsp;• <b>Safety Interval</b>: 계단 한 칸과 다음 칸 사이에 기다리는 시간(ms). "
+            "장비와 시료가 안정될 시간을 줍니다.<hr>"
+            "<b>권장 사용처</b><br>"
+            "<b>Keithley 2636A</b> SMU(전압·전류원)처럼 시료에 직접 전압·전류를 거는 장비에는 "
+            "이 기능을 <b>켜는 것을 권장</b>합니다. 자기장·온도처럼 장비 자체가 이미 천천히 "
+            "변하는 경우에는 보통 꺼두어도 됩니다.<hr>"
+            "<b>참고</b><br>"
+            "• 이 설정은 두 번째 축의 <b>Advance Type이 SWEEP</b>일 때만 보입니다.<br>"
+            "• 체크를 끄면 Steps·Interval 칸이 비활성화되고, 값은 예전처럼 한 번에 바뀝니다.<br>"
+            "• Sweep Rate(쓰는 속도)와 함께 적용됩니다."
+            "</body></html>"
+        )
+
+    @staticmethod
+    def _ds_help_html() -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>Double Sweep — 2차원(지도) 측정</b><hr>"
+            "한 축만 쓸어가는 일반 측정과 달리, <b>두 번째 축</b>(예: 자기장·게이트)을 "
+            "한 칸씩 옮길 때마다 <b>1차 축 sweep을 통째로 한 번씩</b> 수행합니다. "
+            "결과를 모으면 2차원 지도(2D map)가 됩니다.<hr>"
+
+            "<b>■ 진행 방식</b><br>"
+            "Array(2차 축 값 목록)의 각 값마다: ① 2차 축을 그 값으로 옮김 → "
+            "② 그 자리에서 1차 축을 한 번 sweep → ③ 다음 array 값으로.<hr>"
+
+            "<b>■ Phase: DUMMY / TRACE / RETRACE (헷갈리기 쉬움)</b><br>"
+            "각 array 값에서 1차 축을 세 번 쓸어갑니다:<br>"
+            "&nbsp;• <b>DUMMY</b>: 시작점→시작점 예열 주행 (dummy 폴더에 저장).<br>"
+            "&nbsp;• <b>TRACE</b>: 시작점→끝점 (정방향) — 보통 주 데이터.<br>"
+            "&nbsp;• <b>RETRACE</b>: 끝점→시작점(또는 0) (역방향) — 이력현상 확인용.<br>"
+            "각 phase는 trace/retrace/dummy <b>폴더로 나뉘어</b> 저장됩니다.<hr>"
+
+            "<b>■ 2차 축 이동 방식 (Advance Type)</b><br>"
+            "값을 '어떻게' 옮길지 — 이 선택은 <b>Parameter Manager에서 Second Sweep "
+            "Channel을 추가할 때</b> 정합니다. 종류:<br>"
+            "<table cellspacing='3' cellpadding='2'>"
+            "<tr valign='top'><td><b>simple_hop</b></td>"
+            "<td>값을 <b>즉시 한 번에</b> 바꾸고 바로 다음으로. 가장 단순.</td></tr>"
+            "<tr valign='top'><td><b>sweep</b></td>"
+            "<td>목표값까지 <b>정해진 속도로 천천히</b> 이동(급변 방지). 이동 중 측정 안 함.</td></tr>"
+            "<tr valign='top'><td><b>feedback</b></td>"
+            "<td>값을 보낸 뒤 실제로 <b>도달·안정될 때까지 기다림</b>. 자기장처럼 "
+            "도달에 시간이 걸리고 출렁이는 값에 적합. (세부는 아래 FEEDBACK 설정의 ? 참고)</td></tr>"
+            "<tr valign='top'><td><b>wait_for_time</b></td>"
+            "<td>값을 보낸 뒤 <b>정해진 시간만큼 기다림</b>.</td></tr>"
+            "</table>"
+
+            "<b>■ 주요 설정</b><br>"
+            "&nbsp;• <b>Array</b>(from/to/step): 2차 축이 훑을 값 목록.<br>"
+            "&nbsp;• <b>Start/Stop, Rate</b>: 1차 축의 시작·끝과 속도(phase별).<br>"
+            "&nbsp;• <b>Time/Point</b>: 1차 축 한 점당 시간 간격.<br>"
+            "&nbsp;• <b>측정값 조건</b>(우측): 특정 측정이 임계값을 넘으면 알람. 알람 켜기·텔레그램은 "
+            "<b>⚙ Alarm Config</b> 창에서.<hr>"
+
+            "<b>■ 참고</b><br>"
+            "&nbsp;• 1차 축·측정 항목은 Main 화면 설정을 그대로 씁니다.<br>"
+            "&nbsp;• 통신 오류 시 10초 뒤 자동 재시도, 다시 실패하면 멈추고 그 지점을 저장 → "
+            "<b>Resume</b>로 재개.<br>"
+            "&nbsp;• Stop으로 멈춰도 그 지점이 저장되어 나중에 Resume할 수 있습니다."
+            "</body></html>"
+        )
 
     # ------------------------------------------------------------------
     # Config load / save
@@ -1093,22 +917,62 @@ class DoubleSweepWindow(QDialog):
         self._cb_second_safety.setChecked(cfg.second_use_safety)
         self._sb_second_steps.setValue(cfg.second_safety_steps)
         self._le_second_interval.setText(f"{cfg.second_safety_interval_ms:g}")
+        # FEEDBACK params — profile cmd가 있으면 상태 먼저 반영 후 저장값 덮어쓰지 않음
+        self._update_feedback_read_cmd_state()
+        if self._le_fb_read_cmd.isEnabled():
+            self._le_fb_read_cmd.setText(cfg.second_feedback_read_cmd)
+        self._le_fb_poll.setText(f"{cfg.second_feedback_poll_interval:g}")
+        self._le_fb_tol.setText(f"{cfg.second_feedback_tolerance_pct:g}")
+        self._sb_fb_std_window.setValue(cfg.second_feedback_std_window)
+        self._le_fb_noisefloor.setText(f"{cfg.second_feedback_noisefloor:g}")
+        self._le_fb_std_thresh.setText(f"{cfg.second_feedback_std_threshold:g}")
+        # WAIT_FOR_TIME params
+        self._le_wait_time.setText(f"{cfg.second_wait_time:g}")
         self._update_n_points()
         self._update_est_time()
-        # AlarmPanel: refresh combo from alarm_measurements, then load saved config
+        # 알람: 전달·텔레그램·고정트리거는 _alarm_cfg에 보관, 측정값 조건은 패널에 로드
+        self._alarm_cfg = cfg.alarm.model_copy(deep=True)
         alarm_meas = self._param_reg.main_ui_profile.alarm_measurements
-        self._alarm_panel.refresh_measurements(alarm_meas)
-        self._alarm_panel.load_config(cfg.alarm)
-        self._telegram_panel.load_config(cfg.alarm)
+        self._meascond_panel.refresh_measurements(alarm_meas)
+        self._meascond_panel.load_triggers(cfg.alarm)
+
+    def reload_from_profile(self):
+        """활성 프로파일이 바뀌면 이 창 설정도 새 프로파일 값으로 다시 읽는다.
+
+        이 창은 보관형(한 번 만들어 재사용)이고 showEvent에서 _load_config를
+        다시 부르지 않으므로, main_window가 프로파일 전환 시 이 메서드를 호출해
+        동기화하지 않으면 처음 만들어진 프로파일 값에 고정되어 다른 프로파일을
+        덮어쓰는 문제가 생긴다. 측정 중에는 설정이 꼬이지 않도록 무시한다.
+        """
+        if self._phase != DoubleSweepPhase.IDLE:
+            return
+        self._load_config()                  # 시작/정지/rate/feedback/alarm 등 전체 재로딩
+        self._rebuild_second_channel_radios()
+        self._update_unit_labels()
+        self._update_ds_save_path()
+
+    def _open_alarm_config(self):
+        """Alarm Config 다이얼로그 — 전달·텔레그램·고정트리거 편집 (측정값 조건은 보존)."""
+        # 현재 측정값 조건을 합쳐서 창에 넘김 → 창은 measurement 트리거를 보존
+        merged = self._alarm_cfg.model_copy(update={
+            "triggers": [t for t in self._alarm_cfg.triggers if t.kind != "measurement"]
+                        + self._meascond_panel.measurement_triggers()
+        })
+        dlg = AlarmConfigWindow(merged, self._alarm_manager, parent=self,
+                                title="Double Sweep — Alarm Config")
+        dlg.apply_requested.connect(self._on_alarm_cfg_applied)
+        dlg.exec()
+
+    def _on_alarm_cfg_applied(self, cfg: AlarmConfig):
+        self._alarm_cfg = cfg
+        self._save_config()
 
     def _build_alarm_config(self) -> AlarmConfig:
-        from config.config_models import TelegramContact
-        _TG_KEYS = {"use_telegram", "telegram_bot_token", "telegram_chat_id", "telegram_contacts"}
-        base = {k: v for k, v in self._alarm_panel.get_config().model_dump().items()
-                if k not in _TG_KEYS}
-        tg = self._telegram_panel.get_config()
-        contacts = [TelegramContact(**c) for c in tg.pop("telegram_contacts", [])]
-        return AlarmConfig(**base, **tg, telegram_contacts=contacts)
+        """저장용 최종 AlarmConfig = 전달·텔레그램·고정트리거(_alarm_cfg) + 측정값 조건(패널)."""
+        non_meas = [t for t in self._alarm_cfg.triggers if t.kind != "measurement"]
+        return self._alarm_cfg.model_copy(update={
+            "triggers": non_meas + self._meascond_panel.measurement_triggers()
+        })
 
     def _save_config(self):
         cfg = DoubleSweepConfig(
@@ -1128,6 +992,13 @@ class DoubleSweepWindow(QDialog):
             second_use_safety=self._cb_second_safety.isChecked(),
             second_safety_steps=self._sb_second_steps.value(),
             second_safety_interval_ms=self._parse_ds_float(self._le_second_interval.text(), 0.0),
+            second_feedback_read_cmd=self._le_fb_read_cmd.text().strip(),
+            second_feedback_poll_interval=self._parse_ds_float(self._le_fb_poll.text(), 1.0),
+            second_feedback_tolerance_pct=self._parse_ds_float(self._le_fb_tol.text(), 95.0),
+            second_feedback_std_window=self._sb_fb_std_window.value(),
+            second_feedback_noisefloor=self._parse_ds_float(self._le_fb_noisefloor.text(), 0.0),
+            second_feedback_std_threshold=self._parse_ds_float(self._le_fb_std_thresh.text(), 0.01),
+            second_wait_time=self._parse_ds_float(self._le_wait_time.text(), 1.0),
             alarm=self._build_alarm_config(),
         )
         self._param_reg.save_double_sweep_config(cfg)
@@ -1145,6 +1016,17 @@ class DoubleSweepWindow(QDialog):
             array_step=self._parse_ds_float(self._le_arr_step.text(), 0.1),
             retrace_to_zero=self._cb_retrace_to_zero.isChecked(),
             to_zero_at_last=self._cb_to_zero_at_last.isChecked(),
+            second_sweep_rate=self._parse_ds_float(self._le_second_rate.text(), 1.0),
+            second_use_safety=self._cb_second_safety.isChecked(),
+            second_safety_steps=self._sb_second_steps.value(),
+            second_safety_interval_ms=self._parse_ds_float(self._le_second_interval.text(), 0.0),
+            second_feedback_read_cmd=self._le_fb_read_cmd.text().strip(),
+            second_feedback_poll_interval=self._parse_ds_float(self._le_fb_poll.text(), 1.0),
+            second_feedback_tolerance_pct=self._parse_ds_float(self._le_fb_tol.text(), 95.0),
+            second_feedback_std_window=self._sb_fb_std_window.value(),
+            second_feedback_noisefloor=self._parse_ds_float(self._le_fb_noisefloor.text(), 0.0),
+            second_feedback_std_threshold=self._parse_ds_float(self._le_fb_std_thresh.text(), 0.01),
+            second_wait_time=self._parse_ds_float(self._le_wait_time.text(), 1.0),
         )
 
     @staticmethod
@@ -1211,8 +1093,9 @@ class DoubleSweepWindow(QDialog):
         self._sp_frame.setEnabled(not locked)
         self._arr_frame.setEnabled(not locked)
         self._sweep_ch_frame.setEnabled(not locked)
+        self._feedback_frame.setEnabled(not locked)
+        self._wait_frame.setEnabled(not locked)
         self._right_alarm_scroll.setEnabled(not locked)
-        self._right_tg_scroll.setEnabled(not locked)
 
     def _unlock_main_ui(self) -> None:
         """Double Sweep 종료 시 Main Window UI 복원."""
@@ -1221,7 +1104,7 @@ class DoubleSweepWindow(QDialog):
         mw._btn_start.setEnabled(True)
         mw._sweep_channel_panel.setEnabled(True)
         mw._meas_panel.setEnabled(True)
-        mw._save_settings_frame.setEnabled(True)
+        mw._set_save_inputs_enabled(True)
         for _sfx in ("", "2", "3"):
             cb = getattr(mw, f"_cb_deriv{_sfx}_enable")
             cb.setEnabled(True)
@@ -1247,21 +1130,48 @@ class DoubleSweepWindow(QDialog):
                 "Parameter Manager에서 Second Sweep Channel을 등록하세요.")
             return
 
+        # 저장 비활성 경고 — 장시간 측정이 저장 없이 진행되는 사고 방지
+        if not self._main_win._cb_save_enable.isChecked():
+            ans = QMessageBox.question(
+                self, "Auto-save 비활성화",
+                "Auto-save가 꺼져 있습니다. Double Sweep 데이터가 파일로 저장되지 않습니다.\n\n"
+                "저장 없이 진행하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+
         # 연결 상태 확인 (second channel 포함) — 실패 시 측정 중단
         if not self._main_win._run_connection_test(include_second=True, show_success=False):
             return
 
+        if not self._prepare_run():
+            return
+
+        self._main_win._log("Double Sweep started. Pre-positioning first channel → start_point.", color="#4ec9b0")
+        self._start_pre_init()
+
+    def _prepare_run(self) -> bool:
+        """측정 실행 준비(설정 스냅샷·배열 생성·UI 잠금·그래프 세션 시작).
+
+        _on_start(신규)와 _resume_from_point(재개) 공통 셋업.
+        성공 시 True, array 생성 실패 시 False.
+        """
         self._save_config()
         self._cfg = self._current_cfg()
         self._array = _generate_array(self._cfg)
         if not self._array:
             QMessageBox.warning(self, "Array 오류", "Array 생성 실패: 포인트 수가 0입니다.")
-            return
+            return False
 
         self._array_idx = 0
         self._last_write_value = None
         self._last_meas_values = {}
         self._trace_filepath = None
+        self._auto_retry_used = False
+        self._retry_timer.stop()
+        self._btn_resume.setEnabled(False)
         # Reconfigure derivative channels from current UI settings (single sweep과 동일하게)
         mw = self._main_win
         for order, ch in [(1, mw._deriv_channel), (2, mw._deriv_channel2), (3, mw._deriv_channel3)]:
@@ -1290,7 +1200,7 @@ class DoubleSweepWindow(QDialog):
         mw._btn_start.setEnabled(False)
         mw._sweep_channel_panel.setEnabled(False)
         mw._meas_panel.setEnabled(False)
-        mw._save_settings_frame.setEnabled(False)
+        mw._set_save_inputs_enabled(False)
         for _sfx in ("", "2", "3"):
             getattr(mw, f"_cb_deriv{_sfx}_enable").setEnabled(False)
             for _w in getattr(mw, f"_deriv{_sfx}_setting_widgets"):
@@ -1341,13 +1251,19 @@ class DoubleSweepWindow(QDialog):
         for ch in (self._main_win._deriv_channel, self._main_win._deriv_channel2, self._main_win._deriv_channel3):
             ch.reset()
 
-        self._main_win._log("Double Sweep started. Pre-positioning first channel → start_point.", color="#4ec9b0")
-        self._start_pre_init()
+        return True
+
+    def _on_stop_clicked(self):
+        """사용자가 Stop 버튼을 누른 경우 — 현재 array 지점을 resume 로그에 저장 후 중단."""
+        if self._phase != DoubleSweepPhase.IDLE and self._array:
+            self._save_resume_point("사용자 중단(Stop)")
+        self._on_stop()
 
     def _on_stop(self):
         if self._phase == DoubleSweepPhase.IDLE:
             return
         self._sweep_timer.stop()
+        self._retry_timer.stop()
         self._sweep_worker.request_stop()
         self._second_worker.request_stop()
         self._set_phase(DoubleSweepPhase.IDLE)
@@ -1359,6 +1275,7 @@ class DoubleSweepWindow(QDialog):
         self.sweep_finished.emit()
         self._main_win._log("Double Sweep stopped.", color="#ce9178")
         self._unlock_main_ui()
+        self._update_resume_btn_enabled()
 
     def _finish(self):
         # 모든 측정 완료 알람
@@ -1374,6 +1291,7 @@ class DoubleSweepWindow(QDialog):
             f"Double Sweep complete. ({len(self._array)} array points)", color="#4ec9b0"
         )
         self._unlock_main_ui()
+        self._update_resume_btn_enabled()
 
     # ------------------------------------------------------------------
     # Context snapshot
@@ -1440,8 +1358,22 @@ class DoubleSweepWindow(QDialog):
         self._sweep_timer.start(0)
 
     def _make_effective_second_channel(self) -> InstantiatedSecondSweepChannel:
-        """Return second channel with UI-overridden SWEEP params when advance_type is SWEEP."""
+        """Return second channel with UI-overridden params for SWEEP / FEEDBACK / WAIT_FOR_TIME."""
         ch = self._second_channel
+        if ch.advance_type == SecondSweepAdvanceType.FEEDBACK:
+            read_cmd = self._le_fb_read_cmd.text().strip()
+            return ch.model_copy(update={
+                "feedback_read_cmd":       read_cmd if read_cmd else ch.feedback_read_cmd,
+                "feedback_poll_interval":  self._parse_ds_float(self._le_fb_poll.text(), ch.feedback_poll_interval),
+                "feedback_tolerance_pct":  self._parse_ds_float(self._le_fb_tol.text(), ch.feedback_tolerance_pct),
+                "feedback_std_window":     self._sb_fb_std_window.value(),
+                "feedback_noisefloor":     self._parse_ds_float(self._le_fb_noisefloor.text(), ch.feedback_noisefloor),
+                "feedback_std_threshold":  self._parse_ds_float(self._le_fb_std_thresh.text(), ch.feedback_std_threshold),
+            })
+        if ch.advance_type == SecondSweepAdvanceType.WAIT_FOR_TIME:
+            return ch.model_copy(update={
+                "wait_time": self._parse_ds_float(self._le_wait_time.text(), ch.wait_time),
+            })
         if ch.advance_type != SecondSweepAdvanceType.SWEEP:
             return ch
         use_safety = self._cb_second_safety.isChecked()
@@ -1451,10 +1383,45 @@ class DoubleSweepWindow(QDialog):
             "safety_interval_ms": self._parse_ds_float(self._le_second_interval.text(), 0.0) if use_safety else 0.0,
         })
 
+    def _build_meta_extra(self) -> dict:
+        """메타 데이터 JSON에 기록할 second channel advance 설정을 구성한다.
+
+        측정에 실제로 사용된(UI override 반영된) 파라미터를 advance type별로 저장.
+        """
+        ch = self._make_effective_second_channel()
+        second_value = (
+            self._array[self._array_idx]
+            if self._array and self._array_idx < len(self._array) else None
+        )
+        info: dict = {
+            "alias": ch.alias,
+            "description": ch.description,
+            "advance_type": ch.advance_type.value,
+            "unit": ch.unit,
+            "value": second_value,
+        }
+        at = ch.advance_type
+        if at == SecondSweepAdvanceType.SWEEP:
+            info["sweep_rate"] = ch.sweep_rate
+            info["safety_steps"] = ch.safety_steps
+            info["safety_interval_ms"] = ch.safety_interval_ms
+        elif at == SecondSweepAdvanceType.FEEDBACK:
+            info["feedback_read_cmd"] = ch.feedback_read_cmd
+            info["feedback_poll_interval"] = ch.feedback_poll_interval
+            info["feedback_tolerance_pct"] = ch.feedback_tolerance_pct
+            info["feedback_std_window"] = ch.feedback_std_window
+            info["feedback_noisefloor"] = ch.feedback_noisefloor
+            info["feedback_std_threshold"] = ch.feedback_std_threshold
+        elif at == SecondSweepAdvanceType.WAIT_FOR_TIME:
+            info["wait_time"] = ch.wait_time
+        return {"second_channel": info}
+
     def _advance_second(self, next_val: float, prev: Optional[float]):
         ch = self._make_effective_second_channel()
         self._lbl_second_val.setText(f"{next_val:.4g} {ch.unit}")
         self._lbl_array_progress.setText(f"{self._array_idx + 1}/{len(self._array)}")
+        self._lbl_fb_metric.setText("—")
+        self._lbl_fb_metric.setStyleSheet("color: #888888;")
         self._set_phase(DoubleSweepPhase.ADVANCING_SECOND)
 
         # 새 step 시작 — T/B 버퍼 초기화
@@ -1482,7 +1449,7 @@ class DoubleSweepWindow(QDialog):
             except Exception as _e:
                 self._main_win._log(f"  [Graph] clear failed: {_e}", color="#f44747")
 
-        self.request_advance.emit(SecondChannelRequest(
+        self._emit_advance(SecondChannelRequest(
             channel=ch,
             next_value=next_val,
             prev_value=prev,
@@ -1498,7 +1465,7 @@ class DoubleSweepWindow(QDialog):
 
         if ch.advance_type == SecondSweepAdvanceType.SWEEP:
             # SWEEP type: use full advance worker so safety ramp / rate are respected
-            self.request_advance.emit(SecondChannelRequest(
+            self._emit_advance(SecondChannelRequest(
                 channel=ch,
                 next_value=0.0,
                 prev_value=last_val,
@@ -1507,15 +1474,44 @@ class DoubleSweepWindow(QDialog):
         else:
             # Other types: single VISA write to 0, then finish immediately
             ch_simple = ch.model_copy(update={"advance_type": SecondSweepAdvanceType.SIMPLE_HOP})
-            self.request_advance.emit(SecondChannelRequest(
+            self._emit_advance(SecondChannelRequest(
                 channel=ch_simple,
                 next_value=0.0,
                 prev_value=last_val,
                 time_per_point=self._cfg.time_per_point,
             ))
 
+    @Slot(float)
+    def _on_feedback_metric(self, metric: float) -> None:
+        """Phase 2 metric 값을 실시간으로 Std Threshold 옆 레이블에 표시."""
+        threshold = self._parse_ds_float(self._le_fb_std_thresh.text(), 0.01)
+        if metric >= 1e30:
+            self._lbl_fb_metric.setText("∞")
+            self._lbl_fb_metric.setStyleSheet("color: #f44747;")
+        else:
+            color = "#4ec9b0" if metric < threshold else "#f78166"
+            self._lbl_fb_metric.setText(f"{metric:.4g}")
+            self._lbl_fb_metric.setStyleSheet(f"color: {color};")
+
+    def _update_feedback_read_cmd_state(self) -> None:
+        """profile에 Read Cmd가 이미 설정된 경우 입력칸 비활성화."""
+        if self._second_channel is None:
+            return
+        if self._second_channel.advance_type != SecondSweepAdvanceType.FEEDBACK:
+            return
+        profile_cmd = self._second_channel.feedback_read_cmd.strip()
+        if profile_cmd:
+            self._le_fb_read_cmd.setEnabled(False)
+            self._le_fb_read_cmd.setText(profile_cmd)
+            self._lbl_fb_read_hint.setText("(profile 설정)")
+        else:
+            self._le_fb_read_cmd.setEnabled(True)
+            self._lbl_fb_read_hint.setText("")
+
     @Slot()
     def _on_advance_done(self):
+        self._lbl_fb_metric.setText("—")
+        self._lbl_fb_metric.setStyleSheet("color: #888888;")
         if self._phase == DoubleSweepPhase.RETURNING_ZERO:
             self._finish()
             return
@@ -1525,17 +1521,160 @@ class DoubleSweepWindow(QDialog):
 
     @Slot(str)
     def _on_advance_error(self, msg: str):
-        self._main_win._log(f"  [DoubleSweep] Second channel error: {msg}", color="#f44747")
-        self._check_alarm(is_comm_error=True, extra_reason=f"Second channel error: {msg}")
+        from core.visa_errors import is_comm_error, humanize_error
+        self._main_win._log(
+            f"  [DoubleSweep] Second channel error — {humanize_error(msg)}  [상세] {msg}",
+            color="#f44747")
+        if is_comm_error(msg):
+            self._handle_comm_error(f"Second channel error: {msg}")
+        else:
+            self._check_alarm(is_comm_error=True, extra_reason=f"Second channel error: {msg}")
+            self._on_stop()
+
+    @Slot(str)
+    def _on_advance_timeout(self, msg: str):
+        """second advance 워치독 타임아웃 — 자동재개 없이 즉시 측정 중지 + 알람.
+
+        threshold 미도달(20분, 재전송 1회 후)·feedback 안정화 지연(5분) 모두 여기로 온다.
+        comm 오류와 달리 재시도하지 않는다(이미 worker가 재전송을 시도함).
+        """
+        self._main_win._log(
+            f"  [DoubleSweep] Second channel 타임아웃 — 측정 중지: {msg}",
+            color="#f44747")
+        self._check_alarm(is_comm_error=True, extra_reason=f"Second channel timeout: {msg}")
         self._on_stop()
+
+    # ------------------------------------------------------------------
+    # 통신 오류 자동 재개 / 수동 재개
+    # ------------------------------------------------------------------
+
+    _AUTO_RESUME_DELAY_MS = 10_000   # 통신 오류 후 자동 재개 대기 (10초)
+
+    def _handle_comm_error(self, reason: str):
+        """통신 오류: 1회는 10초 후 자동 재개, 재차 발생 시 중단 + 재개 지점 저장."""
+        if self._phase == DoubleSweepPhase.IDLE:
+            return
+        if not self._auto_retry_used:
+            self._auto_retry_used = True
+            self._sweep_timer.stop()
+            self._main_win._log(
+                f"  ⏳ [DoubleSweep] 통신 오류 — {self._AUTO_RESUME_DELAY_MS // 1000}초 후 자동 재개합니다.  ({reason})",
+                color="#d7ba7d",
+            )
+            self._retry_timer.start(self._AUTO_RESUME_DELAY_MS)
+        else:
+            self._save_resume_point(reason)
+            self._check_alarm(is_comm_error=True, extra_reason=reason)
+            from core.visa_errors import humanize_error
+            cause = humanize_error(reason)
+            self._main_win._log(
+                "  ✗ [DoubleSweep] 자동 재개 후 재차 통신 오류 — 측정 중단. "
+                "[Resume] 버튼으로 저장된 지점부터 재개하세요.",
+                color="#f44747",
+            )
+            self._main_win._log(f"     원인: {cause}", color="#f44747")
+            self._on_stop()
+            QMessageBox.warning(
+                self, "통신 오류 — Double Sweep 중단",
+                "자동 재개 후에도 통신 오류가 반복되어 측정을 중단했습니다.\n\n"
+                f"원인: {cause}\n\n"
+                "현재 array 지점이 재개 로그에 저장되었습니다.\n"
+                "[Resume] 버튼으로 해당 지점부터 다시 시작할 수 있습니다.",
+            )
+
+    def _auto_resume(self):
+        """10초 경과 후 마지막 요청을 재전송하여 측정을 이어간다."""
+        if self._phase == DoubleSweepPhase.IDLE or self._last_emit is None:
+            return
+        kind, req = self._last_emit
+        self._main_win._log("  ▶ [DoubleSweep] 자동 재개 — 측정을 재시작합니다.", color="#4ec9b0")
+        if kind == "step":
+            self.request_step.emit(req)
+        else:
+            self.request_advance.emit(req)
+
+    def _save_resume_point(self, reason: str):
+        """현재 array index 위치를 재개 로그에 저장 (array index 단위 재개)."""
+        from datetime import datetime
+        from core.resume_log import ResumePoint
+        ch = self._second_channel
+        second_val = (
+            self._array[self._array_idx]
+            if self._array and self._array_idx < len(self._array) else None
+        )
+        unit = ch.unit if ch else ""
+        label = (
+            f"array {self._array_idx + 1}/{len(self._array)}  "
+            f"2nd={second_val:.6g}{unit}  phase={self._phase.name}  ({reason[:40]})"
+            if second_val is not None else
+            f"array {self._array_idx + 1}/{len(self._array)}  phase={self._phase.name}"
+        )
+        point = ResumePoint(
+            sweep_type="double",
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            label=label,
+            data_filepath="",   # double sweep은 phase별 파일을 재생성하므로 미사용
+            payload={
+                "array_idx": self._array_idx,
+                "phase": self._phase.name,
+                "second_value": second_val,
+            },
+        )
+        self._resume_log.add(point)
+        self._update_resume_btn_enabled()
+
+    def _update_resume_btn_enabled(self):
+        """재개 로그에 double 지점이 있고 IDLE 상태이면 Resume 활성화."""
+        if not hasattr(self, "_btn_resume"):
+            return
+        has_point = self._resume_log.latest("double") is not None
+        self._btn_resume.setEnabled(has_point and self._phase == DoubleSweepPhase.IDLE)
+
+    def _on_resume_clicked(self):
+        """[Resume] 버튼: 저장된 지점 목록에서 선택 후 해당 array index부터 재개."""
+        if self._phase != DoubleSweepPhase.IDLE:
+            return
+        from gui.resume_dialog import ResumePickerDialog
+        dlg = ResumePickerDialog(self._resume_log.all(), parent=self, sweep_type="double")
+        if dlg.exec() and dlg.selected_point is not None:
+            self._resume_from_point(dlg.selected_point)
+
+    def _resume_from_point(self, point):
+        """선택된 array index부터 Double Sweep을 재개한다.
+
+        해당 index의 DUMMY→TRACE→RETRACE를 처음부터 다시 수행 (phase별 파일 재생성).
+        """
+        if self._main_win._running:
+            QMessageBox.warning(self, "Sweep 실행 중", "Main sweep이 실행 중입니다. 먼저 중단하세요.")
+            return
+        if self._main_win._sweep_channel is None or self._second_channel is None:
+            QMessageBox.warning(self, "재개 불가",
+                "Sweep Channel / Second Channel이 선택되어 있어야 합니다.")
+            return
+        if not self._main_win._run_connection_test(include_second=True, show_success=False):
+            return
+
+        if not self._prepare_run():
+            return
+
+        idx = int(point.payload.get("array_idx", 0))
+        idx = max(0, min(idx, len(self._array) - 1))
+        self._array_idx = idx
+        prev = self._array[idx - 1] if idx > 0 else None
+        self._main_win._log(
+            f"  ▶ [DoubleSweep] 수동 재개 — array {idx + 1}/{len(self._array)} 부터 재시작.",
+            color="#4ec9b0",
+        )
+        self._advance_second(self._array[idx], prev=prev)
 
     def _start_sweep_phase(self, phase: DoubleSweepPhase):
         self._set_phase(phase)
-        self._setup_datasaver_for_phase(phase.name.lower())
+        if not self._setup_datasaver_for_phase(phase.name.lower()):
+            return   # 저장 실패 → 측정 중단 (데이터 유실 방지). _on_stop은 setup에서 호출됨.
         # 각 페이즈 시작 시 초기 상태 측정 (이동 없이 현재 위치에서 measurement만)
         ctx = self._ctx
         cfg = self._cfg
-        self.request_step.emit(StepRequest(
+        self._emit_step(StepRequest(
             sweep_channel=ctx.sweep_channel,
             sweep_to=0.0,
             sweep_rate=1.0,
@@ -1555,9 +1694,11 @@ class DoubleSweepWindow(QDialog):
             # ── RETRACE 완료: 알람 체크 → 메타 데이터 저장 → 다음 step ──
             self._check_alarm(is_comm_error=False)
             # 메타 데이터 JSON 저장 (TRACE 파일과 같은 이름, 확장자 .json)
+            # second channel advance 설정(feedback/wait/sweep 파라미터)도 함께 기록
             self._main_win._meta_manager.save(
                 self._main_win._param_manager_reg.meta_data_config,
                 self._trace_filepath,
+                extra=self._build_meta_extra(),
             )
             self._array_idx += 1
             if self._array_idx < len(self._array):
@@ -1575,7 +1716,14 @@ class DoubleSweepWindow(QDialog):
     # DataSaver
     # ------------------------------------------------------------------
 
-    def _setup_datasaver_for_phase(self, phase_name: str):
+    def _setup_datasaver_for_phase(self, phase_name: str) -> bool:
+        """phase별 .dat 세션을 시작한다.
+
+        반환: 측정을 계속해도 되는지 여부.
+          - 저장이 의도적으로 비활성: True (저장 없이 진행)
+          - 저장 활성 + 성공: True
+          - 저장 활성 + 실패: False (경고 후 측정 중단 — 데이터 유실 방지)
+        """
         from datetime import date as _date
         ctx = self._ctx
         base = ctx.custom_folder
@@ -1610,14 +1758,43 @@ class DoubleSweepWindow(QDialog):
         filepath = self._data_saver.start_session()
         if filepath:
             self._main_win._log(f"  [{phase_name}] Data → {filepath}", color="#888888")
+        elif self._data_saver.start_error() is not None:
+            # 저장이 활성인데 실패 → 데이터 유실 위험. 즉시 경고 + 측정 중단.
+            err = self._data_saver.start_error()
+            self._main_win._log(
+                f"  ✗ [{phase_name}] 데이터 저장 시작 실패 — 측정 중단: {err}",
+                color="#f44747",
+            )
+            self._on_stop()
+            QMessageBox.critical(
+                self, "데이터 저장 실패 — 측정 중단",
+                f"[{phase_name}] 단계에서 데이터 파일을 시작할 수 없어 측정을 중단했습니다.\n\n"
+                f"사유: {err}\n\n"
+                "데이터 유실을 막기 위해 저장이 정상화될 때까지 측정하지 않습니다.\n"
+                "Main Folder 경로·권한·디스크 공간을 확인하세요.",
+            )
+            return False
         # TRACE 파일 경로를 메타 데이터 JSON 저장에 사용
         if phase_name == "trace":
             self._trace_filepath = self._data_saver.get_filepath()
         self._update_ds_save_path()
+        return True
 
     # ------------------------------------------------------------------
     # Sweep tick (same pattern as main_window)
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Request emit helpers (자동 재개 시 재전송 위해 마지막 요청 기록)
+    # ------------------------------------------------------------------
+
+    def _emit_step(self, req: StepRequest):
+        self._last_emit = ("step", req)
+        self.request_step.emit(req)
+
+    def _emit_advance(self, req: SecondChannelRequest):
+        self._last_emit = ("advance", req)
+        self.request_advance.emit(req)
 
     def _sweep_tick(self):
         if self._phase not in (DoubleSweepPhase.PRE_INIT,
@@ -1644,7 +1821,7 @@ class DoubleSweepWindow(QDialog):
             active_meas = ctx.active_measurements
 
         t_emit = time.perf_counter()
-        self.request_step.emit(StepRequest(
+        self._emit_step(StepRequest(
             sweep_channel=ctx.sweep_channel,
             sweep_to=sweep_to,
             sweep_rate=sweep_rate,
@@ -1707,14 +1884,27 @@ class DoubleSweepWindow(QDialog):
                 f"실패 채널: {', '.join(err_descs)}"
             )
             self._main_win._log(f"  [DoubleSweep] {err_msg}", color="#f44747")
-            self._check_alarm(
-                is_meas_error=True,
-                extra_reason=f"측정값 ERR — {', '.join(err_descs)}",
+            # 통신 오류면 자동 재개 경로로, 그 외(파싱 등)는 즉시 중단
+            from core.resume_log import is_comm_error
+            comm = any(
+                is_comm_error(result.meas_errors.get(idx, ""))
+                for idx in self._ctx.active_meas_indices
+                if meas_map.get(idx) is None
             )
-            self._on_stop()
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "Measurement Error", err_msg)
+            if comm:
+                self._handle_comm_error("; ".join(err_descs))
+            else:
+                self._check_alarm(
+                    is_meas_error=True,
+                    extra_reason=f"측정값 ERR — {', '.join(err_descs)}",
+                )
+                self._on_stop()
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(self, "Measurement Error", err_msg)
             return
+
+        # 정상 스텝 — 자동 재개 예산 리셋
+        self._auto_retry_used = False
         mw = self._main_win
         for ch, fn in [
             (mw._deriv_channel,  mw._deriv_val_for_step),
@@ -1724,7 +1914,19 @@ class DoubleSweepWindow(QDialog):
             if ch._cfg.enabled:
                 dv = fn(result, meas_map)
                 row_vals.append(f"{dv:.6g}" if dv is not None else "—")
-        self._data_saver.append_row(row_vals)
+        # 데이터 한 줄 기록 — 저장 활성인데 실패하면 측정 중단 (유실 방지)
+        if not self._data_saver.append_row(row_vals) and self._data_saver.is_enabled():
+            self._main_win._log(
+                "  ✗ [DoubleSweep] 데이터 기록 실패 — 측정 중단 (디스크/권한 확인).",
+                color="#f44747",
+            )
+            self._on_stop()
+            QMessageBox.critical(
+                self, "데이터 기록 실패 — 측정 중단",
+                "측정값을 파일에 기록하지 못해 측정을 중단했습니다.\n"
+                "디스크 공간·파일 권한을 확인한 뒤 다시 시작하세요.",
+            )
+            return
 
         # MetaDataManager: T/B 버퍼 누적
         self._main_win._meta_manager.record_step(result.meas_results)
@@ -1787,9 +1989,15 @@ class DoubleSweepWindow(QDialog):
 
     @Slot(str)
     def _on_step_error(self, msg: str):
-        self._main_win._log(f"  [DoubleSweep] Step error: {msg}", color="#f44747")
-        self._check_alarm(is_comm_error=True, extra_reason=f"Step error: {msg}")
-        self._on_stop()
+        from core.visa_errors import is_comm_error, humanize_error
+        self._main_win._log(
+            f"  [DoubleSweep] Step error — {humanize_error(msg)}  [상세] {msg}",
+            color="#f44747")
+        if is_comm_error(msg):
+            self._handle_comm_error(f"Step error: {msg}")
+        else:
+            self._check_alarm(is_comm_error=True, extra_reason=f"Step error: {msg}")
+            self._on_stop()
 
     # ------------------------------------------------------------------
     # Alarm
@@ -1921,17 +2129,16 @@ class DoubleSweepWindow(QDialog):
         self._update_ds_save_path()
         self._rebuild_second_channel_radios()
         self._update_unit_labels()
-        # Refresh alarm panel measurements in case alarm_measurements changed
+        # Refresh measurement-condition combo in case alarm_measurements changed
         alarm_meas = self._param_reg.main_ui_profile.alarm_measurements
-        self._alarm_panel.refresh_measurements(alarm_meas)
+        self._meascond_panel.refresh_measurements(alarm_meas)
         if self._phase == DoubleSweepPhase.IDLE:
             self._btn_start.setEnabled(not self._main_win._running)
         super().showEvent(event)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
-            self._save_config()
-            self.hide()
+            self._save_config()      # 저장만 하고 창은 닫지 않음 (실수로 닫힘 방지)
             event.accept()
             return
         if (event.modifiers() == Qt.KeyboardModifier.ControlModifier

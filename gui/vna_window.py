@@ -96,21 +96,30 @@ class _VnaWorker(QThread):
 # ---------------------------------------------------------------------------
 
 class _AcquireWorker(QObject):
-    step_done = Signal(int, list)   # (step_idx, [np.ndarray, ...])
-    finished  = Signal()
-    error     = Signal(str)
-    progress  = Signal(str)
+    step_done   = Signal(int, list)   # (step_idx, [np.ndarray, ...])  — 정규화된 배열
+    step_timing = Signal(int, float)  # (step_idx, remaining_sec)  양수=idle, 음수=overrun
+    step_elapsed = Signal(int, float)  # (step_idx, elapsed_sec)  한 스텝 acquire 소요 시간
+    finished    = Signal()
+    error       = Signal(str)
+    progress    = Signal(str)
 
     def __init__(self, session, lib_reg, acq_cfg: VnaAcquireConfig,
                  sweep_values=None,
-                 sweep_cmd: Optional[VnaCommandEntry] = None):
+                 sweep_cmd: Optional[VnaCommandEntry] = None,
+                 time_mode: bool = False,
+                 time_interval: float = 1.0,
+                 time_count: int = 1):
         super().__init__()
         self._session      = session
         self._lib_reg      = lib_reg
         self._acq          = acq_cfg
         self._sweep_values = sweep_values
         self._sweep_cmd    = sweep_cmd   # 선택된 단일 sweep 명령어
+        self._time_mode    = time_mode
+        self._time_interval = time_interval
+        self._time_count    = time_count
         self._stop_flag    = False
+        self._ref_len: Optional[int] = None   # 첫 스텝에서 확정된 기준 array 길이
 
     def stop(self):
         self._stop_flag = True
@@ -118,29 +127,104 @@ class _AcquireWorker(QObject):
     @Slot()
     def run(self):
         try:
-            values = self._sweep_values if self._sweep_values is not None else [None]
-            for i, sv in enumerate(values):
-                if self._stop_flag:
-                    break
-                sv_str = f"{sv:.6g}" if sv is not None else ""
-                self.progress.emit(
-                    f"Step {i + 1}/{len(values)}"
-                    + (f"  val={sv_str}" if sv_str else ""))
-                try:
-                    sweep_list = ([self._sweep_cmd] if self._sweep_cmd is not None
-                                  else self._acq.sweep_cmds)
-                    self._exec_write_cmds(sweep_list, sv_str)
-                    self._exec_write_cmds(self._acq.start_cmds, sv_str)
-                    self._exec_wait_cmds(self._acq.wait_cmds)
-                    arrays = self._exec_read_cmds(self._acq.read_cmds)
-                    self.step_done.emit(i, arrays)
-                except Exception as e:
-                    self.error.emit(f"Step {i + 1}: {type(e).__name__}: {e}")
-                    break
+            if self._time_mode:
+                self._run_time_mode()
+            else:
+                self._run_value_mode()
         except Exception as e:
             self.error.emit(f"Fatal: {type(e).__name__}: {e}")
         finally:
             self.finished.emit()   # 항상 emit — 정상/에러/중단 모두
+
+    def _run_value_mode(self):
+        values = self._sweep_values if self._sweep_values is not None else [None]
+        for i, sv in enumerate(values):
+            if self._stop_flag:
+                break
+            sv_str = f"{sv:.6g}" if sv is not None else ""
+            self.progress.emit(
+                f"Step {i + 1}/{len(values)}"
+                + (f"  val={sv_str}" if sv_str else ""))
+            t0 = _time.perf_counter()
+            try:
+                sweep_list = ([self._sweep_cmd] if self._sweep_cmd is not None
+                              else self._acq.sweep_cmds)
+                self._exec_write_cmds(sweep_list, sv_str)
+                self._exec_write_cmds(self._acq.start_cmds, sv_str)
+                self._exec_wait_cmds(self._acq.wait_cmds)
+                arrays = self._exec_read_cmds(self._acq.read_cmds)
+                arrays = self._normalize_arrays(arrays, first_step=(i == 0))
+                self.step_elapsed.emit(i, _time.perf_counter() - t0)
+                self.step_done.emit(i, arrays)
+            except Exception as e:
+                self.error.emit(f"Step {i + 1}: {type(e).__name__}: {e}")
+                break
+
+    def _run_time_mode(self):
+        """일정 간격마다 acquire 1회씩 time_count번 반복.
+
+        각 스텝의 read 완료까지 소요 시간을 측정해:
+          remaining = interval - elapsed
+          remaining > 0 → idle (그만큼 대기), remaining < 0 → overrun(부족분)
+        """
+        n = max(1, self._time_count)
+        interval = max(0.0, self._time_interval)
+        for i in range(n):
+            if self._stop_flag:
+                break
+            self.progress.emit(f"Time step {i + 1}/{n}")
+            t0 = _time.perf_counter()
+            try:
+                # 단일 acquire와 동일한 cycle (sweep_cmds[빈값] → start → wait → read)
+                self._exec_write_cmds(self._acq.sweep_cmds, "")
+                self._exec_write_cmds(self._acq.start_cmds, "")
+                self._exec_wait_cmds(self._acq.wait_cmds)
+                arrays = self._exec_read_cmds(self._acq.read_cmds)
+                arrays = self._normalize_arrays(arrays, first_step=(i == 0))
+                self.step_done.emit(i, arrays)
+            except Exception as e:
+                self.error.emit(f"Time step {i + 1}: {type(e).__name__}: {e}")
+                break
+            elapsed   = _time.perf_counter() - t0
+            remaining = interval - elapsed
+            self.step_timing.emit(i, remaining)
+            # 남는 시간만큼 대기 (마지막 스텝 제외). stop을 빠르게 반영하도록 분할 sleep.
+            if i < n - 1 and remaining > 0:
+                deadline = _time.perf_counter() + remaining
+                while not self._stop_flag and _time.perf_counter() < deadline:
+                    _time.sleep(min(0.05, deadline - _time.perf_counter()))
+
+    def _normalize_arrays(self, arrays: List[np.ndarray],
+                          first_step: bool) -> List[np.ndarray]:
+        """단일값은 기준 길이로 broadcast, array 크기 불일치는 첫 스텝에서만 감지.
+
+        - len>1 인 array들이 서로 크기가 다르면 (첫 스텝) → ValueError (측정 중단).
+        - len<=1 (단일값) → 기준 길이로 복사 확장.
+        - 기준 길이는 첫 스텝에서 확정되어 이후 스텝에 재사용 (재감지 안 함).
+        """
+        if first_step:
+            multi = [len(a) for a in arrays if len(a) > 1]
+            if multi:
+                ref = multi[0]
+                if any(m != ref for m in multi):
+                    raise ValueError(
+                        f"read array 크기 불일치: {sorted(set(multi))} — "
+                        "array 컬럼들의 길이가 같아야 합니다.")
+            else:
+                ref = max((len(a) for a in arrays), default=1) or 1
+            self._ref_len = ref
+        ref = self._ref_len or 1
+        out: List[np.ndarray] = []
+        for a in arrays:
+            if len(a) == ref:
+                out.append(a)
+            elif len(a) <= 1:
+                val = float(a[0]) if len(a) == 1 else float("nan")
+                out.append(np.full(ref, val))
+            else:
+                # 첫 스텝 이후 길이가 기준과 다른 multi array: 단순 자르기/패딩 없이 그대로 둠
+                out.append(a)
+        return out
 
     # ------------------------------------------------------------------
     def _exec_write_cmds(self, cmds: List[VnaCommandEntry], sv_str: str):
@@ -527,6 +611,14 @@ class _PlotPanel(QFrame):
         btn_add.setToolTip("y 곡선 추가")
         btn_add.clicked.connect(lambda: self._add_y_row())
         ctrl_row.addWidget(btn_add)
+
+        btn_fit = QPushButton("Fit")
+        btn_fit.setFixedHeight(20)
+        btn_fit.setFixedWidth(36)
+        btn_fit.setToolTip("현재 표시된 데이터에 맞춰 X·Y 범위를 한 번 자동 맞춤\n"
+                           "(sweep 중 신호가 화면 밖으로 나갔을 때 사용)")
+        btn_fit.clicked.connect(self.auto_range)
+        ctrl_row.addWidget(btn_fit)
         lay.addLayout(ctrl_row)
 
         # y rows container
@@ -737,6 +829,12 @@ class VnaWindow(QDialog):
         # Section role management  (start / stop / n_points)
         self._role_rows: dict = {"start": None, "stop": None, "n_points": None}
         self._linspace_data: Optional[Tuple[str, str, np.ndarray]] = None
+        # 알람 (VNA sweep 전용 — 텔레그램)
+        from core.alarm_manager import AlarmManager
+        self._alarm_manager = AlarmManager()
+        self._time_mode_running: bool = False
+        # Sweep 콤보에 '⏱ Time' 항목을 두고, 저장된 time_mode면 최초 1회 그 항목을 선택
+        self._pending_time_select: bool = bool(self._cfg.acquire.time_mode)
 
         self._build_ui()
         self._rebuild_sections()
@@ -803,6 +901,12 @@ class VnaWindow(QDialog):
         btn_cfg.clicked.connect(self._open_config)
         lay.addWidget(btn_cfg)
 
+        btn_alarm = QPushButton("⚙ Alarm")
+        btn_alarm.setFixedHeight(22)
+        btn_alarm.setToolTip("VNA sweep 알람 설정 (텔레그램) — 측정 오류·완료 시 알림")
+        btn_alarm.clicked.connect(self._open_alarm_config)
+        lay.addWidget(btn_alarm)
+
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         sep.setStyleSheet("color: #30363d;")
@@ -837,7 +941,48 @@ class VnaWindow(QDialog):
         btn_open.setToolTip("Open save folder")
         btn_open.clicked.connect(self._on_open_folder)
         lay.addWidget(btn_open)
+
+        from gui.help_button import make_help_button
+        lay.addWidget(make_help_button(self._control_help_html(), "VNA Control 도움말"))
         return frame
+
+    @staticmethod
+    def _control_help_html() -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>VNA Control — 한 번에 여러 점(배열) 측정</b><hr>"
+            "보통 측정은 한 점씩 읽지만, VNA처럼 <b>한 번에 곡선(여러 점)을 통째로</b> 받아오는 "
+            "장비를 다루는 창입니다. 받은 곡선을 그래프로 보고 파일로 저장합니다.<hr>"
+
+            "<b>■ 측정 한 번(acquire)의 진행</b><br>"
+            "&nbsp;① 필요한 설정값을 장비에 보냄 → ② 측정 시작 명령 → "
+            "③ <b>측정이 끝날 때까지 기다림</b>(OPC) → ④ 곡선(S11·S21 등)을 읽어 옴.<br>"
+            "이 순서와 명령들은 <b>⚙ Config</b>에서 미리 정합니다.<hr>"
+
+            "<b>■ Single / Sweep / Time 모드</b><br>"
+            "&nbsp;• <b>Single Acquire</b>: 위 한 번만 실행.<br>"
+            "&nbsp;• <b>Sweep Acquire</b>: <b>Sweep:</b> 칸에서 고른 값을 Start→Stop으로 N번 "
+            "바꿔가며 매번 한 번씩 측정 (예: 자기장을 바꿔가며 곡선 여러 장).<br>"
+            "&nbsp;• <b>Sweep: 칸에서 ⏱ Time 선택</b> 시: 값을 바꾸지 않고 <b>일정 시간 간격</b>마다 "
+            "한 번씩 정해진 횟수(Count)만큼 측정 (버튼이 ‘▶ Time Sweep’으로 바뀜).<br>"
+            "&nbsp;&nbsp;– 측정이 간격보다 빨리 끝나면 남는 시간을 <b>Idle</b>(초록)로,<br>"
+            "&nbsp;&nbsp;– 더 오래 걸리면 부족분을 <b>Overrun</b>(빨강, 음수)으로 표시합니다.<hr>"
+
+            "<b>■ 단일값 자동 맞춤</b><br>"
+            "곡선(예: 201점)과 함께 자기장·온도 같은 <b>한 개짜리 값</b>을 같이 읽으면, "
+            "그 값을 곡선 길이에 맞춰 자동으로 채워 길이를 맞춥니다.<br>"
+            "단, 곡선이 여러 개인데 <b>서로 길이가 다르면</b> 첫 측정에서 오류로 알리고 멈춥니다.<hr>"
+
+            "<b>■ 상단 버튼/입력</b><br>"
+            "&nbsp;• <b>⚙ Config</b>: 측정 순서·명령·그래프 설정 (자세한 도움말은 그 창에 있음).<br>"
+            "&nbsp;• <b>⚙ Alarm</b>: 측정 오류·완료 시 텔레그램 알림.<br>"
+            "&nbsp;• <b>Save</b> / <b>Main·Sub</b>: 저장 켜기와 저장 폴더.<hr>"
+
+            "<b>■ 그래프(우측)</b><br>"
+            "왼쪽·오른쪽 두 개의 그래프에 각각 가로축·세로축을 골라 곡선을 그립니다. "
+            "한 그래프에 여러 곡선을 겹쳐 볼 수 있습니다."
+            "</body></html>"
+        )
 
     # ---- Left panel ---------------------------------------------------
 
@@ -944,7 +1089,39 @@ class VnaWindow(QDialog):
         self._le_sw_n.setFixedWidth(44)
         sw_row.addWidget(self._le_sw_n)
         sw_row.addStretch()
-        lay.addLayout(sw_row)
+        # Start/Stop/N 입력은 파라미터 sweep 선택 시에만 표시 (Time 선택 시 숨김)
+        self._sweep_param_widget = QWidget()
+        self._sweep_param_widget.setLayout(sw_row)
+        lay.addWidget(self._sweep_param_widget)
+
+        # 시간 기반 sweep: Sweep 콤보에서 '⏱ Time' 선택 시 사용
+        #   → Interval(초)마다 VNA acquire를 1회씩 Count번 반복
+        time_row = QHBoxLayout()
+        time_row.setSpacing(4)
+        time_row.addWidget(QLabel("Interval:"))
+        self._le_time_interval = QLineEdit(str(self._cfg.acquire.time_interval))
+        self._le_time_interval.setFont(_MONO)
+        self._le_time_interval.setFixedWidth(56)
+        time_row.addWidget(self._le_time_interval)
+        time_row.addWidget(QLabel("s"))
+        time_row.addSpacing(8)
+        time_row.addWidget(QLabel("Count:"))
+        self._le_time_count = QLineEdit(str(self._cfg.acquire.time_count))
+        self._le_time_count.setFont(_MONO)
+        self._le_time_count.setFixedWidth(44)
+        time_row.addWidget(self._le_time_count)
+        time_row.addStretch()
+        self._time_row_widget = QWidget()
+        self._time_row_widget.setLayout(time_row)
+        lay.addWidget(self._time_row_widget)
+
+        # Idle / Overrun 표시 (시간 모드 전용)
+        self._lbl_idle = QLabel("Idle: —")
+        self._lbl_idle.setFont(_MONO)
+        self._lbl_idle.setStyleSheet("color: #555;")
+        lay.addWidget(self._lbl_idle)
+        # 시간 행/파라미터 행의 초기 표시 여부는 _populate_sweep_cmds() →
+        # _on_sweep_cmd_changed()에서 콤보 선택에 따라 결정한다.
 
         sweep_row = QHBoxLayout()
         self._btn_sweep = QPushButton("▶ Sweep Acquire")
@@ -973,20 +1150,50 @@ class VnaWindow(QDialog):
     # ---- Sweep command helpers ---------------------------------------
 
     def _populate_sweep_cmds(self):
-        """cfg.acquire.sweep_cmds로 콤보박스 갱신."""
-        prev_idx = self._combo_sweep_cmd.currentIndex()
+        """cfg.acquire.sweep_cmds로 콤보박스 갱신. 마지막에 '⏱ Time' 항목을 추가한다."""
+        prev_idx  = self._combo_sweep_cmd.currentIndex()
+        old_count = self._combo_sweep_cmd.count()
+        # Time 항목은 항상 마지막 → 이전 선택이 마지막이면 Time이 선택돼 있던 것
+        was_time = old_count > 0 and prev_idx == old_count - 1
         self._combo_sweep_cmd.blockSignals(True)
         self._combo_sweep_cmd.clear()
         for cmd in self._cfg.acquire.sweep_cmds:
             label = cmd.figure_axis or cmd.description or "(unnamed)"
             self._combo_sweep_cmd.addItem(label)
+        self._combo_sweep_cmd.addItem("⏱ Time (반복 측정)")   # 시간 기반 sweep
+        self._combo_sweep_cmd.setToolTip(
+            "측정하며 쓸어갈 축을 고릅니다.\n"
+            "• 등록된 sweep 명령어: 그 값을 Start→Stop으로 N단계 바꾸며 측정\n"
+            "• ⏱ Time: 값을 바꾸지 않고 Interval(초)마다 Count번 반복 측정")
         self._combo_sweep_cmd.blockSignals(False)
-        new_idx = prev_idx if 0 <= prev_idx < self._combo_sweep_cmd.count() else 0
+        time_index = self._combo_sweep_cmd.count() - 1
+        if self._pending_time_select:
+            new_idx = time_index
+            self._pending_time_select = False
+        elif was_time:
+            new_idx = time_index
+        elif 0 <= prev_idx < self._combo_sweep_cmd.count():
+            new_idx = prev_idx
+        else:
+            new_idx = 0
         self._combo_sweep_cmd.setCurrentIndex(new_idx)
         self._on_sweep_cmd_changed(new_idx)
 
+    def _is_time_sweep_selected(self) -> bool:
+        """Sweep 콤보에서 '⏱ Time' 항목(항상 마지막)이 선택됐는지."""
+        return self._combo_sweep_cmd.currentIndex() == len(self._cfg.acquire.sweep_cmds)
+
     def _on_sweep_cmd_changed(self, idx: int):
-        """선택된 sweep 명령어의 unit_type에 따라 Start/Stop 단위 콤보 표시."""
+        """선택에 따라 파라미터 sweep 행 / 시간 행을 전환하고 단위 콤보를 갱신."""
+        is_time = self._is_time_sweep_selected()
+        self._sweep_param_widget.setVisible(not is_time)
+        self._time_row_widget.setVisible(is_time)
+        self._lbl_idle.setVisible(is_time)
+        self._btn_sweep.setText("▶ Time Sweep" if is_time else "▶ Sweep Acquire")
+        if is_time:
+            self._cb_sw_start_unit.setVisible(False)
+            self._cb_sw_stop_unit.setVisible(False)
+            return
         cmd = self._get_selected_sweep_cmd()
         ut  = cmd.unit_type if cmd else ""
         opts = _UNIT_OPTIONS.get(ut, [])
@@ -1176,6 +1383,9 @@ class VnaWindow(QDialog):
         self._start_acquire(sweep_values=None)
 
     def _on_sweep_acquire(self):
+        if self._is_time_sweep_selected():
+            self._on_time_sweep()
+            return
         if not self._cfg.acquire.sweep_cmds:
             self._set_status("Sweep 명령어가 등록되지 않았습니다. Config를 확인하세요.",
                              color="#f78166")
@@ -1196,7 +1406,38 @@ class VnaWindow(QDialog):
                         for i in range(n)])
         self._start_acquire(sweep_values=values)
 
-    def _start_acquire(self, sweep_values):
+    def _on_time_sweep(self):
+        """시간 기반 sweep 시작 — Interval(초)마다 acquire 1회씩 Count번."""
+        try:
+            interval = float(self._le_time_interval.text())
+            count    = int(self._le_time_count.text())
+            if interval < 0 or count < 1:
+                raise ValueError
+        except ValueError:
+            self._set_status("Invalid time-sweep parameters.", color="#f78166")
+            return
+        self._lbl_idle.setText("Idle: —")
+        self._lbl_idle.setStyleSheet("color: #555;")
+        self._start_acquire(sweep_values=None,
+                            time_mode=True, time_interval=interval, time_count=count)
+
+    @Slot(int, float)
+    def _on_step_elapsed(self, step_idx: int, elapsed: float):
+        """각 acquire 스텝의 실제 소요 시간을 상태줄에 기록 (Single·Sweep 공통)."""
+        self._set_status(f"Step {step_idx + 1} acquire 완료 — 소요 {elapsed:.3f} s", color="#7ee787")
+
+    @Slot(int, float)
+    def _on_step_timing(self, step_idx: int, remaining: float):
+        """시간 모드: 스텝 read 완료 후 남은/부족 시간 표시."""
+        if remaining >= 0:
+            self._lbl_idle.setText(f"Idle: {remaining:.3f} s")
+            self._lbl_idle.setStyleSheet("color: #7ee787;")
+        else:
+            self._lbl_idle.setText(f"Overrun: {remaining:.3f} s (부족)")
+            self._lbl_idle.setStyleSheet("color: #f78166;")
+
+    def _start_acquire(self, sweep_values, time_mode: bool = False,
+                       time_interval: float = 1.0, time_count: int = 1):
         if self._acq_thread and self._acq_thread.isRunning():
             self._set_status("Acquire already running.", color="#888")
             return
@@ -1231,12 +1472,15 @@ class VnaWindow(QDialog):
         selected_cmd = self._get_selected_sweep_cmd() if is_sweep else None
         worker = _AcquireWorker(
             self._session, self._lib_reg, self._cfg.acquire,
-            sweep_values, sweep_cmd=selected_cmd)
+            sweep_values, sweep_cmd=selected_cmd,
+            time_mode=time_mode, time_interval=time_interval, time_count=time_count)
         thread = QThread(self)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
         worker.step_done.connect(self._on_acq_step_done)
+        worker.step_timing.connect(self._on_step_timing)
+        worker.step_elapsed.connect(self._on_step_elapsed)
         worker.progress.connect(lambda msg: self._set_status(msg, color="#888"))
         worker.error.connect(self._on_acq_error)
         worker.finished.connect(lambda: self._on_acq_finished(is_sweep))
@@ -1247,6 +1491,9 @@ class VnaWindow(QDialog):
 
         self._acq_worker = worker
         self._acq_thread = thread
+        self._time_mode_running = time_mode
+        self._acq_errored = False
+        self._acq_stopped = False
         self._set_acquire_busy(True)
         thread.start()
 
@@ -1263,8 +1510,40 @@ class VnaWindow(QDialog):
             self._save_step(step_idx, arrays, is_sweep)
 
     def _on_acq_error(self, msg: str):
+        self._acq_errored = True
         self._set_status(f"Acquire error: {msg}", color="#f78166")
+        # 알람: 측정 오류 트리거 (meas_error)
+        self._fire_alarm_meas_error(msg)
         QMessageBox.critical(self, "Acquire Error", msg)
+
+    # ------------------------------------------------------------------
+    # Alarm (VNA sweep — 텔레그램)
+    # ------------------------------------------------------------------
+
+    def _open_alarm_config(self):
+        from gui.alarm_config_window import AlarmConfigWindow
+        dlg = AlarmConfigWindow(self._cfg.alarm, self._alarm_manager, parent=self,
+                                title="VNA Sweep — Alarm Config")
+        dlg.apply_requested.connect(self._on_alarm_cfg_applied)
+        dlg.exec()
+
+    def _on_alarm_cfg_applied(self, cfg):
+        self._cfg.alarm = cfg
+        save_vna_config(self._cfg, self._config_path())
+
+    def _fire_alarm_meas_error(self, detail: str):
+        cfg = self._cfg.alarm
+        if not cfg.enabled:
+            return
+        if self._alarm_manager.has_meas_error_trigger(cfg.triggers):
+            self._alarm_manager.fire(cfg, f"VNA 측정 오류 — {detail}")
+
+    def _fire_alarm_complete(self, n: int):
+        cfg = self._cfg.alarm
+        if not cfg.enabled:
+            return
+        if cfg.fire_on_complete:
+            self._alarm_manager.fire(cfg, f"VNA sweep 완료 — {n} step(s)")
 
     def _on_acq_finished(self, is_sweep: bool):
         n = self._step_count
@@ -1272,6 +1551,9 @@ class VnaWindow(QDialog):
             f"{'Sweep ' if is_sweep else ''}Acquire done — {n} step(s).",
             color="#7ee787")
         self._set_acquire_busy(False)
+        # 알람: 정상 완료(오류·중단 아님)에만 완료 트리거
+        if not self._acq_errored and not self._acq_stopped:
+            self._fire_alarm_complete(n)
 
     def _set_acquire_busy(self, busy: bool):
         self._btn_single.setEnabled(not busy)
@@ -1279,6 +1561,7 @@ class VnaWindow(QDialog):
         self._btn_stop_acq.setEnabled(busy)
 
     def _on_stop_acquire(self):
+        self._acq_stopped = True
         if self._acq_worker:
             self._acq_worker.stop()
         self._set_status("Stopping…", color="#888")
@@ -1489,6 +1772,13 @@ class VnaWindow(QDialog):
             self._cfg.acquire.sweep_n     = int(self._le_sw_n.text())
         except ValueError:
             pass
+        # 시간 기반 sweep 파라미터 영속화 (Sweep 콤보의 '⏱ Time' 선택 여부)
+        self._cfg.acquire.time_mode = self._is_time_sweep_selected()
+        try:
+            self._cfg.acquire.time_interval = float(self._le_time_interval.text())
+            self._cfg.acquire.time_count    = int(self._le_time_count.text())
+        except ValueError:
+            pass
         self._cfg.plot_curves = [
             self._panel_L.to_config(),
             self._panel_R.to_config(),
@@ -1513,6 +1803,11 @@ class VnaWindow(QDialog):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
-            self._save_and_hide()
-        else:
-            super().keyPressEvent(event)
+            event.accept()           # VNA Control은 Esc로 닫지 않음 (실수로 닫힘 방지)
+            return
+        if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                and event.key() == Qt.Key.Key_S):
+            self._save_ui_state()    # Ctrl+S = 설정 저장(닫지 않음)
+            event.accept()
+            return
+        super().keyPressEvent(event)

@@ -1,0 +1,3 @@
+data_dir: ''
+global_threshold: 1.0e+37
+parallel_measurement: false

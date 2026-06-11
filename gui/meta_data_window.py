@@ -44,11 +44,24 @@ class MetaDataConfigWindow(QDialog):
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(8)
 
-        # Global enable toggle
+        # Global enable toggle + 도움말 (?)
+        top_row = QHBoxLayout()
         self._cb_enable = QCheckBox("Enable Meta Data")
         self._cb_enable.setStyleSheet("font-weight: bold;")
         self._cb_enable.stateChanged.connect(self._refresh_preview)
-        lay.addWidget(self._cb_enable)
+        top_row.addWidget(self._cb_enable)
+        top_row.addStretch()
+        self._btn_help = QPushButton("?")
+        self._btn_help.setFixedSize(20, 20)
+        self._btn_help.setStyleSheet(
+            "QPushButton { background-color: #4ec9b0; color: #1e1e1e; border-radius: 10px;"
+            "font-weight: bold; font-size: 11px; }"
+            "QPushButton:hover { background-color: #6fe9d0; }"
+        )
+        self._btn_help.setToolTip(self._help_html())
+        self._btn_help.clicked.connect(self._show_help)
+        top_row.addWidget(self._btn_help)
+        lay.addLayout(top_row)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -118,6 +131,50 @@ class MetaDataConfigWindow(QDialog):
         btn_row.addStretch()
         btn_row.addWidget(btn_save)
         lay.addLayout(btn_row)
+
+    # ------------------------------------------------------------------
+    # Help
+    # ------------------------------------------------------------------
+
+    def _help_html(self) -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>Meta Data 기능 안내</b><hr>"
+            "측정 1회(sweep)가 끝날 때, 그 측정에 대한 <b>요약 메타 정보</b>를 "
+            "데이터 파일(.dat)과 같은 이름의 <b>.json</b> 파일로 저장합니다.<br>"
+            "(Double Sweep은 각 array step의 TRACE 파일 옆에 저장)<hr>"
+            "<b>저장되는 값 — 2가지 방식</b><br>"
+            "<table cellspacing='3' cellpadding='2'>"
+            "<tr valign='top'><td><b>① 단일 쿼리</b></td>"
+            "<td>일반 항목: <b>sweep 종료 시점에 1회 쿼리</b>한 값을 저장.<br>"
+            "예: 종료 시 자기장·온도 한 번 읽기.</td></tr>"
+            "<tr valign='top'><td><b>② 평균/표준편차</b></td>"
+            "<td>아래 3조건을 <b>모두</b> 만족하면 sweep 전체 측정값의 "
+            "<b>평균(mean)·표준편차(std)</b>를 자동 계산해 저장:<br>"
+            "&nbsp;&nbsp;1) 측정의 class가 <b>Temperature</b> 또는 <b>Bfield</b><br>"
+            "&nbsp;&nbsp;2) 해당 측정이 <b>active</b>(측정 패널에서 체크됨)<br>"
+            "&nbsp;&nbsp;3) 이 창에서 <b>체크</b>됨</td></tr>"
+            "</table><hr>"
+            "<b>사용법</b><br>"
+            "1. <b>Enable Meta Data</b>를 켭니다.<br>"
+            "2. 목록(Parameter Manager에 등록된 항목)에서 저장할 것을 <b>체크</b>합니다.<br>"
+            "3. 우측 <b>미리보기</b>에서 저장될 JSON 구조를 확인합니다 (값은 --- 표기).<br>"
+            "4. <b>Save &amp; Close</b>로 저장. 이후 측정마다 자동으로 .json이 생성됩니다.<hr>"
+            "<b>참고</b><br>"
+            "• 목록 항목은 <b>Parameter Manager</b>에서 등록/관리합니다.<br>"
+            "• class(Temperature/Bfield) 지정은 메인 창의 측정 행 콤보에서 합니다.<br>"
+            "• 응답에 단위 접미사(T, A…)가 붙어도 숫자로 자동 파싱됩니다."
+            "</body></html>"
+        )
+
+    def _show_help(self):
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle("Meta Data — 도움말")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(self._help_html())
+        box.setIcon(QMessageBox.Icon.Information)
+        box.exec()
 
     # ------------------------------------------------------------------
     # Populate / refresh
@@ -281,5 +338,12 @@ class MetaDataConfigWindow(QDialog):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             self._on_save()
-        else:
-            super().keyPressEvent(event)
+            self.hide()          # 다른 창들과 동일하게 Esc = 저장 후 닫기
+            event.accept()
+            return
+        if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                and event.key() == Qt.Key.Key_S):
+            self._on_save()      # Ctrl+S = 저장(닫지 않음)
+            event.accept()
+            return
+        super().keyPressEvent(event)

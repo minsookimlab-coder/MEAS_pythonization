@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from config.config_models import AlarmConfig
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -57,6 +59,10 @@ class VnaAcquireConfig(BaseModel):
     sweep_start: float = 0.0
     sweep_stop:  float = 1.0
     sweep_n:     int   = 10
+    # 시간 기반 sweep: 일정 간격마다 acquire 1회씩 N번 반복
+    time_mode:     bool  = False # True면 Sweep 버튼이 시간 기반으로 동작
+    time_interval: float = 1.0   # 스텝 간격 (초)
+    time_count:    int   = 10    # 반복 횟수
 
 
 class VnaPlotCurveConfig(BaseModel):
@@ -73,6 +79,7 @@ class VnaConfigData(BaseModel):
     main_folder: str = ""
     sub_folder:  str = ""
     save_enabled: bool = True
+    alarm:       AlarmConfig = Field(default_factory=AlarmConfig)  # VNA sweep 알람 (텔레그램)
 
 
 # ---------------------------------------------------------------------------

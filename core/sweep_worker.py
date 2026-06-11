@@ -74,6 +74,7 @@ class SweepWorker(QObject):
         self._session = None
         self._stop_event = threading.Event()
         self._threshold: float = 1e38  # |value| > threshold → None (nan)
+        self._parallel: bool = False   # True → 서로 다른 계측기 동시 측정
 
     def set_session(self, session) -> None:
         self._session = session
@@ -82,58 +83,120 @@ class SweepWorker(QObject):
         """전역 임계값 설정. |측정값| > value 이면 None(→ nan) 반환."""
         self._threshold = value
 
+    def set_parallel(self, enabled: bool) -> None:
+        """병렬 측정 토글. True면 서로 다른 계측기(alias)를 동시에 측정한다.
+
+        한 계측기 내 측정은 항상 한 번의 batch 또는 순차로 처리되고,
+        서로 다른 계측기끼리만 병렬화된다 (각자 독립 TCP 연결 → 안전).
+        """
+        self._parallel = enabled
+
     def request_stop(self) -> None:
         """메인 스레드에서 호출 — safety ramp 루프를 중단시킵니다."""
         self._stop_event.set()
+
+    def _measure_one_alias(
+        self, alias: str, entries: List[Tuple[int, str, str]], mode: str = ""
+    ) -> Tuple[List[Tuple[int, Optional[float]]], Dict[int, str]]:
+        """한 계측기(alias)의 측정 항목들을 읽어 (results, errors) 로 반환.
+
+        모든 항목이 TSP print() 패턴이면 한 번의 batch query로 묶고,
+        그렇지 않으면 항목별 순차 read. 같은 계측기 내부는 직렬(같은 TCP 연결).
+
+        mode: 에러 메시지 접두어 ("parallel"|"seq"). 어느 단계/계측기에서 났는지 식별용.
+        에러 메시지는 항상 [mode|alias] + 명령어 + 예외형/메시지를 포함한다.
+        """
+        results: List[Tuple[int, Optional[float]]] = []
+        errors: Dict[int, str] = {}
+        tag = f"[{mode}|{alias}]" if mode else f"[{alias}]"
+        exprs = [_TSP_PRINT_RE.match(cmd) for _, _, cmd in entries]
+        if all(m is not None for m in exprs):
+            batched = "print(" + ", ".join(m.group(1).strip() for m in exprs) + ")"
+            try:
+                if not self._session.is_open(alias):
+                    self._session.open(alias)
+                raw = self._session.query(alias, batched).strip()
+                parts = raw.split("\t")
+                for i, (row, desc, _) in enumerate(entries):
+                    try:
+                        val = float(parts[i])
+                        if abs(val) > self._threshold:
+                            val = float("nan")
+                        results.append((row, val))
+                    except (IndexError, ValueError):
+                        got = parts[i] if i < len(parts) else "missing"
+                        results.append((row, None))
+                        errors[row] = (
+                            f"{tag} batch 파싱 실패 — '{desc}' (part {i}='{got}'); "
+                            f"응답='{raw[:80]}'")
+            except Exception as e:
+                # batch query 자체 실패 (통신/타임아웃 등) → 이 계측기의 모든 항목 실패
+                err_msg = f"{tag} batch query 실패 (cmd='{batched}'): {type(e).__name__}: {e}"
+                for row, _, _ in entries:
+                    results.append((row, None))
+                    errors[row] = err_msg
+        else:
+            for row, desc, cmd in entries:
+                try:
+                    val = MeasurementParameter(name=desc, cmd_query=cmd).read(
+                        self._session, alias
+                    )
+                    if val is not None and abs(val) > self._threshold:
+                        val = float("nan")
+                    results.append((row, val))
+                except Exception as e:
+                    results.append((row, None))
+                    errors[row] = (
+                        f"{tag} read 실패 — '{desc}' (cmd='{cmd}'): "
+                        f"{type(e).__name__}: {e}")
+        return results, errors
 
     def _do_measurements(
         self, active_measurements: List[Tuple[int, str, str, str]]
     ) -> Tuple[List[Tuple[int, Optional[float]]], Dict[int, str]]:
         """active_measurements 목록을 읽어 (results, errors) 로 반환.
 
-        results: [(row, value_or_None), ...]
-        errors:  {row: "ExceptionType: message"}  — 실패한 row만 포함
+        계측기(alias)별로 그룹화한 뒤:
+          - _parallel=False: 그룹을 순차 측정 (기존 동작)
+          - _parallel=True : 그룹을 스레드로 동시 측정 (서로 다른 계측기 병렬)
+        결과 순서는 무의미 (소비측이 {row: val} dict로 변환).
+
+        에러 발생 시 각 항목의 errors[row] 에 [mode|alias] + 명령어 + 예외가 기록되어
+        어느 계측기·명령에서 났는지 정확히 식별할 수 있다.
         """
-        meas_results: List[Tuple[int, Optional[float]]] = []
-        meas_errors: Dict[int, str] = {}
         groups: Dict[str, List[Tuple[int, str, str]]] = defaultdict(list)
         for row, alias, desc, cmd in active_measurements:
             groups[alias].append((row, desc, cmd))
-        for alias, entries in groups.items():
-            exprs = [_TSP_PRINT_RE.match(cmd) for _, _, cmd in entries]
-            if all(m is not None for m in exprs):
-                batched = "print(" + ", ".join(m.group(1).strip() for m in exprs) + ")"
-                try:
-                    if not self._session.is_open(alias):
-                        self._session.open(alias)
-                    raw = self._session.query(alias, batched).strip()
-                    parts = raw.split("\t")
-                    for i, (row, _, _) in enumerate(entries):
-                        try:
-                            val = float(parts[i])
-                            if abs(val) > self._threshold:
-                                val = float("nan")
-                            meas_results.append((row, val))
-                        except (IndexError, ValueError):
-                            meas_results.append((row, None))
-                            meas_errors[row] = f"parse error (part {i}: {parts[i] if i < len(parts) else 'missing'})"
-                except Exception as e:
-                    err_msg = f"{type(e).__name__}: {e}"
-                    for row, _, _ in entries:
-                        meas_results.append((row, None))
-                        meas_errors[row] = err_msg
-            else:
-                for row, desc, cmd in entries:
+
+        meas_results: List[Tuple[int, Optional[float]]] = []
+        meas_errors: Dict[int, str] = {}
+
+        if self._parallel and len(groups) > 1:
+            # 서로 다른 계측기를 동시에 측정 — alias별 락이 같은 계측기는 직렬화한다.
+            from concurrent.futures import ThreadPoolExecutor
+            items = list(groups.items())
+            with ThreadPoolExecutor(max_workers=len(items)) as ex:
+                # future → alias 매핑을 유지해 예외 발생 시 어느 계측기인지 식별
+                fut_alias = {
+                    ex.submit(self._measure_one_alias, alias, entries, "parallel"): alias
+                    for alias, entries in items
+                }
+                for fut, alias in fut_alias.items():
                     try:
-                        val = MeasurementParameter(name=desc, cmd_query=cmd).read(
-                            self._session, alias
-                        )
-                        if val is not None and abs(val) > self._threshold:
-                            val = float("nan")
-                        meas_results.append((row, val))
+                        res, err = fut.result()
                     except Exception as e:
-                        meas_results.append((row, None))
-                        meas_errors[row] = f"{type(e).__name__}: {e}"
+                        # _measure_one_alias가 잡지 못한 예외 (이론상 없음) —
+                        # 해당 계측기 항목만 실패 처리하고 다른 계측기 결과는 보존.
+                        msg = f"[parallel|{alias}] 병렬 실행 중 예외: {type(e).__name__}: {e}"
+                        res = [(row, None) for row, _, _ in groups[alias]]
+                        err = {row: msg for row, _, _ in groups[alias]}
+                    meas_results.extend(res)
+                    meas_errors.update(err)
+        else:
+            for alias, entries in groups.items():
+                res, err = self._measure_one_alias(alias, entries, "seq")
+                meas_results.extend(res)
+                meas_errors.update(err)
         return meas_results, meas_errors
 
     @Slot(object)
@@ -212,4 +275,6 @@ class SweepWorker(QObject):
             ))
 
         except Exception as e:
-            self.step_error.emit(str(e))
+            # 어느 단계에서 났는지 식별 가능하도록 sweep alias + 예외형 포함
+            _sa = getattr(req.sweep_channel, "alias", "?")
+            self.step_error.emit(f"[sweep:{_sa}] {type(e).__name__}: {e}")
