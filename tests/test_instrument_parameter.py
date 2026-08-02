@@ -6,7 +6,7 @@ Mercury iTC/iPS 는 'STAT:...:TEMP:235.7446K' 처럼 경로+단위가 붙은 응
 """
 import unittest
 
-from core.instrument_parameter import _parse_float
+from pythonization.instruments.parameter import _parse_float
 
 
 class TestParseFloat(unittest.TestCase):

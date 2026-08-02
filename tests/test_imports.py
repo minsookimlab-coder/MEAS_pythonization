@@ -12,7 +12,7 @@ import pkgutil
 import unittest
 
 # 검사 대상 최상위 패키지. 레이아웃이 바뀌면 여기만 고치면 된다.
-ROOT_PACKAGES = ("config", "core", "driver", "gui")
+ROOT_PACKAGES = ("pythonization",)
 
 
 def _iter_modules(package_name: str):

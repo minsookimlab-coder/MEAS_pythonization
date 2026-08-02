@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.mfli_merge import (
+from pythonization.analysis.mfli_merge import (
     _num_key,
     interp_clamped,
     iter_our_sweeps,

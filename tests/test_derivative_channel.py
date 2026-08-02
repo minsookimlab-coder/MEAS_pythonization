@@ -5,7 +5,7 @@
 """
 import unittest
 
-from core.derivative_channel import (
+from pythonization.measurement.derivative import (
     OUTPUT_KEY,
     OUTPUT_KEY_2,
     OUTPUT_KEY_3,

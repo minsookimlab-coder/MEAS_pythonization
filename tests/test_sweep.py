@@ -5,7 +5,7 @@
 """
 import unittest
 
-from core.sweep import SweepConfig, calculate_next_step
+from pythonization.measurement.sweep import SweepConfig, calculate_next_step
 
 
 class TestCalculateNextStep(unittest.TestCase):

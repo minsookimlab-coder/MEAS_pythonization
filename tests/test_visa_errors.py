@@ -5,7 +5,7 @@
 """
 import unittest
 
-from core.visa_errors import is_comm_error
+from pythonization.instruments.errors import is_comm_error
 
 
 class TestIsCommError(unittest.TestCase):

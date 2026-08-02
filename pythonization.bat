@@ -2,6 +2,8 @@
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
+:: Pythonization launcher — creates .venv on first run, then starts the app.
+
 :: Check Python
 python --version >nul 2>&1
 if errorlevel 1 (
@@ -25,9 +27,12 @@ if not exist ".venv\Scripts\activate.bat" (
 :: Activate venv
 call ".venv\Scripts\activate.bat"
 
-:: Install / upgrade packages
-echo [*] Installing packages...
-pip install --upgrade --quiet PySide6 pyvisa numpy pyqtgraph pydantic PyYAML
+:: Required packages live in requirements.txt (single source of truth).
+:: Optional ones -- zhinst for the MFLI module, scipy for the Savitzky-Golay
+:: derivative filter -- are in requirements-optional.txt and are NOT installed
+:: automatically. The app runs fine without them.
+echo [*] Installing required packages...
+pip install --upgrade --quiet -r requirements.txt
 if errorlevel 1 (
     echo [ERROR] Package installation failed. Check your internet connection.
     pause
@@ -42,6 +47,7 @@ python main.py
 if errorlevel 1 (
     echo.
     echo [ERROR] Program exited with an error.
+    echo         See the log at: %%USERPROFILE%%\Documents\pythonization\settings\logs\app.log
     pause
 )
 

@@ -1,0 +1,10 @@
+# 선택 패키지 — 없어도 앱은 정상 실행된다.
+#   pip install -r requirements-optional.txt
+
+# Zurich Instruments MFLI 측정 모듈 (LabOne Python API).
+# 없으면 MFLI 창에서 연결 시 안내 메시지가 뜨고, 나머지 기능은 그대로 동작한다.
+zhinst>=23.0
+
+# 미분 채널의 Savitzky-Golay 필터.
+# 없으면 자동으로 다항식 회귀(linear)로 fallback 한다 — 결과 컬럼은 그대로 나온다.
+scipy>=1.10

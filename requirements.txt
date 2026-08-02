@@ -1,0 +1,13 @@
+# 실행에 반드시 필요한 패키지
+#   pip install -r requirements.txt
+#
+# 선택 패키지는 requirements-optional.txt 참고 (MFLI 측정, 미분 채널 SG 필터).
+# 개발/테스트에는 추가 설치가 필요 없다 — 테스트는 표준 라이브러리 unittest 로 돌아간다.
+
+PySide6>=6.5
+pyqtgraph>=0.13
+numpy>=1.24
+pydantic>=2.0
+PyYAML>=6.0
+PyVISA>=1.13
+PyVISA-py>=0.7
