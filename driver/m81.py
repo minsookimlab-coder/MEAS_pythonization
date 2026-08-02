@@ -30,7 +30,7 @@ class M81Instrument(BaseInstrument):
         saved = self.inst.timeout
         self.inst.timeout = 10  # 10 ms — 버퍼가 비어있으면 즉시 타임아웃
         try:
-            while True:
+            for _ in range(256):   # 안전 상한: 장비가 계속 보내도 무한루프 방지
                 self.inst.read()
         except Exception:
             pass

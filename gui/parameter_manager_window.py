@@ -274,15 +274,12 @@ class AddEntryDialog(QDialog):
         adv_form = QFormLayout()
         adv_form.setHorizontalSpacing(12)
 
-        self._combo_source_type = QComboBox()
-        self._combo_source_type.addItem("Sweep Value", "sweep_value")
-        self._combo_source_type.addItem("Write Command", "write_cmd")
-        adv_form.addRow("Source Type:", self._combo_source_type)
-
+        # Source Type(sweep value / write command)은 선택한 라이브러리 명령의 종류로
+        # 자동 판별하므로 별도 선택 UI를 두지 않는다. (_current_source_type 참고)
+        from gui.help_button import make_help_button
         self._combo_advance = QComboBox()
         for at, lbl in _ADVANCE_LABELS.items():
             self._combo_advance.addItem(lbl, at)
-        from gui.help_button import make_help_button
         _adv_row = QHBoxLayout()
         _adv_row.setContentsMargins(0, 0, 0, 0)
         _adv_row.addWidget(self._combo_advance, stretch=1)
@@ -349,7 +346,8 @@ class AddEntryDialog(QDialog):
         outer.addWidget(self._second_widget)
 
         self._combo_advance.currentIndexChanged.connect(self._update_advance_visibility)
-        self._combo_source_type.currentIndexChanged.connect(self._update_advance_options)
+        # 선택한 명령이 바뀌면 (sweep value/write command) advance 옵션 자동 갱신
+        self._combo_entry.currentIndexChanged.connect(self._update_advance_options)
         self._second_widget.setVisible(self._section_type == 'second')
 
         # Feedback cmd combobox: refresh when alias changes
@@ -506,13 +504,9 @@ class AddEntryDialog(QDialog):
         self._update_auto_axis()
         self._update_auto_desc()
 
-        # Update second sweep source type combo
+        # 두 번째 축: 선택 명령 종류(sweep value/write command)에 따라 advance 옵션 갱신
         if self._section_type == 'second':
-            is_sweep = hasattr(entry, 'paired_read_cmd')
-            self._combo_source_type.blockSignals(True)
-            self._combo_source_type.setCurrentIndex(0 if is_sweep else 1)
-            self._combo_source_type.blockSignals(False)
-            self._update_advance_options(self._combo_source_type.currentIndex())
+            self._update_advance_options()
 
         self.adjustSize()
 
@@ -558,8 +552,18 @@ class AddEntryDialog(QDialog):
         self._wait_widget.setVisible(at == SecondSweepAdvanceType.WAIT_FOR_TIME)
         self._update_fb_cmd_state()
 
-    def _update_advance_options(self, idx: int):
-        source_type = self._combo_source_type.itemData(idx)
+    def _current_source_type(self) -> str:
+        """선택된 라이브러리 명령의 실제 종류로 판별.
+        sweep value(되읽기 Paired Read 있음) → 'sweep_value', 아니면 'write_cmd'."""
+        idx = self._combo_entry.currentIndex()
+        if hasattr(self, "_lib_entries") and 0 <= idx < len(self._lib_entries):
+            return ("sweep_value"
+                    if hasattr(self._lib_entries[idx], "paired_read_cmd")
+                    else "write_cmd")
+        return "write_cmd"
+
+    def _update_advance_options(self, *_):
+        source_type = self._current_source_type()
         for i in range(self._combo_advance.count()):
             at = self._combo_advance.itemData(i)
             item = self._combo_advance.model().item(i)
@@ -575,7 +579,7 @@ class AddEntryDialog(QDialog):
         """source_type에 따라 feedback read cmd 콤보박스 활성/비활성 전환."""
         if not hasattr(self, '_combo_fb_cmd'):
             return
-        source_type = self._combo_source_type.currentData()
+        source_type = self._current_source_type()
         at = self._combo_advance.currentData()
         if at != SecondSweepAdvanceType.FEEDBACK:
             return
@@ -583,7 +587,7 @@ class AddEntryDialog(QDialog):
         self._combo_fb_cmd.setEnabled(not is_sweep_val)
         if is_sweep_val:
             self._combo_fb_cmd.setToolTip(
-                "Sweep Value의 Paired Read Command가 자동으로 사용됩니다."
+                "Paired Command의 되읽기(Paired Read) 명령이 자동으로 사용됩니다."
             )
         else:
             self._combo_fb_cmd.setToolTip("")
@@ -650,10 +654,7 @@ class AddEntryDialog(QDialog):
 
         # Second sweep advance type
         if self._section_type == 'second' and isinstance(p, InstantiatedSecondSweepChannel):
-            # source type
-            st_idx = 0 if p.source_type == 'sweep_value' else 1
-            self._combo_source_type.setCurrentIndex(st_idx)
-            self._update_advance_options(st_idx)
+            self._update_advance_options()   # source type은 선택 명령으로 자동 판별
 
             for i in range(self._combo_advance.count()):
                 if self._combo_advance.itemData(i) == p.advance_type:
@@ -753,7 +754,7 @@ class AddEntryDialog(QDialog):
 
         elif self._section_type == 'sweep':
             if not hasattr(entry, 'cmd_set'):
-                QMessageBox.warning(self, "Validation", "Selected entry is not a sweep value.")
+                QMessageBox.warning(self, "Validation", "Selected entry is not a paired command.")
                 return
             if sweep_ph is None:
                 QMessageBox.warning(
@@ -817,7 +818,7 @@ class AddEntryDialog(QDialog):
                 )
                 return
 
-            source_type = self._combo_source_type.currentData()
+            source_type = self._current_source_type()
             at: SecondSweepAdvanceType = self._combo_advance.currentData()
 
             # Build cmd_set
@@ -1284,8 +1285,8 @@ class ParameterManagerWindow(QDialog):
             "값을 옮기는 방식(advance type)을 4가지 중 고릅니다 — 자세한 설명은 Double Sweep 창의 도움말 참고.<br>"
             "<i>역할: 2차 축 값을 한 칸 옮긴 뒤, 그 자리에서 1차 축 sweep을 수행 (지도처럼 2차원 측정).</i></td></tr>"
             "</table>"
-            "<small>※ VISA Library의 <b>설정 명령</b>(켜기/끄기 등 준비용)은 측정 반복에 자동으로 들어가지 "
-            "않으므로 여기 sweep·측정으로 등록하지 않습니다.</small><br>"
+            "<small>※ VISA Library의 <b>Write</b> 명령(켜기/끄기 등 준비용)은 측정 반복에 자동으로 들어가지 "
+            "않으므로 여기 Paired Command·Read로 등록하지 않습니다.</small><br>"
 
             "<b>■ 우측 항목</b><br>"
             "&nbsp;• <b>Alarm Measurements</b>: Double Sweep 알람의 '측정값 조건'에서 고를 수 있는 측정 목록.<br>"
@@ -1297,7 +1298,7 @@ class ParameterManagerWindow(QDialog):
             "&nbsp;• <b>Description</b>: 알아보기 쉬운 이름 (목록·체크박스에 이 이름으로 보임).<br>"
             "&nbsp;• <b>Figure Axis</b>: 그래프 축·데이터 열에 표시될 이름.<br>"
             "&nbsp;• <b>Unit</b>: 단위(V/A/Ω/T …) — 그래프 눈금·파일 머리글에 사용.<br>"
-            "&nbsp;• <b>[SWEEP]</b>: Sweep Value에서 '쓸어갈 값'으로 쓸 빈칸 하나에만 표시.<hr>"
+            "&nbsp;• <b>[SWEEP]</b>: Paired Command에서 '쓸어갈 값'으로 쓸 빈칸 하나에만 표시.<hr>"
 
             "<b>■ 사용 팁</b><br>"
             "&nbsp;• 각 항목은 Add/Edit/Delete/Copy/▲▼ 버튼으로 추가·수정·정렬.<br>"
@@ -1337,7 +1338,7 @@ class ParameterManagerWindow(QDialog):
         content_layout.setContentsMargins(0, 0, 0, 0)
 
         self._panel_sweep = SectionPanel(
-            "Sweep Values",
+            "Paired Command",
             ["Alias", "Description", "cmd_set", "paired_read", "Unit", "Safety"],
             "#79c0ff",
             self._lib_reg,
@@ -1346,7 +1347,7 @@ class ParameterManagerWindow(QDialog):
         content_layout.addWidget(self._panel_sweep)
 
         self._panel_meas = SectionPanel(
-            "Measurements",
+            "Read",
             ["Alias", "Description", "resolved_cmd", "Unit"],
             "#56d364",
             self._lib_reg,

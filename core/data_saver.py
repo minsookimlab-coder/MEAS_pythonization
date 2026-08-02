@@ -95,11 +95,26 @@ class DataSaver:
         self._filepath = self._resolve_filepath()
         try:
             self._filepath.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._filepath, "w", encoding="utf-8") as f:
+            # 자동 번호 파일(_fixed_name 아님)은 'x'(배타 생성)로 연다 → 다른 프로세스가
+            # 같은 XNNN을 동시에 골라 막 쓴 파일을 덮어쓰는 TOCTOU를 막는다.
+            # 충돌하면 번호를 다시 산정해 재시도. fixed/resume 경로는 기존대로.
+            mode = "w" if self._fixed_name else "x"
+            f = None
+            for _ in range(100):
+                try:
+                    f = open(self._filepath, mode, encoding="utf-8")
+                    break
+                except FileExistsError:
+                    self._filepath = self._resolve_filepath()  # 다음 번호로
+            if f is None:
+                raise RuntimeError("자동 번호 파일명 충돌이 반복됩니다.")
+            try:
                 f.write("\t".join(c[0] for c in self._columns) + "\n")
                 f.write("\t".join(c[1] for c in self._columns) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
+            finally:
+                f.close()
         except Exception as e:
             self._start_error = f"헤더 기록 실패: {e}"
             self._report_error(self._start_error)

@@ -16,7 +16,9 @@
       "Bash(python -c \"import main\")",
       "Bash(python -m py_compile config/config_models.py core/second_channel_worker.py core/profile_registry.py gui/double_sweep_window.py gui/parameter_manager_window.py gui/main_window.py)",
       "Bash(python -c \"import gui.parameter_manager_window\")",
-      "WebSearch"
+      "WebSearch",
+      "Bash(python -c 'import ast; ast.parse\\(open\\('\\\\''__TRACKED_VAR__'\\\\'', encoding='\\\\''utf-8'\\\\''\\).read\\(\\)\\); print\\('\\\\''OK: __TRACKED_VAR__'\\\\''\\)')",
+      "Bash(QT_QPA_PLATFORM=offscreen python -c ' *)"
     ]
   }
 }

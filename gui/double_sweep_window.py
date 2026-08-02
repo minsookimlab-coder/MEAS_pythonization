@@ -124,6 +124,12 @@ def _estimate_total_seconds(
     retrace_time = _sweep_time(retrace_dist, cfg.rate_retrace)
     dummy_time   = _sweep_time(dummy_dist,   cfg.rate_dummy)
 
+    def _feedback_min(ch) -> float:
+        # feedback 최소 소요 ≈ poll_interval × (Phase1 1회 + Phase2 std_window회)
+        poll = getattr(ch, "feedback_poll_interval", 1.0) or 0.0
+        win  = getattr(ch, "feedback_std_window", 0) or 0
+        return poll * (1 + max(0, win))
+
     advance_time = 0.0
     if second_ch is not None:
         if second_ch.advance_type == SecondSweepAdvanceType.SWEEP and second_ch.sweep_rate > 0:
@@ -131,6 +137,8 @@ def _estimate_total_seconds(
             advance_time = _sweep_time(step, second_ch.sweep_rate)
         elif second_ch.advance_type == SecondSweepAdvanceType.WAIT_FOR_TIME:
             advance_time = getattr(second_ch, "wait_time", 0.0)
+        elif second_ch.advance_type == SecondSweepAdvanceType.FEEDBACK:
+            advance_time = _feedback_min(second_ch)
 
     time_per_cycle = advance_time + dummy_time + trace_time + retrace_time
     total = n_array * time_per_cycle
@@ -142,6 +150,8 @@ def _estimate_total_seconds(
             total += _sweep_time(abs(last_val), second_ch.sweep_rate)
         elif second_ch.advance_type == SecondSweepAdvanceType.WAIT_FOR_TIME:
             total += getattr(second_ch, "wait_time", 0.0)
+        elif second_ch.advance_type == SecondSweepAdvanceType.FEEDBACK:
+            total += _feedback_min(second_ch)
 
     return total
 
@@ -199,6 +209,10 @@ class DoubleSweepWindow(QDialog):
         self._phase: DoubleSweepPhase = DoubleSweepPhase.IDLE
         self._array: List[float] = []
         self._array_idx: int = 0
+        # Feature 1: second(array) 값 테이블 모델 + 편집 창 (VNA double sweep과 동일한 창 재사용)
+        from gui.second_channel_model import SecondChannelModel
+        self._second_table_model = SecondChannelModel()
+        self._second_table_win = None
         self._last_write_value: Optional[float] = None
         self._second_channel: Optional[InstantiatedSecondSweepChannel] = None
         self._ctx: Optional[DoubleSweepContext] = None   # set at sweep start
@@ -247,8 +261,8 @@ class DoubleSweepWindow(QDialog):
         self._second_worker.done.connect(self._on_advance_done)
         self._second_worker.error.connect(self._on_advance_error)
         self._second_worker.advance_failed.connect(self._on_advance_timeout)
-        self._second_worker.status.connect(
-            lambda m: self._main_win._log(f"  [DoubleSweep] {m}", color="#d7ba7d"))
+        # bound 슬롯으로 연결 (워커 스레드에서 GUI(_log→debug console) 접근 시 크래시 방지)
+        self._second_worker.status.connect(self._on_second_status)
         self._second_worker.feedback_progress.connect(self._on_feedback_metric)
         self._second_thread.start()
 
@@ -636,6 +650,24 @@ class DoubleSweepWindow(QDialog):
         self._arr_frame = arr_frame
         outer.addWidget(arr_frame)
 
+        # Feature 1: array 값 테이블 편집 창 (측정 중에도 미래 행 편집·추가 가능) — _arr_frame
+        #            밖에 두어 측정 중에도 버튼을 누를 수 있게 한다.
+        ds_tbl_row = QHBoxLayout()
+        self._btn_ds_second_table = QPushButton("Array 값 테이블…")
+        self._btn_ds_second_table.setToolTip(
+            "Second channel array 값을 표로 편집하는 창을 엽니다.\n"
+            "측정 중에도 아직 측정 안 한(대기) 행은 값 수정·추가·삭제할 수 있습니다.")
+        self._btn_ds_second_table.clicked.connect(self._open_second_table)
+        ds_tbl_row.addWidget(self._btn_ds_second_table)
+        self._cb_ds_keep_table = QCheckBox("테이블 초기화 안 함")
+        self._cb_ds_keep_table.setFont(_MONO)
+        self._cb_ds_keep_table.setToolTip(
+            "체크 시 시작할 때 From/To/Step으로 테이블을 새로 만들지 않고,\n"
+            "테이블 창에서 직접 넣은 값 목록 그대로 측정합니다.")
+        ds_tbl_row.addWidget(self._cb_ds_keep_table)
+        ds_tbl_row.addStretch()
+        outer.addLayout(ds_tbl_row)
+
         # Connect array inputs to point count update
         for le in (self._le_arr_from, self._le_arr_to, self._le_arr_step):
             le.textChanged.connect(self._update_n_points)
@@ -812,9 +844,11 @@ class DoubleSweepWindow(QDialog):
         if 0 <= btn_id < len(channels):
             self._second_channel = channels[btn_id]
             adv = self._second_channel.advance_type
+            # THRESHOLD_TIME = 도달(feedback 필드) + 고정 시간 대기(wait_time) → 두 프레임 모두
+            is_tt = adv == SecondSweepAdvanceType.THRESHOLD_TIME
             self._sweep_ch_frame.setVisible(adv == SecondSweepAdvanceType.SWEEP)
-            self._feedback_frame.setVisible(adv == SecondSweepAdvanceType.FEEDBACK)
-            self._wait_frame.setVisible(adv == SecondSweepAdvanceType.WAIT_FOR_TIME)
+            self._feedback_frame.setVisible(adv == SecondSweepAdvanceType.FEEDBACK or is_tt)
+            self._wait_frame.setVisible(adv == SecondSweepAdvanceType.WAIT_FOR_TIME or is_tt)
             self._update_feedback_read_cmd_state()
             self._update_unit_labels()
 
@@ -1096,6 +1130,20 @@ class DoubleSweepWindow(QDialog):
         self._feedback_frame.setEnabled(not locked)
         self._wait_frame.setEnabled(not locked)
         self._right_alarm_scroll.setEnabled(not locked)
+        # Feature 1: 테이블 창의 '재생성'·'테이블 유지' 잠금(값 편집·행 추가/삭제는 유지).
+        #            테이블 열기 버튼 자체는 측정 중에도 계속 눌러 편집할 수 있어야 하므로
+        #            _arr_frame 밖에 두었고 여기서 비활성화하지 않는다.
+        self._set_table_win_running(locked)
+
+    def _set_table_win_running(self, running: bool) -> None:
+        win = self._second_table_win
+        if win is not None:
+            try:
+                win.set_running(running)
+            except Exception:
+                pass
+        if hasattr(self, "_cb_ds_keep_table"):
+            self._cb_ds_keep_table.setEnabled(not running)
 
     def _unlock_main_ui(self) -> None:
         """Double Sweep 종료 시 Main Window UI 복원."""
@@ -1160,7 +1208,14 @@ class DoubleSweepWindow(QDialog):
         """
         self._save_config()
         self._cfg = self._current_cfg()
-        self._array = _generate_array(self._cfg)
+        # Feature 1: array 테이블 모델을 source of truth로 삼는다. '테이블 유지'가 켜져 있고
+        # 모델에 값이 있으면 커스텀 테이블 그대로, 아니면 From/To/Step으로 재생성.
+        if (self._cb_ds_keep_table.isChecked()
+                and self._second_table_model.count() > 0):
+            self._second_table_model.rearm()
+        else:
+            self._second_table_model.reset_from(_generate_array(self._cfg))
+        self._array = self._second_table_model.values()
         if not self._array:
             QMessageBox.warning(self, "Array 오류", "Array 생성 실패: 포인트 수가 0입니다.")
             return False
@@ -1275,6 +1330,10 @@ class DoubleSweepWindow(QDialog):
         self.sweep_finished.emit()
         self._main_win._log("Double Sweep stopped.", color="#ce9178")
         self._unlock_main_ui()
+        # Feature 1: CURRENT로 멈춘 행을 PENDING으로 되돌리고 테이블 갱신
+        self._second_table_model.clear_running()
+        self._refresh_second_table_win()
+        self._set_table_win_running(False)
         self._update_resume_btn_enabled()
 
     def _finish(self):
@@ -1291,6 +1350,10 @@ class DoubleSweepWindow(QDialog):
             f"Double Sweep complete. ({len(self._array)} array points)", color="#4ec9b0"
         )
         self._unlock_main_ui()
+        # Feature 1: 완료 — 테이블 실행 상태 해제·갱신
+        self._second_table_model.clear_running()
+        self._refresh_second_table_win()
+        self._set_table_win_running(False)
         self._update_resume_btn_enabled()
 
     # ------------------------------------------------------------------
@@ -1360,6 +1423,10 @@ class DoubleSweepWindow(QDialog):
     def _make_effective_second_channel(self) -> InstantiatedSecondSweepChannel:
         """Return second channel with UI-overridden params for SWEEP / FEEDBACK / WAIT_FOR_TIME."""
         ch = self._second_channel
+        if ch is None:
+            # 실행 중 second 채널이 사라진 경우(파라미터 매니저에서 비움 등) — None을
+            # 역참조해 크래시하지 말고 명확한 오류로 끊는다.
+            raise RuntimeError("Second sweep channel이 없습니다 (구성이 비었거나 변경됨).")
         if ch.advance_type == SecondSweepAdvanceType.FEEDBACK:
             read_cmd = self._le_fb_read_cmd.text().strip()
             return ch.model_copy(update={
@@ -1373,6 +1440,16 @@ class DoubleSweepWindow(QDialog):
         if ch.advance_type == SecondSweepAdvanceType.WAIT_FOR_TIME:
             return ch.model_copy(update={
                 "wait_time": self._parse_ds_float(self._le_wait_time.text(), ch.wait_time),
+            })
+        if ch.advance_type == SecondSweepAdvanceType.THRESHOLD_TIME:
+            # 도달 판정(feedback 필드) + 고정 시간 대기(wait_time) 둘 다 UI에서 반영.
+            read_cmd = self._le_fb_read_cmd.text().strip()
+            return ch.model_copy(update={
+                "feedback_read_cmd":      read_cmd if read_cmd else ch.feedback_read_cmd,
+                "feedback_poll_interval": self._parse_ds_float(self._le_fb_poll.text(), ch.feedback_poll_interval),
+                "feedback_tolerance_pct": self._parse_ds_float(self._le_fb_tol.text(), ch.feedback_tolerance_pct),
+                "feedback_noisefloor":    self._parse_ds_float(self._le_fb_noisefloor.text(), ch.feedback_noisefloor),
+                "wait_time":              self._parse_ds_float(self._le_wait_time.text(), ch.wait_time),
             })
         if ch.advance_type != SecondSweepAdvanceType.SWEEP:
             return ch
@@ -1414,7 +1491,64 @@ class DoubleSweepWindow(QDialog):
             info["feedback_std_threshold"] = ch.feedback_std_threshold
         elif at == SecondSweepAdvanceType.WAIT_FOR_TIME:
             info["wait_time"] = ch.wait_time
+        elif at == SecondSweepAdvanceType.THRESHOLD_TIME:
+            info["feedback_read_cmd"] = ch.feedback_read_cmd
+            info["feedback_poll_interval"] = ch.feedback_poll_interval
+            info["feedback_tolerance_pct"] = ch.feedback_tolerance_pct
+            info["feedback_noisefloor"] = ch.feedback_noisefloor
+            info["wait_time"] = ch.wait_time
         return {"second_channel": info}
+
+    # ------------------------------------------------------------------
+    # Second 값 테이블 (Feature 1)
+    # ------------------------------------------------------------------
+    def _begin_array_index(self, idx: int) -> bool:
+        """모델에서 최신 array를 다시 읽어 idx 행을 CURRENT로 표시하고 second advance 시작.
+
+        측정 중 편집/추가된 미래 행을 반영한다(완료 행은 앞쪽 prefix로 고정이라 안전).
+        범위를 벗어나면(모든 값 완료) False."""
+        self._array = self._second_table_model.values()
+        if idx < 0 or idx >= len(self._array):
+            return False
+        self._array_idx = idx
+        self._second_table_model.mark_current(idx)
+        self._refresh_second_table_win()
+        prev = self._array[idx - 1] if idx > 0 else None
+        self._advance_second(self._array[idx], prev=prev)
+        return True
+
+    def _refresh_second_table_win(self):
+        win = self._second_table_win
+        if win is not None:
+            try:
+                win.refresh()
+            except Exception:
+                pass
+
+    def _open_second_table(self):
+        """Array 값 테이블 편집 창을 연다(없으면 생성)."""
+        win = self._second_table_win
+        if win is None:
+            from gui.second_channel_table_window import SecondChannelTableWindow
+            win = SecondChannelTableWindow(self._second_table_model, self, parent=self)
+            self._second_table_win = win
+        busy = self._phase != DoubleSweepPhase.IDLE
+        if not busy and self._second_table_model.count() == 0:
+            self._reset_second_table_from_controls()
+        win.set_running(busy)
+        win.refresh()
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _reset_second_table_from_controls(self):
+        """From/To/Step 입력값으로 array 테이블을 재생성한다(측정 중이 아닐 때만 의미)."""
+        arr = _generate_array(self._current_cfg())
+        if not arr:
+            QMessageBox.warning(self, "Array 오류", "From/To/Step으로 값을 만들 수 없습니다.")
+            return
+        self._second_table_model.reset_from(arr)
+        self._refresh_second_table_win()
 
     def _advance_second(self, next_val: float, prev: Optional[float]):
         ch = self._make_effective_second_channel()
@@ -1482,6 +1616,11 @@ class DoubleSweepWindow(QDialog):
             ))
 
     @Slot(float)
+    @Slot(str)
+    def _on_second_status(self, m: str) -> None:
+        """second 워커 진행 메시지를 콘솔에 기록 (메인 스레드 보장용 bound 슬롯)."""
+        self._main_win._log(f"  [DoubleSweep] {m}", color="#d7ba7d")
+
     def _on_feedback_metric(self, metric: float) -> None:
         """Phase 2 metric 값을 실시간으로 Std Threshold 옆 레이블에 표시."""
         threshold = self._parse_ds_float(self._le_fb_std_thresh.text(), 0.01)
@@ -1659,13 +1798,13 @@ class DoubleSweepWindow(QDialog):
 
         idx = int(point.payload.get("array_idx", 0))
         idx = max(0, min(idx, len(self._array) - 1))
-        self._array_idx = idx
-        prev = self._array[idx - 1] if idx > 0 else None
+        # Feature 1: 재개 지점 이전 행을 DONE으로 표시(테이블 색상·잠금 일관성).
+        self._second_table_model.reset_from(self._array, done_prefix=idx)
         self._main_win._log(
             f"  ▶ [DoubleSweep] 수동 재개 — array {idx + 1}/{len(self._array)} 부터 재시작.",
             color="#4ec9b0",
         )
-        self._advance_second(self._array[idx], prev=prev)
+        self._begin_array_index(idx)
 
     def _start_sweep_phase(self, phase: DoubleSweepPhase):
         self._set_phase(phase)
@@ -1700,13 +1839,10 @@ class DoubleSweepWindow(QDialog):
                 self._trace_filepath,
                 extra=self._build_meta_extra(),
             )
-            self._array_idx += 1
-            if self._array_idx < len(self._array):
-                self._advance_second(
-                    self._array[self._array_idx],
-                    prev=self._array[self._array_idx - 1],
-                )
-            else:
+            # Feature 1: 현재 array 값 완료 표시 → 모델에서 다음 (편집/추가 반영) 행으로.
+            self._second_table_model.mark_done(self._array_idx)
+            self._refresh_second_table_win()
+            if not self._begin_array_index(self._array_idx + 1):
                 if self._cfg.to_zero_at_last and self._second_channel is not None:
                     self._return_second_to_zero()
                 else:
@@ -1839,7 +1975,7 @@ class DoubleSweepWindow(QDialog):
             self._last_write_value = result.next_v
             if result.is_done:
                 self._main_win._log("  First channel at start_point. Advancing second channel.", color="#4ec9b0")
-                self._advance_second(self._array[0], prev=None)
+                self._begin_array_index(0)
             else:
                 # dummy phase와 동일한 time_per_point 간격으로 진행
                 t_before_timer = time.perf_counter()
@@ -2127,7 +2263,11 @@ class DoubleSweepWindow(QDialog):
         if not self._second_thread.isRunning():
             self._second_thread.start()
         self._update_ds_save_path()
-        self._rebuild_second_channel_radios()
+        # 실행 중에는 라디오를 재빌드하지 않는다 — 상태머신이 self._second_channel을
+        # 라이브로 읽는데, 재빌드가 이를 None으로 만들면 다음 advance에서 AttributeError로
+        # run이 꼬인다. (reload_from_profile과 동일하게 IDLE에서만 재빌드)
+        if self._phase == DoubleSweepPhase.IDLE:
+            self._rebuild_second_channel_radios()
         self._update_unit_labels()
         # Refresh measurement-condition combo in case alarm_measurements changed
         alarm_meas = self._param_reg.main_ui_profile.alarm_measurements

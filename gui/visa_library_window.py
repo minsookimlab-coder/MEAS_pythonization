@@ -19,6 +19,13 @@ _COL_MEAS  = QColor("#56d364")
 _COL_SWEEP = QColor("#79c0ff")
 _COL_WRITE = QColor("#e3b341")
 
+# 내부 타입 태그(measurement/sweep value/write)는 그대로 두고, 화면 표기만 매핑한다.
+_TYPE_DISPLAY = {
+    "measurement": "read",
+    "sweep value": "paired command",
+    "write":       "write",
+}
+
 
 # ===========================================================================
 # Add / Edit dialogs
@@ -31,7 +38,7 @@ class MeasurementParamDialog(QDialog):
 
     def __init__(self, parent=None, entry: Optional[MeasurementParamDef] = None):
         super().__init__(parent)
-        self.setWindowTitle("Measurement Parameter")
+        self.setWindowTitle("Read Command")
         self.setMinimumWidth(480)
 
         self._outer = QVBoxLayout(self)
@@ -101,7 +108,7 @@ class SweepValueDialog(QDialog):
         entry: Optional[SweepValueDef] = None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Sweep Value")
+        self.setWindowTitle("Paired Command")
         self.setMinimumWidth(520)
 
         layout = QVBoxLayout(self)
@@ -230,12 +237,12 @@ class WriteCmdDialog(QDialog):
 class VisaLibraryWindow(QDialog):
     """
     VISA 명령어 라이브러리 관리 창.
-    기기(alias)별로 Measurement Parameter / Sweep Value 명령어를 등록·편집·저장합니다.
+    기기(alias)별로 Read / Paired Command / Write 명령어를 등록·편집·저장합니다.
     """
 
     library_saved = Signal()   # 라이브러리 저장 완료 시 emit → 하위 계층 재인스턴스화 트리거
 
-    _HEADERS = ["Description", "VISA Command", "Figure Axis", "Unit", "Type", "Paired Measurement"]
+    _HEADERS = ["Description", "VISA Command", "Figure Axis", "Unit", "Type", "Paired Read"]
 
     def __init__(
         self,
@@ -279,34 +286,34 @@ class VisaLibraryWindow(QDialog):
 
             "<b>■ 적어둘 수 있는 명령의 3가지 종류</b><br>"
             "<table cellspacing='3' cellpadding='2'>"
-            "<tr valign='top'><td><b>측정<br>(읽기)</b></td>"
+            "<tr valign='top'><td><b>Read<br>(읽기)</b></td>"
             "<td>장비에서 <b>값을 읽어오는</b> 명령. 돌아온 응답을 숫자로 바꿔 기록합니다.<br>"
             "예: 전류 읽기 <code>print(smua.measure.i())</code><br>"
             "→ 측정하는 동안 <b>매 단계마다 실행</b>되어 데이터·그래프에 남습니다.</td></tr>"
-            "<tr valign='top'><td><b>Sweep&nbsp;값<br>(바꾸며 측정)</b></td>"
+            "<tr valign='top'><td><b>Paired&nbsp;Command<br>(쓰고 되읽기)</b></td>"
             "<td>장비의 <b>출력값을 바꾸는</b> 명령 + 그 값을 <b>다시 확인해 읽는</b> 명령 한 쌍.<br>"
             "바꾸는 명령에는 '여기에 단계별 값이 들어감'을 뜻하는 빈칸을 둡니다.<br>"
             "예: 전압 출력 <code>smua.source.levelv={v}</code>, 확인 읽기 <code>print(smua.measure.v())</code><br>"
             "→ 측정에서 <b>가로축(쓸어가는 축)</b>이 됩니다. 단계마다 값을 바꿔 내보냅니다.</td></tr>"
-            "<tr valign='top'><td><b>설정 명령<br>(준비용)</b></td>"
+            "<tr valign='top'><td><b>Write<br>(준비용)</b></td>"
             "<td>응답 없이 <b>장비 상태만 바꾸는</b> 명령 (켜기/끄기, 측정 속도·범위 설정 등).<br>"
             "예: 출력 켜기 <code>smua.source.output=smua.OUTPUT_ON</code><br>"
             "→ 측정 반복에는 자동으로 들어가지 않고, <b>측정 전 준비</b>에 씁니다.</td></tr>"
             "</table>"
 
             "<b>■ 측정 한 단계에서 어떻게 쓰이나</b><br>"
-            "&nbsp;① <b>Sweep 값</b>으로 다음 출력값을 내보냄 (급격한 변화는 안전하게 나눠서)<br>"
-            "&nbsp;② (첫 단계) 확인 읽기로 실제 도달한 값을 한 번 확인<br>"
-            "&nbsp;③ 체크해 둔 <b>측정</b> 명령들을 실행 → 값을 파일·그래프에 기록<br>"
-            "&nbsp;④ 다음 단계 반복. <b>설정 명령</b>은 이 반복 밖(미리 준비)에서 사용.<hr>"
+            "&nbsp;① <b>Paired Command</b>로 다음 출력값을 내보냄 (급격한 변화는 안전하게 나눠서)<br>"
+            "&nbsp;② (첫 단계) 되읽기로 실제 도달한 값을 한 번 확인<br>"
+            "&nbsp;③ 체크해 둔 <b>Read</b> 명령들을 실행 → 값을 파일·그래프에 기록<br>"
+            "&nbsp;④ 다음 단계 반복. <b>Write</b> 명령은 이 반복 밖(미리 준비)에서 사용.<hr>"
 
             "<b>■ 표의 각 칸</b><br>"
             "&nbsp;• <b>Description</b>: 알아보기 쉬운 이름 (나중에 목록에 이 이름으로 보임).<br>"
             "&nbsp;• <b>VISA Command</b>: 장비에 실제로 보낼 명령 글자.<br>"
             "&nbsp;• <b>Figure Axis</b>: 그래프 축·데이터 열에 표시될 이름.<br>"
             "&nbsp;• <b>Unit</b>: 단위(V/A/Ω/T …) — 그래프 눈금·파일 머리글에 사용.<br>"
-            "&nbsp;• <b>Type</b>: 측정 / sweep 값 / 설정 명령 (색으로 구분).<br>"
-            "&nbsp;• <b>Paired Measurement</b>: Sweep 값에서 '확인해 읽는' 명령.<hr>"
+            "&nbsp;• <b>Type</b>: read / paired command / write (색으로 구분).<br>"
+            "&nbsp;• <b>Paired Read</b>: Paired Command에서 '확인해 읽는' 명령.<hr>"
 
             "<b>■ 알아두면 좋은 점</b><br>"
             "&nbsp;• <code>{이름}</code> 빈칸은 Parameter Manager에서 실제 값으로 채웁니다.<br>"
@@ -367,9 +374,9 @@ class VisaLibraryWindow(QDialog):
 
         # Bottom buttons
         bottom = QHBoxLayout()
-        btn_meas = QPushButton("+ Measurement")
+        btn_meas = QPushButton("+ Read")
         btn_meas.clicked.connect(self._add_measurement)
-        btn_sweep = QPushButton("+ Sweep Value")
+        btn_sweep = QPushButton("+ Paired Command")
         btn_sweep.clicked.connect(self._add_sweep_value)
         btn_write = QPushButton("+ Write")
         btn_write.clicked.connect(self._add_write)
@@ -488,7 +495,7 @@ class VisaLibraryWindow(QDialog):
                               e.figure_axis, e.unit, "write", "—")
 
     def _set_row(self, row, desc, cmd, axis, unit, typ, paired):
-        values = [desc, cmd, axis, unit, typ, paired]
+        values = [desc, cmd, axis, unit, _TYPE_DISPLAY.get(typ, typ), paired]
         if typ == "measurement":
             color = _COL_MEAS
         elif typ == "sweep value":

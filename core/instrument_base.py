@@ -53,7 +53,12 @@ class BaseInstrument(ABC):
     def disconnect(self):
         """Terminate connection to the hardware."""
         if self.inst:
-            self.inst.close()
+            try:
+                self.inst.close()
+            finally:
+                # 닫힌 VISA 핸들에 대한 직접 I/O 방지: 이후 write/read/query의
+                # `if not self.inst` 가드가 통과돼 closed handle에 접근하던 문제 차단.
+                self.inst = None
 
     def write(self, cmd: str):
         """Send a command string to the instrument."""

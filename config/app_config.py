@@ -9,9 +9,10 @@
 """
 import yaml
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.app_dirs import GLOBAL_CONFIG_PATH, DEFAULT_DATA_DIR
+from config.config_models import AlarmDeliveryConfig
 
 APP_CONFIG_PATH = GLOBAL_CONFIG_PATH
 # 구 버전 위치 (Documents) — 신규 위치에 파일이 없을 때 1회 폴백 로드용
@@ -25,6 +26,9 @@ class AppConfig(BaseModel):
     parallel_measurement: bool = False
     # 사용자 데이터 폴더 경로 (빈 문자열 = 기본 Documents 폴더). 재시작 후 적용.
     data_dir: str = ""
+    # 알람 전송 수단(소리·이메일·텔레그램) — VNA·Double Sweep 공유 전역값.
+    # on/off·트리거는 각 프로파일의 AlarmConfig에 따로 보관된다.
+    alarm_delivery: AlarmDeliveryConfig = Field(default_factory=AlarmDeliveryConfig)
 
 
 def load_app_config() -> AppConfig:
@@ -55,3 +59,15 @@ def save_app_config(cfg: AppConfig) -> None:
             yaml.dump(cfg.model_dump(), f, allow_unicode=True)
     except Exception as e:
         print(f"[AppConfig] Save failed: {e}")
+
+
+def load_alarm_delivery() -> AlarmDeliveryConfig:
+    """VNA·Double Sweep가 공유하는 전역 알람 전송 설정을 반환."""
+    return load_app_config().alarm_delivery
+
+
+def save_alarm_delivery(delivery: AlarmDeliveryConfig) -> None:
+    """전역 알람 전송 설정만 갱신해 저장 (나머지 앱 설정은 보존)."""
+    cfg = load_app_config()
+    cfg.alarm_delivery = delivery
+    save_app_config(cfg)

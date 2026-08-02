@@ -18,14 +18,21 @@ def calculate_next_step(
       is_done=True  → source_value가 sweep_to에 정확히 도달했음
       is_done=False → 아직 진행 중 (클램핑 포함)
     """
-    # 1. 증분량 계산: (units/min / 60) * seconds
-    increment = (sweep_rate / 60) * time_per_point
-    # 2. 방향 결정 및 증분 적용
+    # 방향은 목표와의 차이(diff)로만 결정한다.
     diff = sweep_to - source_value
-    direction = 1 if diff > 0 else -1
     # 목표값과의 차이가 아주 미세하면(1E-11) 목표값 반환 및 종료 신호(True)
     if abs(diff) < 1e-11:
         return sweep_to, True
+    direction = 1 if diff > 0 else -1
+    # 1. 증분량 = (|units/min| / 60) * |seconds|. 항상 양수 '크기'로 계산하고
+    #    방향은 diff로만 적용한다(음수 rate가 목표 반대로 폭주하는 것을 방지).
+    increment = (abs(sweep_rate) / 60.0) * abs(time_per_point)
+    # rate<=0 또는 tpp<=0 → 진행 불가. 같은 값을 영원히 반환하는 무한 정지/쓰기 폭주
+    # 대신 명시적 오류로 끊는다(호출부 워커가 step_error/advance error로 처리).
+    if increment <= 0:
+        raise ValueError(
+            f"진행 불가: sweep_rate={sweep_rate}, time_per_point={time_per_point} "
+            "(둘 다 0보다 커야 합니다).")
     # 다음 스텝 계산
     next_step = source_value + (increment * direction)
     # 4. 목표 초과 방지 로직 (False 케이스)

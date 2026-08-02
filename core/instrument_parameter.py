@@ -27,12 +27,14 @@ def _parse_float(raw: str) -> float:
     try:
         return float(raw)
     except ValueError:
-        # 마지막 ':' 구분자 이후 토큰에서 숫자 추출 (단위 접미사 무시)
-        last_token = raw.split(":")[-1]
-        m = _NUMERIC_RE.search(last_token)
-        if m:
+        # 마지막 ':' 구분자 이후 토큰에서 '선행 숫자 + 단위 접미사' 형태만 허용한다.
+        # (예: '235.7446K' → 235.7446). 남는 부분에 또 다른 숫자/연산자가 있으면
+        #  복합·모호 응답('12.5/3.0', '1.2.3', '3 of 5')이므로 잘못된 값을 뽑지 말고 에러.
+        last_token = raw.split(":")[-1].strip()
+        m = re.match(r'[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?', last_token)
+        if m and not re.search(r'[\d./]', last_token[m.end():]):
             return float(m.group())
-        raise
+        raise ValueError(f"숫자 해석 실패(모호하거나 비숫자): {raw!r}")
 
 
 @dataclass

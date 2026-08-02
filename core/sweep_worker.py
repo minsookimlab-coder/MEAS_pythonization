@@ -95,6 +95,11 @@ class SweepWorker(QObject):
         """메인 스레드에서 호출 — safety ramp 루프를 중단시킵니다."""
         self._stop_event.set()
 
+    def reset_stop(self) -> None:
+        """새 sweep 시작 직전 호출 — 이전 sweep의 Stop 잔류 플래그를 제거한다.
+        (run_step 진입부에서도 clear하지만, 시작 시점에 명시적으로 비워 둔다.)"""
+        self._stop_event.clear()
+
     def _measure_one_alias(
         self, alias: str, entries: List[Tuple[int, str, str]], mode: str = ""
     ) -> Tuple[List[Tuple[int, Optional[float]]], Dict[int, str]]:
@@ -109,6 +114,9 @@ class SweepWorker(QObject):
         results: List[Tuple[int, Optional[float]]] = []
         errors: Dict[int, str] = {}
         tag = f"[{mode}|{alias}]" if mode else f"[{alias}]"
+        # Stop이 눌렸으면 이 계측기 측정을 건너뛴다(병렬 future들이 빨리 빠져나오게).
+        if self._stop_event.is_set():
+            return [(row, None) for row, _, _ in entries], {}
         exprs = [_TSP_PRINT_RE.match(cmd) for _, _, cmd in entries]
         if all(m is not None for m in exprs):
             batched = "print(" + ", ".join(m.group(1).strip() for m in exprs) + ")"
@@ -201,6 +209,11 @@ class SweepWorker(QObject):
 
     @Slot(object)
     def run_step(self, req: StepRequest) -> None:
+        # 진입 시 무조건 clear한다. _stop_event는 Stop 때 set되지만 다음 sweep 시작
+        # 시점엔 별도로 지워지지 않으므로, 여기서 비워야 '이전 sweep의 Stop 잔류 플래그'가
+        # 다음 sweep 첫 스텝을 건너뛰게 만들지 않는다(= stop 후 재시작 불가 회귀 방지).
+        # (Stop이 이 스텝 큐 대기 중에 눌린 경우 한 스텝의 write가 더 나갈 수 있으나,
+        #  그 결과는 _on_step_done의 `_running` 가드가 폐기하므로 무해하다.)
         self._stop_event.clear()
         timing = StepTiming(t_emit=req.t_emit)
         try:
@@ -277,4 +290,10 @@ class SweepWorker(QObject):
         except Exception as e:
             # 어느 단계에서 났는지 식별 가능하도록 sweep alias + 예외형 포함
             _sa = getattr(req.sweep_channel, "alias", "?")
+            try:
+                from core.applog import get_logger
+                get_logger().exception("sweep run_step failed (alias=%s, measure_only=%s)",
+                                       _sa, getattr(req, "measure_only", None))
+            except Exception:
+                pass
             self.step_error.emit(f"[sweep:{_sa}] {type(e).__name__}: {e}")

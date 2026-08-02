@@ -134,6 +134,7 @@ class MainWindow(QMainWindow):
         self._meta_data_window = None
         self._command_window = None
         self._vna_window = None
+        self._mfli_window = None
 
         # 전역 앱 설정 로드
         self._app_config: AppConfig = load_app_config()
@@ -254,6 +255,10 @@ class MainWindow(QMainWindow):
         act_vna.setShortcut("Ctrl+Shift+V")
         act_vna.triggered.connect(self._open_vna_window)
         view_menu.addAction(act_vna)
+        act_mfli = QAction("MFLI Noise Sweep...", self)
+        act_mfli.setShortcut("Ctrl+Shift+F")
+        act_mfli.triggered.connect(self._open_mfli_window)
+        view_menu.addAction(act_mfli)
 
     def _setup_ui(self):
         self._glow_frame = QFrame()
@@ -321,6 +326,8 @@ class MainWindow(QMainWindow):
         """
         if self._vna_window is not None:
             self._vna_window.on_profile_changed()
+        if self._mfli_window is not None:
+            self._mfli_window.on_profile_changed()
         if self._double_sweep_window is not None:
             self._double_sweep_window.reload_from_profile()
         if self._meta_data_window is not None and self._meta_data_window.isVisible():
@@ -399,6 +406,9 @@ class MainWindow(QMainWindow):
         # VNA 설정도 함께 저장 (profiles/vna/{name}.yaml)
         if self._vna_window is not None:
             self._vna_window._save_ui_state()
+        # MFLI 설정도 함께 저장 (profiles/mfli/{name}.yaml)
+        if self._mfli_window is not None:
+            self._mfli_window._save_ui_state()
         fp = self._param_manager_reg.get_active_profile()
         fp.main_ui = self._active_profile
         fp.sweep_to = self._sweep_config.sweep_to
@@ -939,6 +949,16 @@ class MainWindow(QMainWindow):
         self._vna_window.show()
         self._vna_window.raise_()
 
+    def _open_mfli_window(self):
+        from gui.mfli_window import MfliWindow
+        if self._mfli_window is None:
+            # parent=None → 독립 top-level (VNA Control과 동일한 패턴)
+            self._mfli_window = MfliWindow(
+                self._session, self._visa_lib_registry,
+                param_manager_reg=self._param_manager_reg, parent=None)
+        self._mfli_window.show()
+        self._mfli_window.raise_()
+
     def _open_double_sweep(self):
         from gui.double_sweep_window import DoubleSweepWindow
         if self._double_sweep_window is None:
@@ -1300,7 +1320,10 @@ class MainWindow(QMainWindow):
         self._rebuild_write_panel(profile.write_cmds)
         self._rebuild_deriv_combos()
         if self._double_sweep_window is not None:
-            self._double_sweep_window._rebuild_second_channel_radios()
+            # 더블스위프 실행 중에는 재빌드 금지 (상태머신이 second 채널을 라이브로 읽음)
+            from gui.double_sweep_window import DoubleSweepPhase
+            if self._double_sweep_window._phase == DoubleSweepPhase.IDLE:
+                self._double_sweep_window._rebuild_second_channel_radios()
 
     _TIME_ID = -2   # QButtonGroup ID for the fixed Time channel
 
@@ -1608,7 +1631,16 @@ class MainWindow(QMainWindow):
             return
         if self._sweep_channel is None:
             QMessageBox.warning(self, "No Sweep Channel",
-                "Parameter Manager에서 Sweep Value를 선택하세요.")
+                "Parameter Manager에서 Paired Command를 선택하세요.")
+            return
+        # Rate/Time-per-Point 검증 — 0/음수면 무한정지·역방향 폭주 위험(core가 막긴 하지만
+        # 시작 전에 명확히 알려준다).
+        _cfg = self._sweep_config
+        if _cfg.sweep_rate <= 0 or _cfg.time_per_point <= 0:
+            QMessageBox.warning(
+                self, "잘못된 Sweep 파라미터",
+                f"Rate({_cfg.sweep_rate:g})와 Time/Point({_cfg.time_per_point:g})는 "
+                "0보다 커야 합니다.")
             return
         # 저장 비활성 경고 — 장시간 측정이 저장 없이 진행되는 사고 방지
         if not self._cb_save_enable.isChecked():
@@ -1624,6 +1656,12 @@ class MainWindow(QMainWindow):
         # 연결 상태 확인 — 실패 시 측정 중단
         if not self._run_connection_test(include_second=False, show_success=False):
             return
+        self._worker.reset_stop()   # 이전 sweep의 Stop 잔류 플래그 제거 (재시작 보장)
+        from core.applog import get_logger
+        get_logger().info("sweep _on_start: ch=%s to=%s rate=%s tpp=%s",
+                          getattr(self._sweep_channel, "alias", "?"),
+                          self._sweep_config.sweep_to, self._sweep_config.sweep_rate,
+                          self._sweep_config.time_per_point)
         self._running = True
         self._sweep_step_count = 0
         self._btn_start.setEnabled(False)
@@ -1968,12 +2006,17 @@ class MainWindow(QMainWindow):
         if self._graph_window is not None:
             self._graph_window.append_point(gpoint)
 
-        next_display = None if result.is_done else calculate_next_step(
-            result.next_v,
-            self._sweep_config.sweep_to,
-            self._sweep_config.sweep_rate,
-            self._sweep_config.time_per_point,
-        )[0]
+        # 표시용 다음값 계산. rate/tpp가 0이면 calculate_next_step이 ValueError를 던지는데
+        # (안전장치), 이 슬롯엔 try/except가 없어 그대로 두면 sweep이 조용히 멈춘다 → 흡수.
+        try:
+            next_display = None if result.is_done else calculate_next_step(
+                result.next_v,
+                self._sweep_config.sweep_to,
+                self._sweep_config.sweep_rate,
+                self._sweep_config.time_per_point,
+            )[0]
+        except ValueError:
+            next_display = None
         self._sweep_status_window.update_step(
             self._sweep_step_count, result.current, next_display
         )
@@ -2145,7 +2188,7 @@ class MainWindow(QMainWindow):
         """선택된 재개 지점부터 단일 sweep을 이어서 시작한다 (기존 파일 이어쓰기)."""
         if self._sweep_channel is None:
             QMessageBox.warning(self, "No Sweep Channel",
-                "Parameter Manager에서 Sweep Value를 선택하세요.")
+                "Parameter Manager에서 Paired Command를 선택하세요.")
             return
         if not self._run_connection_test(include_second=False, show_success=False):
             return
@@ -2159,6 +2202,35 @@ class MainWindow(QMainWindow):
         self._sweep_step_count = int(p.get("step_count", 0))
         self._last_write_value = p.get("last_write_value")
         self._active_meas_indices = list(p.get("active_meas_indices", self._active_meas_indices))
+
+        # _on_start과 동일한 세션 초기화 — 재개 후 컬럼/미분/메타데이터가 일관되도록.
+        # (이걸 안 하면: 미분 deque가 Stop 이전 값을 물고 있어 불연속을 가로질러 기울기를
+        #  계산하고, 메타 T/B 버퍼가 이전 세션 값으로 누적되며, 데이터창 컬럼이 어긋난다.)
+        self._sync_data_window_columns()
+        for order, ch in [(1, self._deriv_channel), (2, self._deriv_channel2),
+                          (3, self._deriv_channel3)]:
+            ch.reconfigure(self._build_deriv_config(order))
+            ch.reset()
+        for suffix in ("", "2", "3"):
+            getattr(self, f"_cb_deriv{suffix}_enable").setEnabled(False)
+            for w in getattr(self, f"_deriv{suffix}_setting_widgets"):
+                w.setEnabled(False)
+        try:
+            _meas_labels = [self._meas_label_for(idx, self._active_profile.measurements[idx])
+                            for idx in self._active_meas_indices]
+            from config.config_models import MeasType
+            _ov = {}
+            for idx in self._active_meas_indices:
+                if idx < len(self._meas_type_combos):
+                    try:
+                        _ov[idx] = MeasType(self._meas_type_combos[idx].currentData())
+                    except Exception:
+                        pass
+            self._meta_manager.configure(self._active_meas_indices,
+                                         self._active_profile.measurements,
+                                         _meas_labels, meas_type_overrides=_ov)
+        except Exception as e:
+            self._log(f"  ⚠ 재개 메타데이터 설정 경고: {e}", color="#d7ba7d")
 
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
@@ -2286,7 +2358,11 @@ class MainWindow(QMainWindow):
         self._sweep_config.sweep_rate     = self._parse_sweep_float(self._le_sweep_rate.text(), 1.0)
         self._sweep_config.time_per_point = self._parse_sweep_float(self._le_time_per_point.text(), 1.0)
         self._timing_window.set_time_per_point(self._sweep_config.time_per_point)
-        self._last_write_value = None  # 다음 스텝에서 VISA readback으로 재초기화
+        # 측정 중이 아닐 때만 readback 재초기화. 측정 중에는 현재 위치(_last_write_value)를
+        # 보존한다 — null로 만들면 다음 스텝이 불필요한 readback을 하고, readback이 부정확한
+        # 장비에선 위치가 한 스텝 튈 수 있다(파라미터 변경은 그대로 반영됨).
+        if not self._running:
+            self._last_write_value = None
         self._log("  Sweep params updated.", color="#888888")
 
     def set_source_value(self, value: float):
@@ -2401,11 +2477,19 @@ class MainWindow(QMainWindow):
             self._double_sweep_window._worker_thread.wait()
             self._double_sweep_window._second_thread.quit()
             self._double_sweep_window._second_thread.wait()
+        # VNA 창의 acquire/sec/stop 워커도 정지·대기해야 한다 — 안 그러면 (a) running
+        # QThread 파괴로 std::terminate, (b) 워커가 VISA I/O 중인데 아래 session.shutdown()이
+        # ResourceManager를 닫아 use-after-free 크래시가 난다.
+        if self._vna_window is not None:
+            self._vna_window.shutdown_threads()
+        if self._mfli_window is not None:
+            self._mfli_window.shutdown_threads()
         self._session.shutdown()
 
         # 모든 하위 창 닫기
         for win in (
             self._vna_window,
+            self._mfli_window,
             self._graph_window,
             self._double_sweep_window,
             self._param_manager_window,

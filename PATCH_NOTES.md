@@ -2,6 +2,225 @@
 
 ---
 
+## v1.07.1 — 2026-07-30 (버그픽스)
+
+- **[치명] 장시간 측정 중 워커가 조용히 멈추던 race 수정** — `gui/mfli_window.py` follow 폴 루프와
+  `gui/vna_window.py` 스텝 대기의 `time.sleep(min(X, deadline - perf_counter()))`. `while` 조건과
+  sleep 인자가 `perf_counter()`를 **각각** 호출하므로, 그 사이에 deadline을 넘기면 인자가 음수가 되어
+  `ValueError: sleep length must be non-negative`로 워커가 죽는다. 수천 번 중 한 번 걸리는 race라
+  실제로 MFLI follow 측정이 **~38시간 뒤** 이 예외로 중단됐다(냉각 측정이 216 sweep에서 조용히 멈춤;
+  데이터는 그때까지 정상 저장·flush됨). `max(0.0, min(X, …))`로 음수를 0으로 클램프해 수정. 동일 패턴이
+  있던 VNA 창(`:244`)도 함께 수정(`:441`은 `if wait>0` 가드가 있어 무관). 폴 대기는 `_sleep_poll()`로
+  일원화.
+- **MFLI follow 견고성 강화** — 장시간 무인 측정이 계측기 순간 글리치로 통째로 멈추지 않도록: MFLI
+  읽기(freq/noise)가 **일시적으로 실패하면 그 포인트만 건너뛰고 계속**하고, **연속** 실패가
+  `_FAIL_ABORT_S`(기본 300s)를 넘을 때만 '장비 소실'로 보고 중단한다(이전엔 단 1회 실패로도 `break`).
+  aux(ITC/M81)는 `_read_aux`가 개별 실패를 NaN 처리하므로 원래도 안 죽는다. freq 읽기 성공 시 연속
+  실패 streak 리셋. 헤드리스 검증: 일시 1회 실패 → 건너뛰고 계속, 연속 실패 → 임계 초과 시 중단.
+
+---
+
+## v1.07.0 — 2026-07-14
+
+Zurich MFLI(lock-in) 전용 측정 모듈 추가 — 주파수 sweep noise 측정 + 포인트별 보조값 로깅.
+
+### ■ MFLI Noise Sweep 모듈 (VNA Control과 동일한 독립 창)
+
+- **목적**: MFLI로 주파수를 sweep하며 각 주파수에서 noise level을 측정하고, 같은 행에
+  probe 온도(Oxford iTC)·M81 DC voltage를 함께 기록.
+- **연결 방식**: MFLI는 SCPI/VISA가 아니라 LabOne Data Server + zhinst 노드 트리로 제어된다.
+  신규 어댑터 드라이버 `driver/mfli.py`(`ZurichMFLI`)가 **이미 실행 중인 Data Server**
+  (기본 localhost:8004)에 접속해 노드 경로를 명령 문자열로 번역한다:
+  set `"/{dev}/oscs/0/freq = {v}"`→`setDouble`, get `"/{dev}/..."`→`getDouble`. `{dev}`는
+  `device_id`로 치환. write(주파수 변경) 직후 `settle_s` 대기로 lock-in 정착을 캡슐화(GUI
+  타이밍과 무관하게 정착값을 읽음). BaseInstrument 계약(문자열 in/float out)을 만족하므로
+  InstrumentSession·MeasurementParameter가 다른 장비와 동일하게 다룬다.
+- **독립 모듈**: `gui/mfli_window.py`(`MfliWindow` + `_MfliAcquireWorker` + 플롯 패널),
+  `gui/mfli_models.py`(설정 모델 + YAML IO). VNA 창을 copy-and-trim(worker/QThread 스레드
+  안전·플롯·저장·프로파일 저장 패턴 재사용, double-sweep/time-mode/section/alarm은 제외).
+- **두 가지 측정 방식(창에서 토글)**:
+  - **Driven** (이 프로그램이 직접 sweep): LINEAR 주파수 sweep → 포인트별 `write(freq)`→
+    `read(noise)`→`read(ITC)`→`read(M81)` → 한 행 `[frequency, noise, probe_T, M81_V]`.
+  - **Follow** (LabOne이 sweep, 나는 따라 읽기): 주파수를 쓰지 않고 `poll_interval`마다 **주파수
+    노드만** 촘촘히 확인하다가, **주파수가 직전 기록값과 달라질 때만**(sweep 첫 폴 포함) noise+보조값
+    (ITC·M81)을 읽어 `[time, frequency, (noise,) probe_T, M81_V]` 한 행을 기록 → **한 주파수당 1개**
+    (`poll_count`=기록 포인트 수, 0이면 Stop까지). LabOne Sweeper와 오실레이터를 다투지 않도록 read-only.
+    라이브 플롯은 주파수 **wrap(새 sweep 시작)** 감지 시 이전 sweep 표시를 지우고 **현재 sweep만**
+    보여준다(방향 반전+큰 점프로 판정). 플롯/저장 버퍼는 분리 — 수동 'Clear plot'은 표시만 비우고
+    저장 버퍼는 보존한다. 플롯 상단에 **`log x`·`log y` 체크박스**로 축 로그 스케일 전환(뷰 범위도
+    log10로 맞춤, 프로파일에 저장).
+    ※ 'X Noise 1Hz BW' 등은 Sweeper 모듈이 계산하는 값이라 `getDouble` 노드가 없다 → **noise
+    node를 비우면 noise 열을 생략**하고(권장), LabOne이 저장한 noise-vs-freq와 우리 로그를
+    **주파수로 병합**한다. `/oscs/0/freq` 노드를 폴링하는 방식이라 주파수 변경 직후 정착 중 값을
+    잡을 수 있으니 poll 간격을 넉넉히.
+  - 공통: **한 frequency sweep = `.dat` 파일 1개**(헤더 2줄: 라벨/단위). 긴 측정에서 Stop 전에
+    데이터가 날아가지 않도록, wrap(새 sweep 시작)을 감지할 때마다 직전 sweep을 `filename_xNNN.dat`
+    (번호 클수록 나중)로 **즉시 저장**하고 버퍼를 비운다. 마지막 부분 sweep은 Stop/종료 시 저장.
+    driven 모드는 단조 sweep 1개라 종료 시 파일 1개. 보조값은 `aux_reads` 목록으로 alias·명령·
+    라벨·단위를 사용자 편집 가능하며, 물리 리소스가 달라 병렬 읽기 안전.
+  - 기본 aux 명령을 사전 세팅: ITC `READ:DEV:DB8.T1:TEMP:SIG:TEMP`, M81 `FETCh:SENSe{M}:DC?`.
+    명령 안의 **`{M}`**은 창의 'M =' 값으로 전송 직전 치환(예: M=2 → `FETCh:SENSe2:DC?`). 기존
+    프로파일의 옛 placeholder(빈칸/`R1`)는 로드 시 기본 명령으로 자동 시드.
+- **LabOne sweep 병합** (`core/mfli_merge.py` + MFLI 창 "Merge with LabOne sweep" 섹션): LabOne
+  sweeper CSV와 우리 측정을 각각 sweep으로 분리해 순차 짝짓는다. 우리 측정 입력은 **단일 `.dat`(주파수
+  wrap으로 분리)와 per-sweep 저장 폴더(`test_xNNN.dat` 여러 개, 파일당 1 sweep) 둘 다** 지원
+  (`iter_our_sweeps`; 창의 "측정 폴더/.dat"는 폴더 선택). **유효한 sweep만** 골라 짝짓는다 — LabOne은
+  (측정 범위와 겹침 + full grid + 노이즈 유효)한 sweep, 우리는 완전한 segment만; 제외 내역·개수 불일치는
+  경고, 매칭 sweep이 없으면 거부. 결과는 **LabOne grid 전체(예: 200점)를 기준 행**으로 하고, 각 grid 점에
+  같은 주파수의 우리 측정을 붙인다(**rank가 아니라 '로그-주파수 최근접' 매칭** — 우리 주파수는 grid의
+  **부분집합**이라 rank로 짝지으면 poll로 놓친 점 때문에 통째로 밀린다; 실측 rank ~0.9 decade vs 주파수매칭
+  ~1e-8). **우리가 안 읽은 grid 점은 `Module_frequency`·aux(`probe_T`/`M81_V`)를 NaN**으로 채운다(노이즈
+  x/y/r/X_noise/R_noise/NEPBW는 LabOne 값이라 grid 전 점에 존재 → 예: 200점 grid를 159점만 잡으면 200행 중
+  41행이 aux=NaN). 하나로 보간하지 않고 **`LabOne_frequency`·`Module_frequency` 두 열을 모두** 내보낸다
+  (겹치는 행은 둘이 거의 같아야 정상). **Noise level 컬럼**(`X_noise/R_noise = stddev/√NEPBW`) + x/y/r/NEPBW
+  + 온도·M81 등을 담아 `sweep_N_merged_data.dat`로 저장(이전 잔여 파일은 정리). numpy/Qt 비의존이라
+  `python -m core.mfli_merge …` CLI로도 실행.
+  **대규모(≈1000 sweep) 대응**: 우리 파일은 **숫자(natural) 정렬**로 읽는다(`_num_key`) — 문자열 정렬은
+  `x1000`을 `x101` 앞에 두어 1000개+에서 순서를 망친다. LabOne은 parse 순서(파일 이름순 + append순
+  = 시간순)를 그대로 쓴다(chunk 번호로 재정렬하지 않음 — 큰 CSV가 `_00001.csv`로 롤오버하며 chunk 번호를
+  재시작해도 파일순이 이를 흡수). 검증: 1000 sweep 병합 ~12초·peak 42MB, 순서/주파수/noise 전부 정확.
+  단, 대응은 여전히 **양쪽 sweep이 1:1 시간순**이라는 전제 — 한쪽에서 sweep이 비대칭으로 빠지면(예:
+  LabOne 첫 sweep 노이즈 미계산 → 제외) 이후가 1칸 밀린다. 이때 **"개수 불일치" 경고**가 뜨므로,
+  경고가 없고 paired 수가 기대와 같으면 정렬이 맞다고 보장된다.
+- **noise**: LabOne에서 구성한 스칼라 PSD/noise 노드를 읽음(클라이언트측 통계 없음).
+- **통합**: main_window View 메뉴 "MFLI Noise Sweep…"(Ctrl+Shift+F), 싱글턴 런처, 프로파일
+  전환/저장 훅(`on_profile_changed`/`_save_ui_state`), 종료 시 `shutdown_threads()`를
+  `session.shutdown()` 이전에 호출. 설정은 `SETTINGS_DIR/profiles/mfli/{name}.yaml`.
+- **의존성**: `zhinst`(LabOne Python API) 추가.
+
+### ■ 리뷰로 잡은 결함 수정 (다중 에이전트 감사)
+
+- 창을 sweep 중 닫아도 워커가 방치/파괴되지 않도록 `closeEvent`→ignore+저장+숨김(Esc 닫기 차단).
+- 중복 aux 라벨이 플롯 data dict·소스 콤보에서 서로 덮어써 곡선이 사라지던 문제 → 라벨 유일화(_2…).
+- View 메뉴 단축키 충돌(Ctrl+Shift+M가 Meta Data와 겹침) → MFLI는 Ctrl+Shift+F.
+- 프로파일 전환 시 `_extra_cols` stale 캐시로 플롯 소스 복원이 조용히 실패하던 문제 → 항상 재계산.
+- 드라이버 `{dev}` 치환이 `//devN` 이중 슬래시를 만들던 버그 수정.
+
+---
+
+## v1.06.0 — 2026-07-14
+
+Double Sweep(VNA·레거시) second 채널 값 테이블 편집 + field-time 워크플로 옵션 2종.
+
+### ■ Feature 1 — Second 값 테이블 편집 창 (VNA + 레거시 공용)
+
+- **스레드 안전 모델**(`gui/second_channel_model.py`): second(array) 값 배열의 단일
+  source of truth. 순수 파이썬 + `Lock`(Qt 미사용)이라 측정 워커 스레드에서 매 행 값을
+  '새로' 읽어도 안전. 행 상태 `PENDING/CURRENT/DONE`을 하나의 락으로 직렬화.
+- **편집 창**(`gui/second_channel_table_window.py`): 값·상태를 표로 표시. **완료(DONE) 행은
+  잠금**(회색), **측정 중(CURRENT) 행은 색상**(파랑), **미래(PENDING) 행은 측정 중에도
+  값 수정·행 추가·삭제 가능**. 워커는 창/위젯을 직접 만지지 않고, 워커→GUI는 bound
+  `@Slot`(`_on_second_row`/`_begin_array_index`)으로만 갱신.
+- **디폴트/커스텀**: 시작 시 Start/Stop/N(레거시는 From/To/Step)으로 테이블을 재생성하고
+  배열을 만든다. **"테이블 초기화 안 함" 체크박스**를 켜면 사용자가 넣은 커스텀 테이블
+  그대로 측정(`rearm`). 테이블은 세션 한정(프로파일에 미저장).
+- **완료 prefix 불변식**: DONE 행은 항상 앞쪽 prefix에 모여 이동/삭제되지 않아, 미래 행을
+  추가/삭제해도 워커의 현재 위치(CURRENT) 이후만 바뀌므로 안전. 재개 시 완료분을
+  `reset_from(vals, done_prefix=n)`으로 DONE 시딩.
+- **VNA·레거시 동일 모델/창 재사용**: VNA는 `_run_double_sweep` 워커가 `value_at(gidx)`를
+  전역 인덱스로 읽고, 레거시는 상태머신이 array 경계마다 `_begin_array_index()`로 모델을
+  다시 읽어 편집/추가를 반영.
+
+### ■ Feature 2 — "기다리지 않고 현재 온도에서 먼저 sweep" (VNA field-time)
+
+- Double Sweep with Time에서 첫 second(온도) 목표 도달을 기다리지 않고 **현재 온도에서
+  정상 field sweep을 1회 선행**한 뒤 T1 도달→sweep→T2 도달→sweep… 로 이어감. 첫 실행
+  (offset==0)에만 적용, 재개 시에는 미적용. 선행 sweep은 `<figure>_initial` 하위폴더에 저장.
+
+### ■ Feature 3 — dummy(복귀) 구간도 측정 (VNA field-time)
+
+- 기존에는 First 채널의 시작점 복귀(dummy 램프)를 측정하지 않았으나, 체크 시 복귀 램프
+  동안에도 acquire하여 `<second>_dummy` 하위폴더에 저장. 복귀 후 원래 second 폴더로 복원.
+
+### ■ 지속성 / 재개
+
+- 3개 체크박스(`second_use_custom_table`·`field_initial_sweep`·`dummy_measure`)를
+  `VnaDoubleSweepControl`에 추가해 프로파일에 저장·복원.
+- second 완료 시 라이브 모델 값으로 resume `second_values`를 재동기화 → 측정 중 편집·추가한
+  미래 행이 재개 목록에도 반영.
+
+---
+
+## v1.05.0 — 2026-06-18
+
+대규모 안정성·정합성 강화 + VNA Double Sweep 기능 확장. 2회의 다차원 크래시/버그 감사
+(에이전트 ~97개)로 발견·검증한 항목을 반영.
+
+### ■ VNA Double Sweep 기능 확장
+
+- **시작점 복귀(go-to-start)**: 단방향 sweep이 매 회 시작점(예: 0 T)으로 controlled 복귀한
+  뒤 측정하도록 함. field-time·standard 경로 모두 적용. 첫 회 초기 이동도 포함되어 자기장이
+  엉뚱한 지점(예: 1.2 T)에서 시작되던 문제 해결.
+- **pre-advance 타이밍 정리**: 매 sweep 직전 `dummy 속도 → 시작점 복귀 → sweep 속도 → 측정`
+  순서로 적용. sweep/dummy 단계별 자기장 ramp 속도(RFST)를 정확히 제어.
+- **새 advance 타입 `Threshold + Time`**: 목표 band 도달 후 std 안정화 대신 고정 시간 대기.
+  목표가 0일 때 std 정규화가 과민해지는 문제를 회피. VNA·레거시 Double Sweep 양쪽 UI 지원.
+- **FEEDBACK 도달 판정 개선**: 비율 대신 `band = max((1-tol%)·denom, noisefloor)` 절대
+  허용오차. 시작점이 목표에 매우 가까운 작은 이동(예: 120.997→121)에서도 도달 판정 가능,
+  overshoot 조기 도달 오판 제거.
+- **3컬럼 레이아웃**: `[Sweep/Acquire 설정] | [섹션 Execute] | [플롯]`.
+- **second 값별 하위폴더 저장**: `filename_xxx/<second값>/...dat` 구조.
+- **진행 phase 세밀 표시**: second/First 카운터, ①복귀 ②ramp ③측정 ④HOLD, acquire 내부
+  (OPC 대기·곡선 읽기), feedback '도달 중' 실시간 값.
+- **Stop 시 실행 명령**: 측정 중단/오류 시 등록된 명령(예: 자기장 HOLD) 자동 전송.
+- **Resume(재개)**: 매 second 완료 시 재개 상태를 프로파일 옆 파일에 저장 → 사용자 중단·오류·
+  크래시 후 마지막 second 값부터 같은 폴더에 이어서 측정.
+- **sweep 중 버튼 비활성화**: 섹션 Execute·Config·Alarm 등 충돌 유발 버튼 비활성화.
+
+### ■ 안정성 — 네이티브 크래시 제거
+
+- **워커 스레드 GUI 접근 차단**: 워커 신호를 lambda가 아닌 bound `@Slot`으로 연결(자동
+  메인스레드 큐잉). lambda 연결이 워커 스레드에서 GUI(QLabel)를 만져 access violation으로
+  무작위 종료되던 근본 원인 제거. (VNA·레거시 Double Sweep 양쪽)
+- **세션 eviction race 제거**: 통신 오류 시 `viClose`를 데몬 스레드로 던져 워커의 자동
+  재오픈(`viOpen`)과 같은 리소스에서 동시 실행돼 힙 손상(0xC0000374)되던 문제 →
+  alias 락 내 **동기 disconnect** + `open()` 직렬화.
+- **종료 시 use-after-free 방지**: 앱 종료가 VNA 워커를 정지·대기한 뒤 ResourceManager를
+  닫도록(`shutdown_threads()`), 세션에 `_shut_down` 가드, 드라이버 `disconnect`에서
+  `inst=None`. 워커 QThread parent 제거 + `_sec` 워커 스레드 affinity 정리.
+- **플롯 비유한값 방어**: `setData`의 `skipFiniteCheck` 제거 + NaN/Inf→gap, 범위 계산
+  유한값만, step 슬롯 try/except. 드라이버 drain 루프 상한.
+
+### ■ 런어웨이/행 방지
+
+- **`sweep_rate ≤ 0` / `time_per_point ≤ 0`**: 무한 정지(rate=0)·역방향 폭주(rate<0)를
+  명시적 오류로 차단(`calculate_next_step`이 크기는 abs, 방향은 목표차로). 메인·더블·VNA·
+  second 채널 전부 적용 + 시작 전 GUI 검증.
+- **feedback/threshold 폴링**: `sleep`→`stop_event.wait`(Stop 즉시 반영), 비유한값 5연속·
+  통신오류 3연속이면 20~40분 워치독 대신 조기 에스컬레이션.
+
+### ■ 데이터 정합성
+
+- **Resume 세션 초기화**: 단일 sweep 재개 시 미분 reset/reconfigure·메타데이터 configure·
+  컬럼 동기화를 수행(미분이 Stop 불연속을 가로질러 계산되거나 메타 버퍼가 어긋나던 문제).
+- **`_parse_float` 강화**: 복합/모호 응답(`12.5/3.0`, `1.2.3`, `3 of 5`)에서 잘못된 값
+  추출 대신 에러. 정상 `값[단위]`는 통과.
+- **DataSaver 파일명**: 자동번호 파일을 배타 생성(`'x'`)+재시도 → 두 프로세스 동시 덮어쓰기 방지.
+- **드라이버 버퍼 동기화**: Mercury(iPS/iTC) write 후 ack 확실히 읽기 + query 전 stale 입력
+  flush → 자기장이 0/NaN으로 찍히거나 거짓 HOLD가 잡히던 desync 제거.
+
+### ■ 병렬 측정
+
+- **통신 락을 물리 리소스(주소) 단위로**: 같은 장비를 가리키는 두 alias가 병렬에서 동시
+  통신해 응답이 섞이던 데이터 손상 차단(서로 다른 장비는 그대로 병렬).
+- 측정 단계가 Stop을 빠르게 반영(early-return), `run_step`이 큐 대기 중 Stop을 삼키지 않음.
+
+### ■ UI/보안/기타
+
+- 더블스위프 second 채널 라디오 재빌드를 IDLE에서만(실행 중 무효화로 advance가 죽던 문제).
+- 알람(winsound.Beep)을 데몬 스레드로 오프로드 → GUI ~1초 프리즈 제거.
+- 텔레그램 TLS 인증서 검증 복구(토큰 MITM 노출 차단), 전송 실패를 로그로 기록.
+- 닫힌 alias 접근 시 `KeyError` → 명확한 `ConnectionError`.
+- sweep 파라미터를 측정 중 편집해도 현재 위치 보존(불필요한 readback/점프 방지).
+
+### ■ 로깅/진단
+
+- **`core/applog.py` 신설**: faulthandler(네이티브 크래시 스택) + 메인·워커 스레드 excepthook +
+  Qt 메시지 핸들러 + RotatingFileHandler. 로그 위치 `settings/logs/`(app.log, fault.log).
+  평소 오버헤드 거의 없음. 이 로깅으로 무작위 종료의 근본 원인(GUI in worker thread)을 포착.
+
+---
+
 ## v1.04.0 — 2026-03-21
 
 ### 디버그 창 개편

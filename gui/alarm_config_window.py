@@ -555,8 +555,24 @@ class AlarmConfigWindow(QDialog):
         root.addLayout(btn_row)
 
     def _load(self):
-        self._delivery.load_config(self._cfg)
-        self._telegram.load_config(self._cfg)
+        # 전송 수단(소리·이메일·텔레그램)은 전역 공유값에서 로드한다.
+        # 전역이 아직 비어 있으면(최초) 현재 컨텍스트 cfg의 값으로 시드한다.
+        from config.app_config import load_alarm_delivery
+        d = load_alarm_delivery()
+        if d.is_configured():
+            merged = self._cfg.model_copy(update={
+                "use_sound": d.use_sound, "use_email": d.use_email,
+                "email_to": d.email_to, "smtp_host": d.smtp_host,
+                "smtp_port": d.smtp_port, "smtp_user": d.smtp_user,
+                "smtp_password": d.smtp_password, "use_telegram": d.use_telegram,
+                "telegram_bot_token": d.telegram_bot_token,
+                "telegram_chat_id": d.telegram_chat_id,
+                "telegram_contacts": list(d.telegram_contacts),
+            })
+        else:
+            merged = self._cfg
+        self._delivery.load_config(merged)   # enabled는 self._cfg(컨텍스트)에서 옴
+        self._telegram.load_config(merged)
 
     def get_config(self) -> AlarmConfig:
         """Delivery + Telegram + (보존된) 측정값 조건을 합친 AlarmConfig."""
@@ -565,11 +581,25 @@ class AlarmConfigWindow(QDialog):
         contacts = [TelegramContact(**c) for c in tg.pop("telegram_contacts", [])]
         return cfg.model_copy(update={**tg, "telegram_contacts": contacts})
 
+    def _save_delivery_global(self, cfg: AlarmConfig):
+        """전송 수단을 전역 공유 저장소에 기록 → 다른 창(VNA/Double Sweep)과 동기화."""
+        from config.app_config import save_alarm_delivery
+        from config.config_models import AlarmDeliveryConfig
+        save_alarm_delivery(AlarmDeliveryConfig(
+            use_sound=cfg.use_sound, use_email=cfg.use_email, email_to=cfg.email_to,
+            smtp_host=cfg.smtp_host, smtp_port=cfg.smtp_port, smtp_user=cfg.smtp_user,
+            smtp_password=cfg.smtp_password, use_telegram=cfg.use_telegram,
+            telegram_bot_token=cfg.telegram_bot_token, telegram_chat_id=cfg.telegram_chat_id,
+            telegram_contacts=list(cfg.telegram_contacts),
+        ))
+
     def _on_apply(self):
         self._cfg = self.get_config()
+        self._save_delivery_global(self._cfg)
         self.apply_requested.emit(self._cfg)
 
     def _on_ok(self):
         self._cfg = self.get_config()
+        self._save_delivery_global(self._cfg)
         self.apply_requested.emit(self._cfg)
         self.accept()

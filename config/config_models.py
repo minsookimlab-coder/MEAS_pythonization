@@ -186,10 +186,11 @@ class InstantiatedWriteCmd(BaseModel):
 
 
 class SecondSweepAdvanceType(str, Enum):
-    SIMPLE_HOP    = "simple_hop"
-    SWEEP         = "sweep"
-    FEEDBACK      = "feedback"
-    WAIT_FOR_TIME = "wait_for_time"
+    SIMPLE_HOP     = "simple_hop"
+    SWEEP          = "sweep"
+    FEEDBACK       = "feedback"
+    WAIT_FOR_TIME  = "wait_for_time"
+    THRESHOLD_TIME = "threshold_time"   # 목표 band 도달 후 고정 시간 대기 (std 안정화 대신)
 
 
 class InstantiatedSecondSweepChannel(BaseModel):
@@ -243,6 +244,30 @@ class TelegramContact(BaseModel):
     """Telegram 알람 수신자 — 이름과 Chat ID."""
     name: str = ""
     chat_id: str = ""
+
+
+class AlarmDeliveryConfig(BaseModel):
+    """알람 '전송 수단' 설정 — VNA·Double Sweep가 공유하는 전역 값.
+
+    소리/이메일/SMTP/텔레그램 토큰·연락처처럼 어디서 알람을 켜든 동일해야 하는
+    항목만 담는다. on/off(enabled)와 트리거는 각 컨텍스트의 AlarmConfig에 따로 보관.
+    """
+    use_sound: bool = True
+    use_email: bool = False
+    email_to: str = ""
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    use_telegram: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_contacts: List[TelegramContact] = Field(default_factory=list)
+
+    def is_configured(self) -> bool:
+        """전역 전송설정이 실제로 채워져 있는지(최초 시드 판단용)."""
+        return bool(self.telegram_bot_token.strip() or self.email_to.strip()
+                    or self.smtp_user.strip() or self.telegram_contacts)
 
 
 class AlarmConfig(BaseModel):

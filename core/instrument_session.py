@@ -46,20 +46,43 @@ class InstrumentSession:
         # 계측기(alias)별 VISA 통신 직렬화 락.
         # 같은 계측기(같은 TCP 연결)는 직렬화하지만, 서로 다른 계측기는
         # 독립 연결이라 동시 통신이 안전 → 병렬 측정을 가능하게 한다.
+        # 통신 락은 '물리 리소스(주소)' 단위로 묶는다. 서로 다른 alias가 같은 장비를
+        # 가리키면(예: instruments.yaml에 같은 IP를 두 alias가 공유) 병렬 측정 시 한 장비에
+        # 동시 통신이 들어가 응답이 뒤섞여 데이터가 손상된다 → 같은 리소스면 같은 락으로 직렬화.
         self._alias_locks: Dict[str, threading.Lock] = {}
+        self._resource_keys: Dict[str, str] = {}   # alias → 물리 리소스 키 (캐시)
         self._locks_guard = threading.Lock()  # _alias_locks dict 보호 (락 생성 직렬화)
         self._open_lock = threading.Lock()    # open/close 원자성 (중복 연결 방지)
         atexit.register(self.shutdown)        # 한 번만 등록
 
+    def _resource_key(self, alias: str) -> str:
+        """alias를 물리 리소스 키(interface|address|port)로 해석. 미상이면 alias로 폴백."""
+        k = self._resource_keys.get(alias)
+        if k is not None:
+            return k
+        try:
+            cfg = self._registry.get_config(alias)
+        except Exception:
+            cfg = None
+        if cfg is None:
+            return alias   # 아직 등록정보 미상 → alias로 (캐시 안 함, 다음에 재시도)
+        addr = (getattr(cfg, "address", "") or "").strip().lower()
+        port = getattr(cfg, "port", "") or ""
+        itype = (getattr(cfg, "interface_type", "") or "").strip().lower()
+        k = f"{itype}|{addr}|{port}" if addr else alias
+        self._resource_keys[alias] = k
+        return k
+
     def _alias_lock(self, alias: str) -> threading.Lock:
-        """alias별 통신 락을 lazily 생성/반환한다."""
-        lk = self._alias_locks.get(alias)
+        """물리 리소스별 통신 락을 lazily 생성/반환한다(같은 장비 = 같은 락)."""
+        key = self._resource_key(alias)
+        lk = self._alias_locks.get(key)
         if lk is None:
             with self._locks_guard:
-                lk = self._alias_locks.get(alias)
+                lk = self._alias_locks.get(key)
                 if lk is None:
                     lk = threading.Lock()
-                    self._alias_locks[alias] = lk
+                    self._alias_locks[key] = lk
         return lk
 
     def set_log_enabled(self, enabled: bool):  # ← 새 메서드 추가
@@ -85,6 +108,8 @@ class InstrumentSession:
 
     def open(self, alias: str):
         """alias 장비에 연결합니다. 이미 열려 있으면 재사용합니다."""
+        if self._shut_down:
+            raise RuntimeError("InstrumentSession is shut down")
         with self._open_lock:
             # 이미 연결된 경우 즉시 반환 (중복 연결 방지)
             if alias in self._instruments:
@@ -95,16 +120,20 @@ class InstrumentSession:
             if config is None:
                 raise KeyError(f"Alias '{alias}' not found in instruments.yaml")
 
-            try:
-                inst = self._factory.create_instrument(config)
-                inst.connect()
-            except Exception as e:
-                # 통신 오류 + IP가 바뀐 정황이면 MAC으로 현재 IP를 재감지하고
-                # 저장된 IP를 갱신한 뒤 1회 재연결을 시도한다.
-                inst = self._reconnect_via_mac(alias, config, e)
-                if inst is None:
-                    raise   # IP 변경 없음/재시도 실패 → 기존 방식대로 전파
-            self._instruments[alias] = inst
+            # viOpen은 같은 alias의 viClose(eviction/close)와 겹치면 NI-VISA 내부
+            # 세션 테이블이 손상(heap corruption, 0xC0000374)되므로 alias 락으로
+            # 직렬화한다. eviction의 동기 disconnect(아래)와 상호배제된다.
+            with self._alias_lock(alias):
+                try:
+                    inst = self._factory.create_instrument(config)
+                    inst.connect()
+                except Exception as e:
+                    # 통신 오류 + IP가 바뀐 정황이면 MAC으로 현재 IP를 재감지하고
+                    # 저장된 IP를 갱신한 뒤 1회 재연결을 시도한다.
+                    inst = self._reconnect_via_mac(alias, config, e)
+                    if inst is None:
+                        raise   # IP 변경 없음/재시도 실패 → 기존 방식대로 전파
+                self._instruments[alias] = inst
             print(f"[Session] '{alias}' connected.")
 
     def _reconnect_via_mac(self, alias, config, exc):
@@ -204,18 +233,20 @@ class InstrumentSession:
 
         timeout(VI_ERROR_TMO)은 연결 자체는 살아있으므로 제거하지 않습니다.
         그 외 VisaIOError (연결 끊김, invalid object 등)는 제거합니다.
-        호출 시점: 해당 alias 락 보유 중 — disconnect는 락 해제 후 별도 처리.
+        호출 시점: 해당 alias 락 보유 중 — 그 락 안에서 동기로 disconnect한다.
         """
         if not isinstance(exc, pyvisa.errors.VisaIOError):
             return
         if exc.error_code == pyvisa.errors.StatusCode.error_timeout:
             return  # timeout은 세션 유지 (재연결 불필요)
-        # 연결 오류: _instruments에서 제거 (락 보유 중이므로 dict.pop만 수행)
+        # 연결 오류: _instruments에서 제거 후 '동기'로 disconnect.
+        # (예전엔 데몬 스레드로 viClose를 던졌는데, 그 close가 워커의 자동 재오픈
+        #  viOpen(open())과 같은 NI-VISA 리소스에서 동시 실행되어 세션 테이블이
+        #  손상(0xC0000374)되는 race였다. 호출자가 alias 락을 쥐고 있으므로 여기서
+        #  동기로 닫으면 같은 alias의 viOpen은 이 락이 풀린 뒤에야 실행된다.)
         inst = self._instruments.pop(alias, None)
         if inst:
-            # disconnect는 데몬 스레드에서 — _lock을 오래 붙잡지 않도록
-            import threading as _t
-            _t.Thread(target=self._safe_disconnect, args=(inst,), daemon=True).start()
+            self._safe_disconnect(inst)
             print(f"[Session] '{alias}' session evicted due to: {exc}")
 
     @staticmethod
@@ -228,8 +259,13 @@ class InstrumentSession:
     def write(self, alias: str, cmd: str):
         """alias 장비에 VISA 명령어를 전송합니다 (응답 없음)."""
         with self._alias_lock(alias):
+            if self._shut_down:
+                raise RuntimeError("InstrumentSession is shut down")
             try:
-                self._instruments[alias].write(cmd)
+                inst = self._instruments.get(alias)
+                if inst is None:                 # 다른 스레드가 pop/evict한 경우
+                    raise ConnectionError(f"'{alias}' is not connected")
+                inst.write(cmd)
                 self._emit_log(alias, "write", cmd)
             except Exception as e:
                 self._emit_log(alias, "write_err", cmd, f"{type(e).__name__}: {e}")
@@ -239,8 +275,13 @@ class InstrumentSession:
     def read(self, alias: str) -> str:
         """alias 장비로부터 응답을 읽어 반환합니다."""
         with self._alias_lock(alias):
+            if self._shut_down:
+                raise RuntimeError("InstrumentSession is shut down")
             try:
-                result = self._instruments[alias].read()
+                inst = self._instruments.get(alias)
+                if inst is None:
+                    raise ConnectionError(f"'{alias}' is not connected")
+                result = inst.read()
                 self._emit_log(alias, "read", "", result)
                 return result
             except Exception as e:
@@ -251,8 +292,13 @@ class InstrumentSession:
     def query(self, alias: str, cmd: str) -> str:
         """alias 장비에 명령어를 전송하고 응답을 읽어 반환합니다."""
         with self._alias_lock(alias):
+            if self._shut_down:
+                raise RuntimeError("InstrumentSession is shut down")
             try:
-                result = self._instruments[alias].query(cmd)
+                inst = self._instruments.get(alias)
+                if inst is None:
+                    raise ConnectionError(f"'{alias}' is not connected")
+                result = inst.query(cmd)
                 self._emit_log(alias, "query", cmd, result)
                 return result
             except Exception as e:
