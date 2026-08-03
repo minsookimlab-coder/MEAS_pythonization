@@ -17,6 +17,7 @@ from pythonization.config.models import (
 )
 from pythonization.measurement.sweep import calculate_next_step
 from pythonization.measurement.channel import SweepChannel
+from pythonization.instruments.errors import is_comm_error
 from pythonization.instruments.parameter import (
     MeasurementParameter,
     SweepParameter,
@@ -33,6 +34,37 @@ if TYPE_CHECKING:
 # 너무 오래 지속돼도 실패 처리한다. 실패 시 측정 중지 + 알람.
 _PHASE1_TIMEOUT_S = 20 * 60   # threshold 도달 최대 대기 (재전송 시 1회 더 → 총 최대 40분)
 _PHASE2_TIMEOUT_S = 5 * 60    # feedback 안정화 과정 최대 지속
+
+# 폴링 중 '연속' 실패 임계. 워치독(20~40분)까지 묵히지 않고 여기서 끊어 상위의
+# 자동 재개를 빨리 돌린다. 한 번 성공적으로 읽으면 카운터는 0으로 돌아간다.
+_MAX_COMM_FAILS = 3          # 통신 오류 — 장비가 사라졌을 가능성
+_MAX_NONFINITE = 5           # NaN/Inf — 읽기 명령이 잘못됐을 가능성
+_PROGRESS_INTERVAL_S = 1.5   # '도달 중' 상태 표시 최소 간격
+
+
+def _feedback_band(tolerance_pct: float, distance: float, noisefloor: float) -> float:
+    """목표에 도달했다고 볼 허용 오차.
+
+    큰 이동은 비율 허용오차((1-tol%)·이동거리)로 판정한다. 시작점이 목표에 이미
+    가까운 작은 이동에서는 그 값이 노이즈보다 작아져 영영 도달 판정이 나지 않으므로
+    noisefloor 를 절대 하한으로 둔다.
+    """
+    return max((1.0 - tolerance_pct / 100.0) * distance, noisefloor)
+
+
+def _stability_metric(samples, target: float, noisefloor: float) -> float:
+    """정규화한 흔들림 지표 = 표준편차 / (|목표값| + noisefloor).
+
+    평균이 아니라 목표값으로 정규화한다 — overshoot 로 평균이 치우쳐도 척도가
+    일정하게 유지된다. 목표가 0 근처면 noisefloor 를 반드시 설정해야 한다
+    (아니면 분모가 0에 가까워져 영영 안정 판정이 나지 않는다).
+    """
+    if not samples:
+        return float("inf")
+    mean = sum(samples) / len(samples)
+    variance = sum((v - mean) ** 2 for v in samples) / len(samples)
+    scale = abs(target) + noisefloor
+    return math.sqrt(variance) / scale if scale > 1e-30 else float("inf")
 
 
 class SecondAdvanceTimeout(Exception):
@@ -174,133 +206,134 @@ class SecondChannelWorker(QObject):
 
     def _do_feedback(self, alias: str, ch: InstantiatedSecondSweepChannel,
                      next_v: float, prev_v: Optional[float]) -> None:
-        """값 설정 후 feedback_read_cmd로 폴링, 목표 도달 시 반환.
+        """값을 설정한 뒤 실제 값이 목표에 도달하고 안정될 때까지 기다린다.
 
-        Phase 1: 목표와의 거리가 band = max((1-tol%)·denom, noisefloor) 이하가 될 때까지 poll.
-          noisefloor가 절대 허용오차 하한이라, 시작점이 목표에 매우 가까운 작은 이동에서도
-          판정이 노이즈보다 빡빡해지지 않는다.
-        Phase 2 (std_window > 0): 도달 후 추가 폴링 —
-          최근 std_window 개 측정값의 std dev < std_threshold 가 되면 반환
+        Phase 1 — 목표와의 거리가 허용 band 안에 들어올 때까지 폴링
+        Phase 2 — (std_window > 0일 때) 흔들림이 임계 아래로 내려갈 때까지 폴링
+
+        자기장처럼 명령을 줘도 실제 도달까지 시간이 걸리고 출렁이는 값에 쓴다.
         """
         self._session.write(alias, ch.cmd_set.format(v=next_v))
 
-        denom = abs(next_v - (prev_v or 0.0))
+        distance = abs(next_v - (prev_v or 0.0))
         use_std = ch.feedback_std_window > 0 and ch.feedback_std_threshold > 0.0
 
-        # denom == 0 이면 이미 목표값에 있음 — std 체크만 남아있을 수 있음
-        if denom < 1e-12:
+        if distance < 1e-12:
+            # 이미 목표값에 있다 — 도달 판정은 건너뛴다
             if not use_std:
                 return
-            # threshold는 이미 충족, Phase 2만 실행
-            threshold_reached = True
-        else:
-            threshold_reached = False
+        elif not self._await_feedback_target(alias, ch, next_v, distance):
+            return      # Stop 요청
 
-        # sliding window for Phase 2
-        window: deque = deque(maxlen=ch.feedback_std_window) if use_std else deque(maxlen=1)
+        if use_std:
+            self._await_feedback_stability(alias, ch, next_v)
 
-        # ── 워치독 타이머 ────────────────────────────────────────────────────
-        # Phase 1: threshold 도달까지 _PHASE1_TIMEOUT_S 내. 초과 시 명령 무시를
-        #          의심해 1회 재전송 후 재대기, 그래도 초과면 실패(SecondAdvanceTimeout).
-        # Phase 2: 안정화가 _PHASE2_TIMEOUT_S 내 수렴하지 않으면 실패.
-        phase1_deadline = _time.monotonic() + _PHASE1_TIMEOUT_S
-        phase2_deadline = (_time.monotonic() + _PHASE2_TIMEOUT_S
-                           if threshold_reached else None)
-        retried = False
-        last_prog = 0.0   # Phase 1 '도달 중' 진행 표시 스로틀(초)
-        comm_fails = 0    # 연속 통신 실패 카운트 (조기 에스컬레이션용)
-        nonfinite = 0     # 연속 비유한값(NaN/Inf) 카운트
+    def _await_feedback_target(self, alias: str, ch: InstantiatedSecondSweepChannel,
+                               next_v: float, distance: float) -> bool:
+        """Phase 1 — 목표 도달까지 대기. 도달하면 True, Stop 이면 False."""
+        band = _feedback_band(ch.feedback_tolerance_pct, distance, ch.feedback_noisefloor)
+        last_progress = 0.0
 
-        while True:
-            if self._stop_event.is_set():
-                break
-
-            # ── 워치독 점검 (query 실패로 continue되더라도 항상 평가되도록 루프 상단에) ──
+        for value in self._poll_feedback(alias, ch,
+                                         self._phase1_watchdog(alias, ch, next_v)):
+            if abs(value - next_v) <= band:
+                return True
+            # 도달 중 현재값 표시 (너무 자주 찍지 않도록 간격 제한)
             now = _time.monotonic()
-            if not threshold_reached:
-                if now > phase1_deadline:
-                    if not retried:
-                        # 명령이 한 번 무시됐을 가능성 → 다시 한 번 전송 후 재대기
-                        retried = True
-                        self.status.emit(
-                            f"second '{alias}' threshold {_PHASE1_TIMEOUT_S // 60}분 미도달 "
-                            f"— 명령 재전송 후 재대기")
-                        self._session.write(alias, ch.cmd_set.format(v=next_v))
-                        phase1_deadline = _time.monotonic() + _PHASE1_TIMEOUT_S
-                        continue
-                    raise SecondAdvanceTimeout(
-                        f"second channel '{alias}': 명령 재전송 후에도 "
-                        f"{_PHASE1_TIMEOUT_S // 60}분 내 목표값({next_v:g})에 도달하지 못함")
-            elif phase2_deadline is not None and now > phase2_deadline:
+            if now - last_progress >= _PROGRESS_INTERVAL_S:
+                self.status.emit(f"도달 중 {value:.4g} → {next_v:.4g} "
+                                 f"(남음 {abs(value - next_v):.3g})")
+                last_progress = now
+        return False
+
+    def _await_feedback_stability(self, alias: str,
+                                  ch: InstantiatedSecondSweepChannel,
+                                  next_v: float) -> None:
+        """Phase 2 — 최근 std_window 개 샘플의 흔들림이 임계 아래로 내려갈 때까지."""
+        deadline = _time.monotonic() + _PHASE2_TIMEOUT_S
+
+        def watchdog():
+            if _time.monotonic() > deadline:
                 raise SecondAdvanceTimeout(
                     f"second channel '{alias}': feedback 안정화가 "
                     f"{_PHASE2_TIMEOUT_S // 60}분 내 수렴하지 않음")
 
-            # uninterruptible sleep 대신 stop_event.wait → Stop이 poll 간격 내 즉시 반영
+        window: deque = deque(maxlen=ch.feedback_std_window)
+        for value in self._poll_feedback(alias, ch, watchdog):
+            window.append(value)
+            if len(window) < ch.feedback_std_window:
+                continue
+            metric = _stability_metric(window, next_v, ch.feedback_noisefloor)
+            self.feedback_progress.emit(metric)
+            if metric < ch.feedback_std_threshold:
+                return
+
+    def _phase1_watchdog(self, alias: str, ch: InstantiatedSecondSweepChannel,
+                         next_v: float):
+        """Phase 1 시간 감시 — 늦으면 명령을 한 번 다시 보내 만회를 시도한다.
+
+        장비가 명령 하나를 흘렸을 뿐인데 20분을 버리는 일을 막는다. 재전송 후에도
+        도달하지 못하면 실패로 끊어 상위의 자동 재개 경로로 보낸다.
+        """
+        state = {"deadline": _time.monotonic() + _PHASE1_TIMEOUT_S, "retried": False}
+
+        def check():
+            if _time.monotonic() <= state["deadline"]:
+                return
+            if not state["retried"]:
+                state["retried"] = True
+                self.status.emit(
+                    f"second '{alias}' threshold {_PHASE1_TIMEOUT_S // 60}분 미도달 "
+                    f"— 명령 재전송 후 재대기")
+                self._session.write(alias, ch.cmd_set.format(v=next_v))
+                state["deadline"] = _time.monotonic() + _PHASE1_TIMEOUT_S
+                return
+            raise SecondAdvanceTimeout(
+                f"second channel '{alias}': 명령 재전송 후에도 "
+                f"{_PHASE1_TIMEOUT_S // 60}분 내 목표값({next_v:g})에 도달하지 못함")
+
+        return check
+
+    def _poll_feedback(self, alias: str, ch: InstantiatedSecondSweepChannel,
+                       watchdog):
+        """feedback 값을 하나씩 내놓는다. Stop 이 걸리면 조용히 끝난다.
+
+        일시적 통신 오류나 비유한값은 그 폴만 건너뛴다. 다만 **연속** 실패가
+        임계를 넘으면 바로 끊는다 — 워치독(20~40분)까지 기다리면 상위의 자동
+        재개가 너무 늦게 돈다.
+
+        watchdog 은 매 폴 직전에 불린다(시간 초과 시 예외 또는 재전송). query 실패로
+        건너뛰는 경우에도 반드시 평가되도록 루프 맨 앞에 둔다.
+        """
+        comm_fails = 0
+        nonfinite = 0
+
+        while not self._stop_event.is_set():
+            watchdog()
+            # uninterruptible sleep 대신 wait → Stop 이 폴 간격 안에 반영된다
             if self._stop_event.wait(ch.feedback_poll_interval):
-                break
+                return
             try:
                 raw = self._session.query(alias, ch.feedback_read_cmd).strip()
-                v_read = _parse_float(raw)
+                value = _parse_float(raw)
             except Exception as e:
-                # 통신 오류는 20분 워치독까지 묵히지 말고 ~3회 연속이면 끊어,
-                # 상위(advance)의 error 경로 → 빠른 자동재개로 보낸다.
-                from pythonization.instruments.errors import is_comm_error
                 if is_comm_error(e):
                     comm_fails += 1
-                    if comm_fails >= 3:
+                    if comm_fails >= _MAX_COMM_FAILS:
                         raise
                 continue
             comm_fails = 0
-            if not math.isfinite(v_read):
-                # 비유한값(NaN/Inf)이 계속 오면 40분 워치독 대신 즉시 명확한 실패로.
+
+            if not math.isfinite(value):
                 nonfinite += 1
-                if nonfinite >= 5:
+                if nonfinite >= _MAX_NONFINITE:
                     raise SecondAdvanceTimeout(
                         f"second channel '{alias}': 측정값이 계속 비유한값(NaN/Inf) "
                         f"(read='{ch.feedback_read_cmd}').")
                 continue
             nonfinite = 0
 
-            # Phase 1: 목표 근접 판정 (목표까지 남은 거리가 허용 band 이하인가).
-            #   band = max((1 - tol%)·denom, noisefloor)
-            #   - 큰 이동: (1-tol%)·denom — 기존 비율 허용오차와 사실상 동일
-            #   - 작은 이동(시작점이 목표에 매우 가까움): noisefloor가 절대 하한이 되어
-            #     도달 판정이 과도하게 빡빡(노이즈보다 작은 오차 요구)해지는 것을 막는다.
-            #   또한 '이동량' 대신 '목표와의 거리'로 보므로 overshoot 시 조기 도달 오판도 없다.
-            if not threshold_reached:
-                band = max((1.0 - ch.feedback_tolerance_pct / 100.0) * denom,
-                           ch.feedback_noisefloor)
-                if abs(v_read - next_v) <= band:
-                    threshold_reached = True
-                    phase2_deadline = _time.monotonic() + _PHASE2_TIMEOUT_S  # Phase 2 타이머 시작
-                    window.clear()   # reset window for Phase 2
-                    if not use_std:
-                        break        # no std check needed — done
-                    continue         # Phase 2 fresh start: threshold-crossing sample 제외
-                else:
-                    # 진행 표시(스로틀): 도달 중 현재값 → 목표
-                    if now - last_prog >= 1.5:
-                        self.status.emit(
-                            f"도달 중 {v_read:.4g} → {next_v:.4g} (남음 {abs(v_read-next_v):.3g})")
-                        last_prog = now
-                    continue         # still in Phase 1, don't accumulate yet
-
-            # Phase 2: accumulate + normalized stability metric
-            # metric = SD / (|next_v| + noisefloor) < std_threshold
-            # next_v를 고정 기준으로 사용: mean(측정값)은 overshoot 등으로 편향될 수 있으므로
-            # 목표값(next_v)을 정규화 기준으로 삼아 일관된 상대적 척도를 제공.
-            # next_v ≈ 0 일 때는 feedback_noisefloor 를 반드시 설정해야 함.
-            window.append(v_read)
-            if len(window) < ch.feedback_std_window:
-                continue             # not enough samples yet
-            mean = sum(window) / len(window)
-            std = math.sqrt(sum((v - mean) ** 2 for v in window) / len(window))
-            scale = abs(next_v) + ch.feedback_noisefloor
-            metric = std / scale if scale > 1e-30 else float("inf")
-            self.feedback_progress.emit(metric)
-            if metric < ch.feedback_std_threshold:
-                break                # stable enough — advance
+            yield value
 
     def _do_threshold_time(self, alias: str, ch: InstantiatedSecondSweepChannel,
                            next_v: float, prev_v: Optional[float]) -> None:
@@ -341,10 +374,9 @@ class SecondChannelWorker(QObject):
                     raw = self._session.query(alias, ch.feedback_read_cmd).strip()
                     v_read = _parse_float(raw)
                 except Exception as e:
-                    from pythonization.instruments.errors import is_comm_error
                     if is_comm_error(e):
                         comm_fails += 1
-                        if comm_fails >= 3:
+                        if comm_fails >= _MAX_COMM_FAILS:
                             raise
                     continue
                 comm_fails = 0
