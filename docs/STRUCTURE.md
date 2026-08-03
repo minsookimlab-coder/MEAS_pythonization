@@ -378,12 +378,31 @@ MainWindow._on_start() → QTimer → request_step → measurement.sweep_worker
 python -m unittest discover -s tests -t .
 ```
 
-구조 변경 회귀를 잡는 두 축:
+### 구조 변경 회귀를 잡는 네 축
 
-- `test_imports` — 모든 모듈이 import 되는가
-- `test_import_targets` — 소스에 적힌 **모든 import 문**(함수 내부 포함)이 해석되는가.
-  ast 로 정적 검사하므로 GUI 를 띄우지 않고도 '메뉴를 눌러야 터지는' 실패를 잡는다
-- `test_windows` — 메뉴가 여는 창 10개가 실제로 생성되는가
+리팩터링에서 실제로 터진 실패들을 하나씩 막는다. 넷 다 GUI 를 띄우지 않고 돈다.
 
-나머지는 순수 로직 계약을 고정한다 (sweep 진행 규칙, 스텝 기록, `.dat` 저장,
-응답 파싱, 통신 오류 판정, 미분 채널, LabOne 병합, 공용 플롯 패널).
+| 테스트 | 잡는 실패 |
+|---|---|
+| `test_imports` | 모듈이 아예 import 되지 않음 |
+| `test_import_targets` | 함수 안에 숨은 import 가 깨짐 — 그 메뉴를 눌러야 드러난다 |
+| `test_windows` | 창 생성이 깨짐 — 모듈 import 만으로는 안 드러난다 |
+| `test_cross_references` | 다른 창이 쓰는 `MainWindow` 내부 이름이 사라짐 — **측정을 실제로 돌려야** 드러난다 |
+| `test_annotations` | 어노테이션 전용 import 누락 — 3.14 는 지연 평가라 여기선 안 드러나고 3.10~3.13 에서 터진다 |
+
+`test_cross_references` 와 `test_annotations` 는 각각 이 리팩터링 중 실제로 발생한
+회귀(`_deriv_val_for_step` 유실, `Optional` 누락)를 잡아낸 것이다.
+
+### 동작 계약을 고정하는 테스트
+
+sweep 진행 규칙, 스텝 기록(값/nan/ERR), `.dat` 저장, 응답 파싱, 통신 오류 판정,
+미분 채널, FEEDBACK 도달·안정화 판정, 프로파일 재구성, placeholder 치환,
+double sweep 축 순서, LabOne 병합, 공용 플롯 패널.
+
+### UI 변경 검증
+
+UI 는 값으로 확인하기 어려워, 창의 위젯 트리를 통째로 덤프해 리팩터링 전후를
+대조하는 방식을 썼다(클래스·텍스트·체크상태·표시여부·활성여부 + 레이아웃 순서).
+`QScrollArea`·`QSplitter` 는 `layout()` 으로 자식이 안 잡히므로 `children()` 을
+재귀 순회한다. 일회성 도구라 저장소에는 넣지 않았다 — UI 를 크게 손볼 때 다시
+만들어 쓰면 된다.

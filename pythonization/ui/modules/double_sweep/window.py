@@ -1315,25 +1315,50 @@ class DoubleSweepWindow(QDialog):
         self._start_pre_init()
 
     def _prepare_run(self) -> bool:
-        """측정 실행 준비(설정 스냅샷·배열 생성·UI 잠금·그래프 세션 시작).
+        """측정 실행 준비 — _on_start(신규)와 _resume_from_point(재개) 공통 셋업.
 
-        _on_start(신규)와 _resume_from_point(재개) 공통 셋업.
-        성공 시 True, array 생성 실패 시 False.
+        array 생성에 실패하면 아무것도 잠그지 않고 False 를 돌려준다.
         """
         self._save_config()
         self._cfg = self._current_cfg()
-        # Feature 1: array 테이블 모델을 source of truth로 삼는다. '테이블 유지'가 켜져 있고
-        # 모델에 값이 있으면 커스텀 테이블 그대로, 아니면 From/To/Step으로 재생성.
-        if (self._cb_ds_keep_table.isChecked()
-                and self._second_table_model.count() > 0):
-            self._second_table_model.rearm()
-        else:
-            self._second_table_model.reset_from(_generate_array(self._cfg))
-        self._array = self._second_table_model.values()
-        if not self._array:
-            QMessageBox.warning(self, "Array 오류", "Array 생성 실패: 포인트 수가 0입니다.")
+        if not self._prepare_second_array():
             return False
 
+        self._reset_run_state()
+        self._prepare_derivative_channels()
+        self._ctx = self._build_context()
+        self._configure_metadata()
+
+        self._lock_ui_for_run()
+        self._sync_data_window_columns()
+        self._prepare_graph_session()
+        return True
+
+    # ── _prepare_run 의 단계별 처리 ───────────────────────────────────────
+
+    def _prepare_second_array(self) -> bool:
+        """second 채널이 훑을 값 목록을 확정한다.
+
+        테이블 모델이 source of truth 다 — '테이블 유지'가 켜져 있고 모델에 값이
+        있으면 사용자가 직접 넣은 목록을 그대로 쓰고, 아니면 From/To/Step 으로
+        새로 만든다.
+        """
+        keep_table = (self._cb_ds_keep_table.isChecked()
+                      and self._second_table_model.count() > 0)
+        if keep_table:
+            self._second_table_model.rearm()   # 값은 두고 상태만 PENDING 으로
+        else:
+            self._second_table_model.reset_from(_generate_array(self._cfg))
+
+        self._array = self._second_table_model.values()
+        if not self._array:
+            QMessageBox.warning(self, "Array 오류",
+                                "Array 생성 실패: 포인트 수가 0입니다.")
+            return False
+        return True
+
+    def _reset_run_state(self):
+        """이전 측정의 잔여 상태를 지운다."""
         self._array_idx = 0
         self._last_write_value = None
         self._last_meas_values = {}
@@ -1341,86 +1366,88 @@ class DoubleSweepWindow(QDialog):
         self._auto_retry_used = False
         self._retry_timer.stop()
         self._btn_resume.setEnabled(False)
-        # Reconfigure derivative channels from current UI settings (single sweep과 동일하게)
-        mw = self._main_win
-        for order, ch in [(1, mw._deriv_channel), (2, mw._deriv_channel2), (3, mw._deriv_channel3)]:
-            ch.reconfigure(mw._build_deriv_config(order))
-            ch.reset()
-        self._ctx = self._build_context()
         self._lbl_last_alarm.setText("(없음)")
         self._lbl_last_alarm.setStyleSheet("color: #888888; font-size: 10px;")
 
-        # MetaDataManager: T/B 버퍼 설정 (sweep 전체에서 공유)
-        _meas_labels = [lbl for lbl, _ in self._ctx.meas_cols]
+    def _prepare_derivative_channels(self):
+        """미분 채널을 현재 UI 설정으로 다시 만들고 버퍼를 비운다 (단일 sweep 과 동일)."""
+        main_win = self._main_win
+        for order, (channel, _key) in enumerate(main_win._deriv_channels(), start=1):
+            channel.reconfigure(main_win._build_deriv_config(order))
+            channel.reset()
+
+    def _configure_metadata(self):
+        """T/B 버퍼 설정 — double sweep 전체에서 공유한다."""
+        labels = [label for label, _unit in self._ctx.meas_cols]
         self._main_win._meta_manager.configure(
             self._ctx.active_meas_indices,
             self._main_win._active_profile.measurements,
-            _meas_labels,
+            labels,
         )
 
+    def _lock_ui_for_run(self):
+        """측정 중 구성 변경 차단 — 이 창과 메인 창 양쪽."""
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._glow_phase = 0.0
         self._glow_timer.start()
         self.sweep_started.emit()
-        # Lock own settings UI and main window panels
         self.lock_ui(True)
-        mw = self._main_win
-        mw._btn_start.setEnabled(False)
-        mw._sweep_channel_panel.setEnabled(False)
-        mw._meas_panel.setEnabled(False)
-        mw._set_save_inputs_enabled(False)
-        for _sfx in ("", "2", "3"):
-            getattr(mw, f"_cb_deriv{_sfx}_enable").setEnabled(False)
-            for _w in getattr(mw, f"_deriv{_sfx}_setting_widgets"):
-                _w.setEnabled(False)
-        if mw._meta_data_window is not None:
-            mw._meta_data_window.lock_ui(True)
 
-        # DataWindow 컬럼 동기화 (double sweep 측정값을 main DataWindow에 표시)
+        main_win = self._main_win
+        main_win._btn_start.setEnabled(False)
+        main_win._sweep_channel_panel.setEnabled(False)
+        main_win._meas_panel.setEnabled(False)
+        main_win._set_save_inputs_enabled(False)
+        for suffix in ("", "2", "3"):
+            getattr(main_win, f"_cb_deriv{suffix}_enable").setEnabled(False)
+            for widget in getattr(main_win, f"_deriv{suffix}_setting_widgets"):
+                widget.setEnabled(False)
+        if main_win._meta_data_window is not None:
+            main_win._meta_data_window.lock_ui(True)
+
+    def _sync_data_window_columns(self):
+        """double sweep 측정값을 메인 창의 DataWindow 에 표시하기 위한 열 구성."""
         ctx = self._ctx
-        dw_cols = [(ctx.sweep_col[0], ctx.sweep_col[1])]
-        for (fig_ax, unit) in ctx.meas_cols:
-            dw_cols.append((fig_ax, unit))
-        self._main_win._data_window.configure_columns(dw_cols)
+        columns = [(ctx.sweep_col[0], ctx.sweep_col[1])]
+        columns.extend(ctx.meas_cols)
+        self._main_win._data_window.configure_columns(columns)
         self._main_win._data_window.clear_values()
 
-        # Graph window에 2D map base path 전달
-        if self._main_win._graph_window is not None:
-            mw = self._main_win
-            base = mw._le_main_folder.text().strip()
-            sub = mw._le_custom_folder.text().strip()
-            if base:
-                map_base = f"{base}/{sub}" if sub else base
-                self._main_win._graph_window.update_map_base(map_base)
-
-        # Graph: begin fresh session — 창 유무 관계없이 history/columns 갱신
+    def _prepare_graph_session(self):
+        """그래프 세션을 새로 연다. 창이 떠 있지 않아도 history/columns 는 갱신한다."""
+        self._update_graph_map_base()
+        main_win = self._main_win
         try:
-            cols = [("__sweep__", self._ctx.sweep_col[0], self._ctx.sweep_col[1])]
-            for (row, alias, desc, cmd), (fig_ax, unit) in zip(
-                self._ctx.active_measurements, self._ctx.meas_cols
-            ):
-                cols.append((desc, fig_ax, unit))
-            for ch in (
-                self._main_win._deriv_channel,
-                self._main_win._deriv_channel2,
-                self._main_win._deriv_channel3,
-            ):
-                if ch._cfg.enabled:
-                    cols.append(ch.col_info())
-            mw = self._main_win
-            mw._graph_history.clear()
-            mw._graph_columns = cols
-            if mw._graph_window is not None:
-                mw._graph_window.begin_session(cols)
-        except Exception as _e:
-            self._main_win._log(f"  [Graph] begin_session failed: {_e}", color="#f44747")
+            columns = [("__sweep__", self._ctx.sweep_col[0], self._ctx.sweep_col[1])]
+            for (_row, _alias, desc, _cmd), (fig_axis, unit) in zip(
+                    self._ctx.active_measurements, self._ctx.meas_cols):
+                columns.append((desc, fig_axis, unit))
+            for channel, _key in main_win._deriv_channels():
+                if channel._cfg.enabled:
+                    columns.append(channel.col_info())
 
-        # Reset derivative sliding windows for a clean new sweep
-        for ch in (self._main_win._deriv_channel, self._main_win._deriv_channel2, self._main_win._deriv_channel3):
-            ch.reset()
+            main_win._graph_history.clear()
+            main_win._graph_columns = columns
+            if main_win._graph_window is not None:
+                main_win._graph_window.begin_session(columns)
+        except Exception as exc:
+            main_win._log(f"  [Graph] begin_session failed: {exc}", color="#f44747")
 
-        return True
+        # 새 sweep 이므로 미분 슬라이딩 윈도우를 비운다
+        for channel, _key in main_win._deriv_channels():
+            channel.reset()
+
+    def _update_graph_map_base(self):
+        """2D map 패널이 스캔할 최상위 폴더를 알려 준다."""
+        main_win = self._main_win
+        if main_win._graph_window is None:
+            return
+        base = main_win._le_main_folder.text().strip()
+        if not base:
+            return
+        sub = main_win._le_custom_folder.text().strip()
+        main_win._graph_window.update_map_base(f"{base}/{sub}" if sub else base)
 
     def _on_stop_clicked(self):
         """사용자가 Stop 버튼을 누른 경우 — 현재 array 지점을 resume 로그에 저장 후 중단."""

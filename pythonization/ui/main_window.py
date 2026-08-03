@@ -132,93 +132,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Measurement System")
         self.resize(1120, 660)
 
-        self._settings_window = None
-        self._visa_lib_window = None
-        self._double_sweep_window = None
-        self._graph_window = None
-        self._graph_history: list = []   # GraphDataPoint 누적 — 창 없이도 저장, 열릴 때 replay
-        self._graph_columns: list = []   # 현재 세션의 컬럼 스키마 — replay 시 begin_session에 재사용
-        self._registry = InstrumentRegistry()
-        self._visa_lib_registry = VisaLibraryRegistry()
-        self._session = InstrumentSession(self._registry)
-        self._cmd_handler = ConsoleCommandHandler(self._session)
-        self._sweep_config = SweepConfig()
-        self._sweep_channel = None
-        self._meas_checkboxes: list[QCheckBox] = []
-        self._active_meas_indices: list[int] = []
-        self._param_manager_reg = profile_registry if profile_registry is not None else ProfileRegistry()
-        self._param_manager_window = None
-        self._active_profile: MainUIProfile = MainUIProfile()
-        self._running = False
-        self._loading_profile = False
-        self._alias_color_map: dict = {}
-        self._meas_suffix_edits: list = []
-        self._meas_type_combos: list = []
-        self._deriv_channel:  DerivativeChannel = DerivativeChannel(DerivativeConfig(order=1))
-        self._deriv_channel2: DerivativeChannel = DerivativeChannel(DerivativeConfig(order=2))
-        self._deriv_channel3: DerivativeChannel = DerivativeChannel(DerivativeConfig(order=3))
-        self._sweep_step_count = 0
-        self._tick_start: float = 0.0
-        self._last_write_value: "float | None" = None
-        self._step_context: str = ""   # 마지막 sweep tick 컨텍스트 (오류 시 참조)
-        # 통신 오류 자동 재개 상태
-        self._resume_log = ResumeLog()
-        self._last_step_request = None        # 자동 재개 시 재전송할 StepRequest
-        self._auto_retry_used = False         # 연속 자동 재개 1회 제한 (성공 시 리셋)
-        self._retry_timer = QTimer(self)
-        self._retry_timer.setSingleShot(True)
-        self._retry_timer.timeout.connect(self._auto_resume_step)
-        self._data_saver = DataSaver()
-        self._data_saver.set_error_callback(
-            lambda msg: self._log(f"  [DataSaver] {msg}", color="#f44747")
-        )
-        self._meta_manager = MetaDataManager(self._session)
-        self._meta_data_window = None
-        self._command_window = None
-        self._vna_window = None
-        self._mfli_window = None
-
-        # 전역 앱 설정 로드
         self._app_config: AppConfig = load_app_config()
-        self._config_window = None
-
-        # Worker 스레드 셋업
-        self._worker = SweepWorker()
-        self._worker.set_session(self._session)
-        self._worker.set_threshold(self._app_config.global_threshold)
-        self._worker.set_parallel(self._app_config.parallel_measurement)
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self.request_step.connect(self._worker.run_step)
-        self._worker.step_done.connect(self._on_step_done)
-        self._worker.step_error.connect(self._on_step_error)
-        self._worker_thread.start()
-
-        # 글로우 애니메이션
-        self._glow_phase = 0.0
-        self._glow_timer = QTimer(self)
-        self._glow_timer.setInterval(30)
-        self._glow_timer.timeout.connect(self._update_glow)
-
-        # 스텝 타이머 (single-shot, time_per_point마다 한 스텝)
-        self._sweep_step_timer = QTimer(self)
-        self._sweep_step_timer.setSingleShot(True)
-        self._sweep_step_timer.timeout.connect(self._sweep_tick)
-
-        # 자식 창
-        self._debug_window = DebugWindow(self)
-        self._sweep_status_window = SweepArrayWindow(self)
-        # parent를 주지 않음 → 독립 top-level 창 → Windows 작업표시줄에 개별 표시
-        self._timing_window = TimingWindow(None)
-        self._data_window = DataWindow(None)
-        self._debug_window.set_visa_log_callback(self._session.set_log_enabled) # Debug 창의 토글과 세션의 로그 활성화 상태 연결
-
-        # 콘솔 입력 → 메인 핸들러 연결
-        self._debug_window.set_submit_callback(self._handle_command)
-
-        # VISA 로그 → 릴레이 Signal 경유로 메인 스레드에서 디버그 창 갱신
-        self._visa_log_relay.connect(self._apply_visa_log)
-        self._session.add_log_callback(self._on_visa_log)
+        self._init_registries(profile_registry)
+        self._init_measurement_state()
+        self._init_child_window_slots()
+        self._init_worker_thread()
+        self._init_timers()
+        self._init_child_windows()
 
         self._setup_menu()
         self._setup_ui()
@@ -229,9 +149,115 @@ class MainWindow(QMainWindow):
         # 마지막으로 사용한 프로파일 전체 복원 (sweep params, 폴더, sweep channel 포함)
         self._apply_active_profile()
 
-    # ------------------------------------------------------------------
-    # UI Setup
-    # ------------------------------------------------------------------
+    # ── __init__ 의 단계별 초기화 ─────────────────────────────────────────
+
+    def _init_registries(self, profile_registry: ProfileRegistry = None):
+        """설정 저장소와 계측기 세션. 이후 거의 모든 것이 여기에 의존한다."""
+        self._registry = InstrumentRegistry()
+        self._visa_lib_registry = VisaLibraryRegistry()
+        self._session = InstrumentSession(self._registry)
+        self._cmd_handler = ConsoleCommandHandler(self._session)
+        self._param_manager_reg = (profile_registry if profile_registry is not None
+                                   else ProfileRegistry())
+
+    def _init_measurement_state(self):
+        """sweep 진행 상태와 프로파일에서 채워질 항목들."""
+        self._sweep_config = SweepConfig()
+        self._sweep_channel = None
+        self._active_profile: MainUIProfile = MainUIProfile()
+        self._running = False
+        self._loading_profile = False
+        self._sweep_step_count = 0
+        self._tick_start: float = 0.0
+        self._last_write_value: "float | None" = None
+        self._step_context: str = ""   # 마지막 sweep tick 컨텍스트 (오류 시 참조)
+
+        # 프로파일 적용 시 _rebuild_meas_panel 이 채우는 위젯 목록
+        self._meas_checkboxes: list[QCheckBox] = []
+        self._meas_suffix_edits: list = []
+        self._meas_type_combos: list = []
+        self._active_meas_indices: list[int] = []
+        self._alias_color_map: dict = {}
+
+        self._deriv_channel: DerivativeChannel = DerivativeChannel(DerivativeConfig(order=1))
+        self._deriv_channel2: DerivativeChannel = DerivativeChannel(DerivativeConfig(order=2))
+        self._deriv_channel3: DerivativeChannel = DerivativeChannel(DerivativeConfig(order=3))
+
+        self._data_saver = DataSaver()
+        self._data_saver.set_error_callback(
+            lambda msg: self._log(f"  [DataSaver] {msg}", color="#f44747"))
+        self._meta_manager = MetaDataManager(self._session)
+
+        # 그래프는 창이 없어도 계속 쌓아 두었다가 창이 열릴 때 replay 한다
+        self._graph_history: list = []
+        self._graph_columns: list = []
+
+        # 통신 오류 자동 재개
+        self._resume_log = ResumeLog()
+        self._last_step_request = None    # 재개 시 다시 보낼 StepRequest
+        self._auto_retry_used = False     # 연속 자동 재개 1회 제한 (성공 시 리셋)
+
+    def _init_child_window_slots(self):
+        """자식 창은 처음 열 때 만든다 — 여기서는 자리만 비워 둔다."""
+        self._settings_window = None
+        self._visa_lib_window = None
+        self._double_sweep_window = None
+        self._graph_window = None
+        self._param_manager_window = None
+        self._meta_data_window = None
+        self._command_window = None
+        self._vna_window = None
+        self._mfli_window = None
+        self._config_window = None
+
+    def _init_worker_thread(self):
+        """VISA I/O 를 담당할 워커 스레드.
+
+        워커 → GUI 는 반드시 bound @Slot 으로 연결한다. lambda 에 연결하면 큐잉되지
+        않고 워커 스레드에서 바로 실행돼 QWidget 접근 시 네이티브 크래시가 난다.
+        """
+        self._worker = SweepWorker()
+        self._worker.set_session(self._session)
+        self._worker.set_threshold(self._app_config.global_threshold)
+        self._worker.set_parallel(self._app_config.parallel_measurement)
+
+        self._worker_thread = QThread(self)
+        self._worker.moveToThread(self._worker_thread)
+        self.request_step.connect(self._worker.run_step)
+        self._worker.step_done.connect(self._on_step_done)
+        self._worker.step_error.connect(self._on_step_error)
+        self._worker_thread.start()
+
+    def _init_timers(self):
+        self._glow_phase = 0.0
+        self._glow_timer = QTimer(self)
+        self._glow_timer.setInterval(30)
+        self._glow_timer.timeout.connect(self._update_glow)
+
+        # 스텝 타이머 — time_per_point 마다 한 스텝 (single-shot 재장전)
+        self._sweep_step_timer = QTimer(self)
+        self._sweep_step_timer.setSingleShot(True)
+        self._sweep_step_timer.timeout.connect(self._sweep_tick)
+
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._auto_resume_step)
+
+    def _init_child_windows(self):
+        """항상 존재하는 보조 창들과 로그 배선."""
+        self._debug_window = DebugWindow(self)
+        self._sweep_status_window = SweepArrayWindow(self)
+        # parent 를 주지 않음 → 독립 top-level → 작업표시줄에 개별 표시
+        self._timing_window = TimingWindow(None)
+        self._data_window = DataWindow(None)
+
+        self._debug_window.set_visa_log_callback(self._session.set_log_enabled)
+        self._debug_window.set_submit_callback(self._handle_command)
+
+        # VISA 로그는 워커 스레드에서도 올라온다 → 릴레이 Signal 을 거쳐
+        # 메인 스레드에서 디버그 창을 갱신한다
+        self._visa_log_relay.connect(self._apply_visa_log)
+        self._session.add_log_callback(self._on_visa_log)
 
     def _setup_menu(self):
         menubar = self.menuBar()

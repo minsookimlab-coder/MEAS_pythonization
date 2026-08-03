@@ -17,13 +17,14 @@ core/mfli_merge.py — LabOne sweeper CSV + MFLI Noise Sweep 모듈 .dat 를 swe
 
 Qt·numpy 의존 없음(표준 라이브러리만) → GUI 버튼과 CLI(python -m pythonization.analysis.mfli_merge …) 양쪽에서 사용.
 """
+import argparse
 import bisect
 import csv
 import math
 import re
-from pathlib import Path
-import argparse
 import sys
+from pathlib import Path
+from typing import Optional
 
 
 def _num_key(name: str):
@@ -239,6 +240,102 @@ def iter_our_sweeps(ours):
 
 
 # ---------------------------------------------------------------- public API
+def _grid_of(lab_sweep) -> list:
+    """LabOne sweep 의 주파수 축. grid 가 권위값이고 없으면 frequency 로 폴백."""
+    return lab_sweep.get("grid") or lab_sweep.get("frequency") or []
+
+
+def _has_noise(lab_sweep) -> bool:
+    """노이즈가 계산된 sweep 인가. LabOne 의 첫 sweep 은 비어 있는 경우가 있다."""
+    values = lab_sweep.get("xstddev") or lab_sweep.get("rstddev") or []
+    return any(not math.isnan(v) for v in values)
+
+
+def _our_frequency_range(our_sweeps) -> tuple:
+    """우리 측정이 실제로 훑은 주파수 범위. 유효한 값이 없으면 오류."""
+    values = [f for (_labels, _units, cols, (a, b), _name) in our_sweeps
+              for f in cols["frequency"][a:b] if not math.isnan(f)]
+    if not values:
+        raise ValueError("측정 .dat에 유효한 frequency가 없습니다.")
+    return min(values), max(values)
+
+
+def _select_labone_sweeps(lab_sweeps, our_range) -> tuple:
+    """쓸 만한 LabOne sweep 만 고른다. 반환: (선택된 목록, {제외사유: 개수})
+
+    LabOne autosave 에는 세 종류의 못 쓰는 sweep 이 섞여 있다:
+      (a) 범위가 다른 sweep — 측정 도중 start/stop 을 바꾼 경우
+      (b) 부분(미완성) sweep — 첫·마지막 chunk 가 잘린 경우
+      (c) 노이즈가 아직 계산되지 않은 sweep — 보통 첫 sweep
+    그냥 index 로 1↔1 짝지으면 이것들이 sweep_1/2 로 들어가 결과가 어긋난다.
+    """
+    our_min, our_max = our_range
+    full_length = max((len(_grid_of(sw)) for _label, sw in lab_sweeps), default=0)
+
+    selected = []
+    dropped = {"range": 0, "partial": 0, "nonoise": 0}
+    for label, sweep in lab_sweeps:
+        grid = _grid_of(sweep)
+        if not grid:
+            dropped["partial"] += 1
+        elif min(max(grid), our_max) - max(min(grid), our_min) <= 0:
+            dropped["range"] += 1
+        elif full_length and len(grid) < 0.9 * full_length:
+            dropped["partial"] += 1
+        elif not _has_noise(sweep):
+            dropped["nonoise"] += 1
+        else:
+            selected.append((label, sweep))
+    return selected, dropped
+
+
+def _select_our_sweeps(our_sweeps) -> tuple:
+    """완전한 segment 만 고른다 (중단된 마지막 패스 등을 뺀다).
+
+    반환: (선택된 목록, 제외 개수)
+    """
+    def length(sweep):
+        (_labels, _units, _cols, (a, b), _name) = sweep
+        return b - a
+
+    longest = max((length(s) for s in our_sweeps), default=0)
+    selected = [s for s in our_sweeps if longest and length(s) >= 0.5 * longest]
+    return selected, len(our_sweeps) - len(selected)
+
+
+def _clear_previous_merges(outdir: Path) -> None:
+    """이전 병합 결과를 지운다.
+
+    지난번에 더 많이 만들었다면 남은 파일이 이번 결과와 섞여 혼란을 준다.
+    """
+    for old in outdir.glob("sweep_*_merged_data.dat"):
+        try:
+            old.unlink()
+        except Exception:
+            pass
+
+
+def _merge_warning(dropped: dict, drop_our: int, n_lab: int, n_our: int,
+                   n_paired: int) -> Optional[str]:
+    """무엇을 왜 뺐는지 사용자에게 알린다. 조용히 버리면 결과를 믿을 수 없다."""
+    warnings = []
+    if dropped["range"]:
+        warnings.append(f"범위 다른 LabOne sweep {dropped['range']}개 제외.")
+    if dropped["partial"]:
+        warnings.append(f"부분(미완성) LabOne sweep {dropped['partial']}개 제외.")
+    if dropped["nonoise"]:
+        warnings.append(
+            f"노이즈 미계산 LabOne sweep {dropped['nonoise']}개 제외(예: 첫 sweep).")
+    if drop_our:
+        warnings.append(f"부분 측정 segment {drop_our}개 제외.")
+    if n_lab != n_our:
+        more = "LabOne(유효)" if n_lab > n_our else "Ours(유효)"
+        extra = abs(n_lab - n_our)
+        warnings.append(f"유효 sweep 개수 불일치 LabOne {n_lab} vs Ours {n_our} — "
+                        f"{more}에 {extra}개 더 있어 처음 {n_paired}개만 병합.")
+    return " ".join(warnings) if warnings else None
+
+
 def merge_sweeps(labone, ours, outdir) -> dict:
     """LabOne CSV(파일/폴더) + 우리 .dat(파일 또는 per-sweep 폴더)를 sweep별로 병합해
     outdir에 sweep_N_merged_data.dat 저장.
@@ -254,98 +351,44 @@ def merge_sweeps(labone, ours, outdir) -> dict:
     if not our_sweeps:
         raise ValueError("우리 측정 .dat에서 유효한 sweep을 찾지 못했습니다.")
 
-    # LabOne autosave에는 (a) 범위가 다른 sweep(중간에 start/stop 변경), (b) 부분/미완성 sweep
-    # (첫·마지막 chunk가 잘림), (c) 노이즈가 아직 계산 안 된 sweep(예: 첫 sweep) 이 섞여 있을 수
-    # 있다. 그냥 index로 1↔1 짝지으면 이런 것들이 sweep_1/2로 들어가 결과가 이상해진다.
-    # → 우리 .dat 범위와 겹치고 + 완전(full grid)하고 + 노이즈가 유효한 LabOne sweep만 쓴다.
-    our_all = [f for (_lab, _u, cols, (a, b), _n) in our_sweeps
-               for f in cols["frequency"][a:b] if not math.isnan(f)]
-    if not our_all:
-        raise ValueError("측정 .dat에 유효한 frequency가 없습니다.")
-    o0, o1 = min(our_all), max(our_all)
-
-    def _grid(sw):
-        return sw.get("grid") or sw.get("frequency") or []
-
-    def _has_noise(sw):
-        xs = sw.get("xstddev") or sw.get("rstddev") or []
-        return any(not math.isnan(v) for v in xs)
-
-    glen = max((len(_grid(sw)) for _l, sw in lab_sweeps), default=0)   # full sweep 포인트 수
-    good_lab = []
-    drop_range = drop_partial = drop_nonoise = 0
-    for lbl, sw in lab_sweeps:
-        g = _grid(sw)
-        if not g:
-            drop_partial += 1
-            continue
-        a, b = min(g), max(g)
-        if min(b, o1) - max(a, o0) <= 0:            # (a) 범위 안 겹침
-            drop_range += 1
-        elif glen and len(g) < 0.9 * glen:          # (b) 부분(미완성) sweep
-            drop_partial += 1
-        elif not _has_noise(sw):                    # (c) 노이즈 미계산 sweep
-            drop_nonoise += 1
-        else:
-            good_lab.append((lbl, sw))
-
+    our_range = _our_frequency_range(our_sweeps)
+    good_lab, dropped = _select_labone_sweeps(lab_sweeps, our_range)
     if not good_lab:
-        lab_all = [f for _l, sw in lab_sweeps for f in _grid(sw)]
-        lr = f"{min(lab_all):.0f}~{max(lab_all):.0f}" if lab_all else "?"
+        lab_all = [f for _label, sw in lab_sweeps for f in _grid_of(sw)]
+        lab_range = f"{min(lab_all):.0f}~{max(lab_all):.0f}" if lab_all else "?"
         raise ValueError(
-            f"측정 범위({o0:.0f}~{o1:.0f} Hz)와 맞는 '완전한' LabOne sweep이 없습니다 "
-            f"(LabOne 전체 {lr} Hz; 범위·부분·노이즈없음으로 전부 제외됨). "
-            f"측정 .dat와 같은 범위를 온전히 스윕한 LabOne CSV를 선택하세요.")
+            f"측정 범위({our_range[0]:.0f}~{our_range[1]:.0f} Hz)와 맞는 '완전한' "
+            f"LabOne sweep이 없습니다 (LabOne 전체 {lab_range} Hz; 범위·부분·"
+            f"노이즈없음으로 전부 제외됨). 측정 .dat와 같은 범위를 온전히 스윕한 "
+            f"LabOne CSV를 선택하세요.")
 
-    # 우리 측정도 부분(짧은) sweep은 제외 (중단된 마지막 패스 등)
-    def _seg_len(s):
-        (_l, _u, _c, (a, b), _n) = s
-        return b - a
-    slen = max((_seg_len(s) for s in our_sweeps), default=0)
-    good_our = [s for s in our_sweeps if slen and _seg_len(s) >= 0.5 * slen]
-    drop_our = len(our_sweeps) - len(good_our)
+    good_our, drop_our = _select_our_sweeps(our_sweeps)
 
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    # 이전 병합의 잔여 파일 제거 (이번보다 많이 만들었으면 stale 파일이 남아 혼란)
-    for old in outdir.glob("sweep_*_merged_data.dat"):
-        try:
-            old.unlink()
-        except Exception:
-            pass
+    _clear_previous_merges(outdir)
 
     n_pair = min(len(good_lab), len(good_our))
     written = []
     for i in range(n_pair):
         _label, lab_sweep = good_lab[i]
         o_labels, o_units, o_cols, o_seg, _src = good_our[i]
-        res = merge_pair(lab_sweep, o_seg, o_labels, o_units, o_cols)
-        if res is None:
+        merged = merge_pair(lab_sweep, o_seg, o_labels, o_units, o_cols)
+        if merged is None:
             continue
-        labels, units, rows = res
+        labels, units, rows = merged
         out = outdir / f"sweep_{i + 1}_merged_data.dat"
         write_dat(out, labels, units, rows)
         written.append(out.name)
 
-    warns = []
-    if drop_range:
-        warns.append(f"범위 다른 LabOne sweep {drop_range}개 제외.")
-    if drop_partial:
-        warns.append(f"부분(미완성) LabOne sweep {drop_partial}개 제외.")
-    if drop_nonoise:
-        warns.append(f"노이즈 미계산 LabOne sweep {drop_nonoise}개 제외(예: 첫 sweep).")
-    if drop_our:
-        warns.append(f"부분 측정 segment {drop_our}개 제외.")
-    if len(good_lab) != len(good_our):
-        more = "LabOne(유효)" if len(good_lab) > len(good_our) else "Ours(유효)"
-        extra = abs(len(good_lab) - len(good_our))
-        warns.append(f"유효 sweep 개수 불일치 LabOne {len(good_lab)} vs Ours {len(good_our)} — "
-                     f"{more}에 {extra}개 더 있어 처음 {n_pair}개만 병합.")
-    warning = " ".join(warns) if warns else None
-    return {"written": written, "outdir": str(outdir),
-            "n_labone": len(lab_sweeps), "n_labone_good": len(good_lab),
-            "n_ours": len(our_sweeps), "n_ours_good": len(good_our),
-            "n_paired": len(written), "warning": warning}
+    return {
+        "written": written, "outdir": str(outdir),
+        "n_labone": len(lab_sweeps), "n_labone_good": len(good_lab),
+        "n_ours": len(our_sweeps), "n_ours_good": len(good_our),
+        "n_paired": len(written),
+        "warning": _merge_warning(dropped, drop_our, len(good_lab), len(good_our),
+                                  n_pair),
+    }
 
 
 # ---------------------------------------------------------------- CLI

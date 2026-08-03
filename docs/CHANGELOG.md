@@ -52,6 +52,12 @@ ui/(main_window + widgets/ dialogs/ panels/ modules/ assets/)
 - **의존성 명세에 `zhinst`·`scipy` 누락** — `.bat` 이 설치하던 하드코딩 목록에
   MFLI 측정용 `zhinst` 와 미분 채널용 `scipy` 가 빠져 있었습니다. 둘 다 선택
   의존성으로 `requirements-optional.txt` 에 명시했습니다.
+- **Double Sweep 의 미분값이 실제와 달랐음** — 스텝마다 미분을 두 번 계산했는데
+  (`.dat` 기록용 1회 + 그래프용 1회), 계산 함수가 슬라이딩 윈도우에 값을 push 도
+  하므로 같은 점이 두 번 쌓였습니다. 한 번만 계산해 재사용하도록 고쳤습니다.
+- **`Optional` import 누락 (잠재)** — 어노테이션에만 쓰이는 이름이라 Python 3.14
+  (지연 평가)에서는 드러나지 않지만 3.10~3.13 에서는 모듈 import 가 실패합니다.
+  `test_annotations` 가 이를 강제로 확인합니다.
 
 ### ■ 코드 정리
 
@@ -61,9 +67,19 @@ ui/(main_window + widgets/ dialogs/ panels/ modules/ assets/)
 - **함수 내부 import 정리** — 166곳이 함수 안에 숨어 있었습니다. 의존 그래프로
   확인해 보니 순환 참조 때문인 것은 하나도 없어 대부분 모듈 상단으로 옮겼습니다.
   선택 의존성·플랫폼 분기·부트스트랩의 의도적 지연만 남겼습니다.
-- **거대 함수 분해** — `DoubleSweepWindow._build_ui` 513→44줄,
-  `MainWindow._build_sequence_panel` 328→14줄, `MainWindow._on_step_done` 200→40줄.
-  100줄 넘는 함수 21→18개.
+- **거대 함수 분해 — 100줄 넘는 함수 21개 → 0개.** 가장 컸던 것부터:
+  `DoubleSweepWindow._build_ui` 513→44, `MainWindow._build_sequence_panel` 328→14,
+  `ProfileRegistry.rebuild_main_ui_from_library` 292→28,
+  `AddEntryDialog._build_ui` 238→36, `AddEntryDialog._on_ok` 212→8,
+  `MainWindow._on_step_done` 200→40, `MfliWindow._build_ui` 194→32,
+  `VnaWindow._build_double_sweep_section` 183→33,
+  `DoubleSweepWindow._on_step_done` 150→46, `VnaWindow._build_acquire_group` 150→28,
+  `VnaWindow._start_double_sweep` 146→25, `MainWindow._on_start` 146→25,
+  `InstrumentSettingsUI._setup_ui` 137→12,
+  `SecondChannelWorker._do_feedback` 129→24, `MapPanel._build_ui` 128→10,
+  `CommandWindow._build_ui` 118→21, `DoubleSweepWindow._prepare_run` 107→19,
+  `merge_sweeps` 107→46, `MainWindow._build_deriv_panel` 107→48,
+  `MainWindow.__init__` 101→21.
 - 미사용 import 18건 제거, 중복 로컬 import 16건 제거.
 - `resume_log` 가 재노출하던 `is_comm_error` 제거 — 같은 함수가 두 경로로 보였습니다.
 
@@ -76,7 +92,7 @@ ui/(main_window + widgets/ dialogs/ panels/ modules/ assets/)
 - 루트 임시 파일 정리 (`_diff_vna.txt` 94KB, `memo.txt`).
 - 의존성 명세 신규: `requirements.txt` / `requirements-optional.txt` / `pyproject.toml`.
 
-### ■ 테스트 (기존 0개 → 120개)
+### ■ 테스트 (기존 0개 → 182개)
 
 표준 라이브러리 `unittest` 만 써서 추가 설치 없이 어느 랩 PC에서도 돌아갑니다.
 
@@ -84,11 +100,18 @@ ui/(main_window + widgets/ dialogs/ panels/ modules/ assets/)
 python -m unittest discover -s tests -t .
 ```
 
-구조 변경 회귀를 잡는 축이 셋입니다: 전 모듈 import, 소스의 모든 import 문 정적
-검사(ast — 함수 내부 포함), 메뉴가 여는 창 10개 실제 생성. 실제로 이 중 창 생성
-검사가 리팩터링 도중 발생한 회귀(MainWindow 의 `ResumeLog` import 유실)를 잡았습니다.
+구조 변경 회귀를 잡는 축이 다섯입니다: 전 모듈 import, 소스의 모든 import 문 정적
+검사(ast — 함수 내부 포함), 메뉴가 여는 창 10개 실제 생성, 다른 창이 쓰는
+`MainWindow` 내부 이름 존재 확인, 어노테이션 강제 평가.
+
+이 중 셋은 실제로 리팩터링 도중 발생한 회귀를 잡았습니다 — 창 생성 검사가
+`ResumeLog` import 유실을, 교차 참조 검사가 `_deriv_val_for_step` 유실(Double Sweep
+첫 스텝에서 죽는 상태)을, 어노테이션 검사가 `Optional` 누락을 잡았습니다.
+
 나머지는 sweep 진행 규칙, 스텝 기록(값/nan/ERR), `.dat` 저장, 응답 파싱, 통신 오류
-판정, 미분 채널, LabOne 병합, 공용 플롯 패널의 계약을 고정합니다.
+판정, 미분 채널, FEEDBACK 도달·안정화 판정, 프로파일 재구성 시 사용자 설정 보존,
+placeholder 치환, double sweep 축 순서, LabOne 병합, 공용 플롯 패널의 계약을
+고정합니다.
 
 ### ■ 문서
 

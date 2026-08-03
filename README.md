@@ -104,16 +104,30 @@ python -m unittest discover -s tests -t .
 
 `pytest` 가 설치돼 있으면 `pytest tests` 로도 실행된다.
 
+**구조 변경 회귀를 잡는 네 축** — 이것들이 없으면 '측정을 실제로 돌려야'
+드러나는 실패가 그냥 커밋된다.
+
 | 파일 | 지키는 것 |
 |---|---|
 | `test_imports` / `test_import_targets` | 모든 모듈과 모든 import 문(함수 내부 포함)이 해석되는지 |
 | `test_windows` | 메뉴가 여는 창 10개가 실제로 생성되는지 |
+| `test_cross_references` | 다른 창이 쓰는 `MainWindow` 내부 이름이 살아 있는지 |
+| `test_annotations` | 어노테이션 전용 import 누락 (3.14는 지연 평가라 안 드러난다) |
+
+**동작 계약을 고정하는 테스트**
+
+| 파일 | 지키는 것 |
+|---|---|
 | `test_sweep` | sweep 진행 규칙 — 방향, 목표 clamp, 0 rate 차단 |
 | `test_step_pipeline` | 측정 한 스텝의 기록 — 값/nan/ERR 구분, 실패 판정 |
 | `test_data_saver` | `.dat` 헤더·자동 번호·이어쓰기·실패 보고 |
 | `test_instrument_parameter` | 계측기 응답 파싱 (모호하면 에러) |
 | `test_visa_errors` | 통신 오류 vs 파싱 오류 판정 (자동 재개 경로를 가른다) |
 | `test_derivative_channel` | 1~3차 미분, scipy 부재 시 fallback |
+| `test_feedback_advance` | FEEDBACK 도달·안정화 판정식 (자기장 제어) |
+| `test_profile_rebuild` | 라이브러리 갱신 시 사용자 설정 보존 |
+| `test_add_entry` | placeholder 치환 — sweep 축만 `{v}`, 나머지는 고정값 |
+| `test_vna_double_sweep` | 다중방향 시 first 축 순서 반전 |
 | `test_mfli_merge` | LabOne 병합 — 정렬, 주파수 매칭, NaN 채움 |
 | `test_plot_panel` | 공용 플롯 패널 상태 저장/복원 |
 
