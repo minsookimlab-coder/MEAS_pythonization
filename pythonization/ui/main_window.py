@@ -1160,112 +1160,138 @@ class MainWindow(QMainWindow):
         )
 
     def _build_deriv_panel(self, order: int) -> QWidget:
-        """d^n A1/dA2^n 실시간 파생 채널 설정 패널 (order = 1/2/3)."""
+        """d^n A1/dA2^n 실시간 파생 채널 설정 패널 (order = 1/2/3).
 
-        sup = {1: "", 2: "²", 3: "³"}
-        pre = {1: "d", 2: "d²", 3: "d³"}
-        title_text = f"{pre[order]}A\u2081/{pre[order]}A\u2082{sup[order]}"
+        세 패널이 같은 모양이라 위젯을 order 접미사 붙인 이름으로 self 에 달아 둔다
+        (`_cmb_deriv_a1`, `_cmb_deriv2_a1`, …). 이후 코드는 그 이름으로 접근한다.
+        """
+        title_text = self._deriv_title(order)
 
         box = QFrame()
         box.setFrameShape(QFrame.Shape.StyledPanel)
-        vbox = QVBoxLayout(box)
-        vbox.setContentsMargins(8, 6, 8, 6)
-        vbox.setSpacing(4)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
 
-        # Title + enable toggle
-        title_row = QHBoxLayout()
-        lbl = QLabel(f"Derivative  {title_text}")
-        lbl.setStyleSheet("font-weight: bold; font-size: 12px;")
-        title_row.addWidget(lbl)
-        title_row.addStretch()
-        title_row.addWidget(make_help_button(self._deriv_help_html(), "Derivative 도움말"))
         cb_enable = QCheckBox("Enable")
-        title_row.addWidget(cb_enable)
-        vbox.addLayout(title_row)
+        layout.addLayout(self._build_deriv_title_row(title_text, cb_enable))
 
-        # A1 / A2 selectors
-        controls_widget = QWidget()
-        form = QFormLayout(controls_widget)
+        widgets = {}
+        controls = QVBoxLayout()
+        controls.setSpacing(3)
+        controls.addWidget(self._build_deriv_source_form(widgets))
+        controls.addLayout(self._build_deriv_label_row(widgets, title_text))
+        controls.addLayout(self._build_deriv_method_row(widgets, order))
+        layout.addLayout(controls)
+
+        # Enable 체크가 풀리면 잠글 위젯 목록.
+        # method 콤보는 order>1 에서 이미 비활성이라 목록에서 뺀다.
+        setting_widgets = [widgets["a1"], widgets["a2"], widgets["label"],
+                           widgets["unit"], widgets["window"], widgets["min_delta"]]
+        if order == 1:
+            setting_widgets.append(widgets["method"])
+
+        suffix = "" if order == 1 else str(order)
+        setattr(self, f"_cb_deriv{suffix}_enable", cb_enable)
+        setattr(self, f"_cmb_deriv{suffix}_a1", widgets["a1"])
+        setattr(self, f"_cmb_deriv{suffix}_a2", widgets["a2"])
+        setattr(self, f"_le_deriv{suffix}_label", widgets["label"])
+        setattr(self, f"_le_deriv{suffix}_unit", widgets["unit"])
+        setattr(self, f"_sb_deriv{suffix}_window", widgets["window"])
+        setattr(self, f"_cmb_deriv{suffix}_method", widgets["method"])
+        setattr(self, f"_le_deriv{suffix}_min_delta", widgets["min_delta"])
+        setattr(self, f"_deriv{suffix}_setting_widgets", setting_widgets)
+
+        cb_enable.toggled.connect(
+            lambda checked, w=setting_widgets:
+                self._on_deriv_enable_toggled_widgets(checked, w)
+        )
+        return box
+
+    @staticmethod
+    def _deriv_title(order: int) -> str:
+        """차수에 맞는 표시 이름 — dA₁/dA₂, d²A₁/d²A₂², d³A₁/d³A₂³."""
+        prefix = {1: "d", 2: "d²", 3: "d³"}
+        superscript = {1: "", 2: "²", 3: "³"}
+        return f"{prefix[order]}A₁/{prefix[order]}A₂{superscript[order]}"
+
+    def _build_deriv_title_row(self, title_text: str, cb_enable: QCheckBox) -> QHBoxLayout:
+        row = QHBoxLayout()
+        title = QLabel(f"Derivative  {title_text}")
+        title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        row.addWidget(title)
+        row.addStretch()
+        row.addWidget(make_help_button(self._deriv_help_html(), "Derivative 도움말"))
+        row.addWidget(cb_enable)
+        return row
+
+    @staticmethod
+    def _build_deriv_source_form(widgets: dict) -> QWidget:
+        """분자(A₁) / 분모(A₂) 로 쓸 측정 열 선택. 항목은 _rebuild_deriv_combos 가 채운다."""
+        container = QWidget()
+        form = QFormLayout(container)
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(10)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        cmb_a1 = QComboBox()
-        cmb_a1.setFont(_MONO)
-        cmb_a1.setMinimumWidth(160)
-        form.addRow("A\u2081 (numerator):", cmb_a1)
+        for key, label in (("a1", "A₁ (numerator):"),
+                           ("a2", "A₂ (denominator):")):
+            combo = QComboBox()
+            combo.setFont(_MONO)
+            combo.setMinimumWidth(160)
+            widgets[key] = combo
+            form.addRow(label, combo)
+        return container
 
-        cmb_a2 = QComboBox()
-        cmb_a2.setFont(_MONO)
-        cmb_a2.setMinimumWidth(160)
-        form.addRow("A\u2082 (denominator):", cmb_a2)
+    @staticmethod
+    def _build_deriv_label_row(widgets: dict, title_text: str) -> QHBoxLayout:
+        """결과 열의 이름과 단위 (비우면 차수로 자동 생성)."""
+        widgets["label"] = QLineEdit()
+        widgets["label"].setPlaceholderText(f"e.g. {title_text}")
+        widgets["label"].setFixedWidth(100)
+        widgets["unit"] = QLineEdit()
+        widgets["unit"].setPlaceholderText("unit")
+        widgets["unit"].setFixedWidth(70)
 
-        # Label / Unit
-        label_row = QHBoxLayout()
-        le_label = QLineEdit()
-        le_label.setPlaceholderText(f"e.g. {title_text}")
-        le_label.setFixedWidth(100)
-        le_unit = QLineEdit()
-        le_unit.setPlaceholderText("unit")
-        le_unit.setFixedWidth(70)
-        label_row.addWidget(QLabel("Label:"))
-        label_row.addWidget(le_label)
-        label_row.addSpacing(8)
-        label_row.addWidget(QLabel("Unit:"))
-        label_row.addWidget(le_unit)
-        label_row.addStretch()
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Label:"))
+        row.addWidget(widgets["label"])
+        row.addSpacing(8)
+        row.addWidget(QLabel("Unit:"))
+        row.addWidget(widgets["unit"])
+        row.addStretch()
+        return row
 
-        # Window / Method / Min delta
-        wm_row = QHBoxLayout()
-        sb_window = QSpinBox()
-        sb_window.setRange(3, 50)
-        sb_window.setValue(10)
-        sb_window.setFixedWidth(60)
-        cmb_method = QComboBox()
-        cmb_method.addItems(["Linear Regression", "Savitzky-Golay"])
+    @staticmethod
+    def _build_deriv_method_row(widgets: dict, order: int) -> QHBoxLayout:
+        """슬라이딩 윈도우 길이 / 계산 방식 / 분모 변화 하한."""
+        widgets["window"] = QSpinBox()
+        widgets["window"].setRange(3, 50)
+        widgets["window"].setValue(10)
+        widgets["window"].setFixedWidth(60)
+
+        widgets["method"] = QComboBox()
+        widgets["method"].addItems(["Linear Regression", "Savitzky-Golay"])
         if order > 1:
-            cmb_method.setEnabled(False)  # savgol only for order==1
-            cmb_method.setToolTip("Savitzky-Golay는 1차 미분 전용; 고차 미분은 Polynomial Fit 사용")
-        le_min_delta = QLineEdit("1e-10")
-        le_min_delta.setFixedWidth(80)
-        le_min_delta.setFont(_MONO)
-        wm_row.addWidget(QLabel("Window:"))
-        wm_row.addWidget(sb_window)
-        wm_row.addSpacing(8)
-        wm_row.addWidget(QLabel("Method:"))
-        wm_row.addWidget(cmb_method)
-        wm_row.addSpacing(8)
-        wm_row.addWidget(QLabel("Min |ΔA\u2082|:"))
-        wm_row.addWidget(le_min_delta)
-        wm_row.addStretch()
+            widgets["method"].setEnabled(False)   # savgol 은 1차 미분 전용
+            widgets["method"].setToolTip(
+                "Savitzky-Golay는 1차 미분 전용; 고차 미분은 Polynomial Fit 사용")
 
-        ctrl_vbox = QVBoxLayout()
-        ctrl_vbox.setSpacing(3)
-        ctrl_vbox.addWidget(controls_widget)
-        ctrl_vbox.addLayout(label_row)
-        ctrl_vbox.addLayout(wm_row)
-        vbox.addLayout(ctrl_vbox)
+        widgets["min_delta"] = QLineEdit("1e-10")
+        widgets["min_delta"].setFixedWidth(80)
+        widgets["min_delta"].setFont(_MONO)
 
-        setting_widgets = [cmb_a1, cmb_a2, le_label, le_unit, sb_window, le_min_delta]
-        if order == 1:
-            setting_widgets.append(cmb_method)
-
-        # Store widget refs on self using order-suffixed names
-        suffix = "" if order == 1 else str(order)
-        setattr(self, f"_cb_deriv{suffix}_enable",       cb_enable)
-        setattr(self, f"_cmb_deriv{suffix}_a1",          cmb_a1)
-        setattr(self, f"_cmb_deriv{suffix}_a2",          cmb_a2)
-        setattr(self, f"_le_deriv{suffix}_label",         le_label)
-        setattr(self, f"_le_deriv{suffix}_unit",          le_unit)
-        setattr(self, f"_sb_deriv{suffix}_window",        sb_window)
-        setattr(self, f"_cmb_deriv{suffix}_method",       cmb_method)
-        setattr(self, f"_le_deriv{suffix}_min_delta",     le_min_delta)
-        setattr(self, f"_deriv{suffix}_setting_widgets",  setting_widgets)
-
-        cb_enable.toggled.connect(
-            lambda checked, s=setting_widgets: self._on_deriv_enable_toggled_widgets(checked, s)
-        )
-        return box
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Window:"))
+        row.addWidget(widgets["window"])
+        row.addSpacing(8)
+        row.addWidget(QLabel("Method:"))
+        row.addWidget(widgets["method"])
+        row.addSpacing(8)
+        row.addWidget(QLabel("Min |ΔA₂|:"))
+        row.addWidget(widgets["min_delta"])
+        row.addStretch()
+        return row
 
     def _rebuild_deriv_combos(self):
         """파라미터가 변경될 때 모든 파생 채널 A1/A2 콤보박스 재구성."""

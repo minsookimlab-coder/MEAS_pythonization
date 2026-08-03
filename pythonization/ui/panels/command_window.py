@@ -99,21 +99,47 @@ class CommandWindow(QDialog):
     # ------------------------------------------------------------------
 
     def _build_ui(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(8)
+        """위 = 라이브러리에서 고른 명령 보내기, 아래 = 임의 VISA 명령 직접 입력."""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
 
-        # --- Instrument / VISA selectors ---
-        sel_frame = QFrame()
-        sel_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        sel_lay = QFormLayout(sel_frame)
-        sel_lay.setHorizontalSpacing(10)
-        sel_lay.setVerticalSpacing(4)
+        layout.addWidget(self._build_selector_frame())
+        layout.addWidget(self._build_command_preview())
+        layout.addWidget(self._build_parameter_frame())
+        layout.addLayout(self._build_read_cmd_row())
+        layout.addLayout(self._build_send_row())
+
+        layout.addWidget(self._hline())
+        manual_title = QLabel("Manual VISA Command")
+        manual_title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(manual_title)
+        layout.addLayout(self._build_manual_row())
+
+        output_title = QLabel("Output")
+        output_title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(output_title)
+        layout.addWidget(self._build_output_view())
+
+    @staticmethod
+    def _hline() -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("color: #30363d;")
+        return line
+
+    def _build_selector_frame(self) -> QFrame:
+        """장비 → 그 장비의 라이브러리 명령 선택."""
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        form = QFormLayout(frame)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(4)
 
         self._combo_inst = QComboBox()
         self._combo_inst.setFont(_MONO)
         self._combo_inst.currentIndexChanged.connect(self._on_inst_changed)
-        sel_lay.addRow("Instrument:", self._combo_inst)
+        form.addRow("Instrument:", self._combo_inst)
 
         self._combo_visa = QComboBox()
         self._combo_visa.setFont(_MONO)
@@ -121,44 +147,47 @@ class CommandWindow(QDialog):
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
         self._combo_visa.currentIndexChanged.connect(self._on_visa_changed)
-        sel_lay.addRow("VISA:", self._combo_visa)
+        form.addRow("VISA:", self._combo_visa)
+        return frame
 
-        lay.addWidget(sel_frame)
-
-        # --- Command preview ---
+    def _build_command_preview(self) -> QLabel:
+        """파라미터를 채운 최종 명령 문자열."""
         self._lbl_cmd_preview = QLabel("")
         self._lbl_cmd_preview.setFont(_MONO)
         self._lbl_cmd_preview.setStyleSheet("color: #79c0ff; font-size: 10px;")
         self._lbl_cmd_preview.setWordWrap(True)
-        lay.addWidget(self._lbl_cmd_preview)
+        return self._lbl_cmd_preview
 
-        # --- Parameters (dynamic) ---
+    def _build_parameter_frame(self) -> QFrame:
+        """선택한 명령의 `{이름}` 개수만큼 _rebuild_params 가 채우는 영역."""
         self._param_frame = QFrame()
         self._param_frame.setFrameShape(QFrame.Shape.StyledPanel)
         self._param_outer = QVBoxLayout(self._param_frame)
         self._param_outer.setContentsMargins(8, 6, 8, 6)
         self._param_outer.setSpacing(4)
+
         self._param_title = QLabel("Parameters")
         self._param_title.setStyleSheet("font-weight: bold;")
         self._param_outer.addWidget(self._param_title)
+
         self._param_form_widget = QWidget()
         self._param_form = QFormLayout(self._param_form_widget)
         self._param_form.setHorizontalSpacing(10)
         self._param_form.setVerticalSpacing(4)
         self._param_outer.addWidget(self._param_form_widget)
-        lay.addWidget(self._param_frame)
+        return self._param_frame
 
-        # --- Read command (auto-fill for sweep_value) ---
-        read_row = QHBoxLayout()
-        read_row.addWidget(QLabel("Read cmd:"))
+    def _build_read_cmd_row(self) -> QHBoxLayout:
+        """sweep value 를 고르면 짝꿍 read 명령이 자동으로 채워진다."""
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Read cmd:"))
         self._le_read_cmd = QLineEdit()
         self._le_read_cmd.setFont(_MONO)
         self._le_read_cmd.setPlaceholderText("(자동 입력 또는 직접 입력)")
-        read_row.addWidget(self._le_read_cmd, stretch=1)
-        lay.addLayout(read_row)
+        row.addWidget(self._le_read_cmd, stretch=1)
+        return row
 
-        # --- Send button ---
-        btn_row = QHBoxLayout()
+    def _build_send_row(self) -> QHBoxLayout:
         self._btn_send = QPushButton("Send")
         self._btn_send.setMinimumHeight(32)
         self._btn_send.setStyleSheet(
@@ -166,33 +195,24 @@ class CommandWindow(QDialog):
             "QPushButton:disabled { background-color: #222; color: #555; }"
         )
         self._btn_send.clicked.connect(self._on_send)
-        btn_row.addStretch()
-        btn_row.addWidget(self._btn_send)
-        lay.addLayout(btn_row)
 
-        # --- Manual VISA Command ---
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setStyleSheet("color: #30363d;")
-        lay.addWidget(divider)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(self._btn_send)
+        return row
 
-        manual_title = QLabel("Manual VISA Command")
-        manual_title.setStyleSheet("font-weight: bold;")
-        lay.addWidget(manual_title)
-
-        manual_row = QHBoxLayout()
+    def _build_manual_row(self) -> QHBoxLayout:
+        """라이브러리를 거치지 않고 임의 명령을 그대로 보낸다."""
         self._le_manual_cmd = QLineEdit()
         self._le_manual_cmd.setFont(_MONO)
         self._le_manual_cmd.setPlaceholderText("임의 VISA 명령어 입력  (예: OUTP? 1)")
         self._le_manual_cmd.returnPressed.connect(self._on_send_manual)
-        manual_row.addWidget(self._le_manual_cmd, stretch=1)
 
         self._combo_manual_type = QComboBox()
         self._combo_manual_type.addItem("Query", "query")
         self._combo_manual_type.addItem("Write", "write")
-        self._combo_manual_type.addItem("Read",  "read")
+        self._combo_manual_type.addItem("Read", "read")
         self._combo_manual_type.setFont(_MONO)
-        manual_row.addWidget(self._combo_manual_type)
 
         self._btn_send_manual = QPushButton("Send")
         self._btn_send_manual.setMinimumHeight(32)
@@ -201,13 +221,14 @@ class CommandWindow(QDialog):
             "QPushButton:disabled { background-color: #222; color: #555; }"
         )
         self._btn_send_manual.clicked.connect(self._on_send_manual)
-        manual_row.addWidget(self._btn_send_manual)
-        lay.addLayout(manual_row)
 
-        # --- Output ---
-        out_lbl = QLabel("Output")
-        out_lbl.setStyleSheet("font-weight: bold;")
-        lay.addWidget(out_lbl)
+        row = QHBoxLayout()
+        row.addWidget(self._le_manual_cmd, stretch=1)
+        row.addWidget(self._combo_manual_type)
+        row.addWidget(self._btn_send_manual)
+        return row
+
+    def _build_output_view(self) -> QTextEdit:
         self._te_output = QTextEdit()
         self._te_output.setReadOnly(True)
         self._te_output.setFont(_MONO)
@@ -215,7 +236,7 @@ class CommandWindow(QDialog):
         self._te_output.setStyleSheet(
             "background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px;"
         )
-        lay.addWidget(self._te_output)
+        return self._te_output
 
     # ------------------------------------------------------------------
     # Instrument / VISA population

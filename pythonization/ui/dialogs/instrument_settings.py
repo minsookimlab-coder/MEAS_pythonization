@@ -67,142 +67,159 @@ class InstrumentSettingsUI(QMainWindow):
         self._load_settings()
 
     def _setup_ui(self):
+        """좌측 = 등록된 장비 목록, 우측 = 선택한 장비의 설정 폼."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        
-        # Creating a QSplitter
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         main_layout.addWidget(splitter)
-        
-        # --- Left Panel: Instrument List ---
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        
+        splitter.addWidget(self._build_instrument_list_panel())
+        splitter.addWidget(self._build_config_panel())
+        splitter.setSizes([250, 550])
+
+    def _build_instrument_list_panel(self) -> QWidget:
+        """등록된 장비 목록 + 추가/삭제. 드래그로 순서를 바꿀 수 있다."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+
         self.instrument_list = QListWidget()
-        self.instrument_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.instrument_list.setDragDropMode(
+            QAbstractItemView.DragDropMode.InternalMove)
         self.instrument_list.itemDoubleClicked.connect(self._on_item_double_clicked)
-        list_hdr = QHBoxLayout()
-        list_hdr.setSpacing(6)
-        list_hdr.addWidget(QLabel("Instruments:"))
-        list_hdr.addWidget(make_help_button(self._settings_help_html(), "Instrument Settings 도움말"))
-        list_hdr.addStretch()
-        left_layout.addLayout(list_hdr)
-        left_layout.addWidget(self.instrument_list)
-        
-        btn_layout = QHBoxLayout()
+
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        header.addWidget(QLabel("Instruments:"))
+        header.addWidget(make_help_button(self._settings_help_html(),
+                                          "Instrument Settings 도움말"))
+        header.addStretch()
+        layout.addLayout(header)
+        layout.addWidget(self.instrument_list)
+
         self.btn_add_instrument = QPushButton("+ Add")
         self.btn_add_instrument.clicked.connect(self._add_new_instrument)
         self.btn_remove_instrument = QPushButton("- Remove")
         self.btn_remove_instrument.clicked.connect(self._remove_instrument)
-        
-        btn_layout.addWidget(self.btn_add_instrument)
-        btn_layout.addWidget(self.btn_remove_instrument)
-        left_layout.addLayout(btn_layout)
-        
-        # --- Right Panel: Configuration Form ---
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.btn_add_instrument)
+        buttons.addWidget(self.btn_remove_instrument)
+        layout.addLayout(buttons)
+        return panel
+
+    def _build_config_panel(self) -> QWidget:
+        """선택한 장비의 연결 설정 + 추가 파라미터 + 동작 버튼."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+
         self.lbl_current_setting = QLabel("현재 편집 중인 장비: 없음 (목록에서 더블클릭)")
-        self.lbl_current_setting.setStyleSheet("font-size: 16px; font-weight: bold; color: #2B5B84; margin-bottom: 5px;")
-        right_layout.addWidget(self.lbl_current_setting)
-        
-        # Form Layout holding static attributes
+        self.lbl_current_setting.setStyleSheet(
+            "font-size: 16px; font-weight: bold; color: #2B5B84; margin-bottom: 5px;")
+        layout.addWidget(self.lbl_current_setting)
+
+        layout.addLayout(self._build_connection_form())
+
+        layout.addWidget(self._create_separator())
+        layout.addWidget(QLabel("<b>Dynamic Variables</b> (extra_params)"))
+        layout.addWidget(self._build_variables_area())
+
+        self.btn_add_variable = QPushButton("+ Add Variable")
+        self.btn_add_variable.clicked.connect(lambda: self._add_variable_row())
+        layout.addWidget(self.btn_add_variable)
+
+        layout.addWidget(self._create_separator())
+        layout.addLayout(self._build_action_row())
+        return panel
+
+    def _build_connection_form(self) -> QFormLayout:
+        """alias / 드라이버 / 인터페이스 / 주소 / 포트 + VISA 리소스 미리보기."""
         self.form_layout = QFormLayout()
-        
+
         self.le_alias = QLineEdit()
         self.le_alias.textChanged.connect(self._sync_alias_to_list)
         self.form_layout.addRow("Alias:", self.le_alias)
-        
+
+        # 드라이버 목록은 drivers/ 패키지를 훑어 자동으로 채운다.
+        # 목록에 없는 경로도 직접 입력할 수 있게 editable 로 둔다.
         self.cb_driver = QComboBox()
         self.AVAILABLE_DRIVERS = self._discover_drivers()
-        
         for name, cls_path in self.AVAILABLE_DRIVERS.items():
             self.cb_driver.addItem(name, cls_path)
         self.cb_driver.setEditable(True)
         self.lbl_driver = QLabel("Device Type (Driver):")
         self.form_layout.addRow(self.lbl_driver, self.cb_driver)
-        
+
         self.cb_interface = QComboBox()
         self.cb_interface.addItems(["LAN", "GPIB", "RS232", "USB"])
         self.cb_interface.currentTextChanged.connect(self._on_interface_changed)
         self.form_layout.addRow("Interface Type:", self.cb_interface)
-        
+
         self.le_address = QLineEdit()
         self.le_address.textChanged.connect(self._update_visa_preview)
         self.form_layout.addRow("Address (IP):", self.le_address)
-        
-        self.le_mac_address = QLineEdit()
-        self.le_mac_address.setPlaceholderText("e.g. 5C-16-C7-00-00-00 (Auto-filled)")
-        mac_layout = QHBoxLayout()
-        mac_layout.addWidget(self.le_mac_address)
-        self.btn_fetch_mac = QPushButton("Fetch MAC")
-        self.btn_fetch_mac.setMaximumWidth(80)
-        self.btn_fetch_mac.clicked.connect(self._auto_fetch_mac)
-        mac_layout.addWidget(self.btn_fetch_mac)
-        self.form_layout.addRow("MAC Address:", mac_layout)
-        
+
+        self.form_layout.addRow("MAC Address:", self._build_mac_row())
+
         self.lbl_address_hint = QLabel("")
         self.lbl_address_hint.setStyleSheet("color: #777777; font-size: 11px;")
         self.lbl_address_hint.setWordWrap(True)
         self.form_layout.addRow("", self.lbl_address_hint)
-        
+
         self.sb_port = QSpinBox()
         self.sb_port.setRange(0, 65535)
         self.sb_port.setSpecialValueText("None")
         self.sb_port.setValue(0)
         self.sb_port.valueChanged.connect(self._update_visa_preview)
         self.form_layout.addRow("Port (LAN only):", self.sb_port)
-        
+
         self.lbl_visa_address = QLabel("VISA: (입력 대기중)")
-        self.lbl_visa_address.setStyleSheet("color: #00AA00; font-weight: bold; margin-top: 5px;")
+        self.lbl_visa_address.setStyleSheet(
+            "color: #00AA00; font-weight: bold; margin-top: 5px;")
         self.form_layout.addRow("Real Resource:", self.lbl_visa_address)
-        
-        # Initialize the hint UI state
-        self._on_interface_changed("LAN")
-        
-        right_layout.addLayout(self.form_layout)
-        
-        # Dynamic Variables Section
-        right_layout.addWidget(self._create_separator())
-        right_layout.addWidget(QLabel("<b>Dynamic Variables</b> (extra_params)"))
-        
-        # Scroll area for dynamic variables
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
+
+        self._on_interface_changed("LAN")   # 힌트/입력 상태 초기화
+        return self.form_layout
+
+    def _build_mac_row(self) -> QHBoxLayout:
+        """DHCP 로 IP 가 바뀌어도 장비를 찾아내기 위한 MAC (선택)."""
+        self.le_mac_address = QLineEdit()
+        self.le_mac_address.setPlaceholderText("e.g. 5C-16-C7-00-00-00 (Auto-filled)")
+        self.btn_fetch_mac = QPushButton("Fetch MAC")
+        self.btn_fetch_mac.setMaximumWidth(80)
+        self.btn_fetch_mac.clicked.connect(self._auto_fetch_mac)
+
+        row = QHBoxLayout()
+        row.addWidget(self.le_mac_address)
+        row.addWidget(self.btn_fetch_mac)
+        return row
+
+    def _build_variables_area(self) -> QScrollArea:
+        """드라이버로 넘길 extra_params 를 _add_variable_row 가 채우는 영역."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
         self.variables_container = QWidget()
         self.variables_layout = QVBoxLayout(self.variables_container)
         self.variables_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        scroll_area.setWidget(self.variables_container)
-        right_layout.addWidget(scroll_area)
-        
-        self.btn_add_variable = QPushButton("+ Add Variable")
-        self.btn_add_variable.clicked.connect(lambda: self._add_variable_row())
-        right_layout.addWidget(self.btn_add_variable)
-        
-        # Action Buttons
-        right_layout.addWidget(self._create_separator())
-        action_layout = QHBoxLayout()
-        
+        scroll.setWidget(self.variables_container)
+        return scroll
+
+    def _build_action_row(self) -> QHBoxLayout:
         self.btn_test = QPushButton("Test Connection")
         self.btn_test.setMinimumHeight(40)
-        self.btn_test.setStyleSheet("font-weight: bold; font-size: 14px; color: #2B5B84;")
+        self.btn_test.setStyleSheet(
+            "font-weight: bold; font-size: 14px; color: #2B5B84;")
         self.btn_test.clicked.connect(self._test_connection)
-        
+
         self.btn_save = QPushButton("Save & Apply")
         self.btn_save.setMinimumHeight(40)
         self.btn_save.setStyleSheet("font-weight: bold; font-size: 14px;")
         self.btn_save.clicked.connect(self._save_settings)
-        
-        action_layout.addWidget(self.btn_test)
-        action_layout.addWidget(self.btn_save)
-        right_layout.addLayout(action_layout)
-        
-        # Add panels to splitter
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
-        splitter.setSizes([250, 550])
+
+        row = QHBoxLayout()
+        row.addWidget(self.btn_test)
+        row.addWidget(self.btn_save)
+        return row
         
     @staticmethod
     def _settings_help_html() -> str:

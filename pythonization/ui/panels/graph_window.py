@@ -1367,118 +1367,153 @@ class MapPanel(QFrame):
     # ── UI ────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
+        """저장된 .dat 들을 읽어 2D 맵으로 그리는 패널."""
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
+        root.addLayout(self._build_base_row())
+        root.addLayout(self._build_control_area())
+        root.addLayout(self._build_action_row())
+        root.addWidget(self._build_image_view(), stretch=1)
+        self._on_auto_z_changed()   # Auto Z 체크 상태에 맞춰 min/max 입력 잠금
 
-        # ── Base folder row ──────────────────────────────
-        base_row = QHBoxLayout()
-        base_row.addWidget(QLabel("Base:"))
+    def _build_base_row(self) -> QHBoxLayout:
+        """스캔할 최상위 폴더 — 하위 phase/날짜 폴더를 훑는다."""
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Base:"))
         self._le_base = QLineEdit()
         self._le_base.setFont(_MONO)
         self._le_base.setPlaceholderText("main_folder/custom_folder 경로")
         self._le_base.textChanged.connect(self._on_base_changed)
-        base_row.addWidget(self._le_base)
+        row.addWidget(self._le_base)
+
         btn_browse = QPushButton("…")
         btn_browse.setFixedWidth(28)
         btn_browse.clicked.connect(self._browse_base)
-        base_row.addWidget(btn_browse)
-        root.addLayout(base_row)
+        row.addWidget(btn_browse)
+        return row
 
-        # ── 컨트롤 영역: 좌(X/Y/Z 넓게, 한 줄씩) | 우(자잘한 컨트롤, 우측 정렬) ──
-        ctrl_area = QHBoxLayout()
-        ctrl_area.setSpacing(12)
+    def _build_control_area(self) -> QHBoxLayout:
+        """좌 = X/Y/Z 축 선택(넓게), 우 = 색·범위 컨트롤(컴팩트)."""
+        area = QHBoxLayout()
+        area.setSpacing(12)
+        area.addLayout(self._build_axis_form(), stretch=1)
+        area.addLayout(self._build_range_column())
+        return area
 
-        # 좌측 컬럼 — X / Y / Z 축 선택 (각 한 줄, 콤보 넓게)
-        left_col = QFormLayout()
-        left_col.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        left_col.setHorizontalSpacing(8)
-        left_col.setVerticalSpacing(6)
-        left_col.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        self._cb_x = QComboBox(); self._cb_x.setFont(_MONO); self._cb_x.setMinimumWidth(220)
-        self._cb_y = QComboBox(); self._cb_y.setFont(_MONO); self._cb_y.setMinimumWidth(220)
-        self._cb_z = QComboBox(); self._cb_z.setFont(_MONO); self._cb_z.setMinimumWidth(220)
-        for cb in (self._cb_x, self._cb_y, self._cb_z):
-            cb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        left_col.addRow("X:", self._cb_x)
-        left_col.addRow("Y:", self._cb_y)
-        left_col.addRow("Z:", self._cb_z)
-        ctrl_area.addLayout(left_col, stretch=1)
+    def _build_axis_form(self) -> QFormLayout:
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
-        # 우측 컬럼 — phase / Z min·max / Auto Z / Colormap (우측 정렬, 컴팩트)
-        right_col = QVBoxLayout()
-        right_col.setSpacing(4)
+        self._cb_x = QComboBox()
+        self._cb_y = QComboBox()
+        self._cb_z = QComboBox()
+        for combo in (self._cb_x, self._cb_y, self._cb_z):
+            combo.setFont(_MONO)
+            combo.setMinimumWidth(220)
+            combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        form.addRow("X:", self._cb_x)
+        form.addRow("Y:", self._cb_y)
+        form.addRow("Z:", self._cb_z)
+        return form
 
-        phase_row = QHBoxLayout()
-        phase_row.addStretch()
-        phase_row.addWidget(QLabel("Phase:"))
+    def _build_range_column(self) -> QVBoxLayout:
+        column = QVBoxLayout()
+        column.setSpacing(4)
+        column.addLayout(self._build_phase_row())
+        column.addLayout(self._build_z_range_row())
+        column.addLayout(self._build_colormap_row())
+        return column
+
+    def _build_phase_row(self) -> QHBoxLayout:
+        """phase 만 고르면 모든 날짜 폴더의 .dat 를 한꺼번에 읽는다."""
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(QLabel("Phase:"))
+
         self._cb_phase = QComboBox()
         self._cb_phase.setFont(_MONO)
         self._cb_phase.setMinimumWidth(90)
-        # date 콤보 제거: phase만 선택, 모든 date 폴더의 .dat를 한꺼번에 로드
-        phase_row.addWidget(self._cb_phase)
+        row.addWidget(self._cb_phase)
+
         btn_refresh = QPushButton("↻")
         btn_refresh.setFixedWidth(28)
         btn_refresh.setToolTip("폴더 다시 스캔")
-        btn_refresh.clicked.connect(lambda: self._on_base_changed(self._le_base.text()))
-        phase_row.addWidget(btn_refresh)
-        right_col.addLayout(phase_row)
+        btn_refresh.clicked.connect(
+            lambda: self._on_base_changed(self._le_base.text()))
+        row.addWidget(btn_refresh)
+        return row
 
-        z_row = QHBoxLayout()
-        z_row.addStretch()
-        z_row.addWidget(QLabel("Z min:"))
-        self._le_zmin = QLineEdit(); self._le_zmin.setFont(_MONO); self._le_zmin.setFixedWidth(72)
-        z_row.addWidget(self._le_zmin)
-        z_row.addWidget(QLabel("max:"))
-        self._le_zmax = QLineEdit(); self._le_zmax.setFont(_MONO); self._le_zmax.setFixedWidth(72)
-        z_row.addWidget(self._le_zmax)
+    def _build_z_range_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addStretch()
+
+        self._le_zmin = QLineEdit()
+        self._le_zmin.setFont(_MONO)
+        self._le_zmin.setFixedWidth(72)
+        row.addWidget(QLabel("Z min:"))
+        row.addWidget(self._le_zmin)
+
+        self._le_zmax = QLineEdit()
+        self._le_zmax.setFont(_MONO)
+        self._le_zmax.setFixedWidth(72)
+        row.addWidget(QLabel("max:"))
+        row.addWidget(self._le_zmax)
+
         self._cb_auto_z = QCheckBox("Auto Z")
         self._cb_auto_z.setFont(_MONO)
         self._cb_auto_z.setChecked(True)
-        self._cb_auto_z.setToolTip("자동 범위: 2~98 퍼센타일 (이상치에 강건). 끄면 아래 min/max 수동 사용.")
+        self._cb_auto_z.setToolTip(
+            "자동 범위: 2~98 퍼센타일 (이상치에 강건). 끄면 아래 min/max 수동 사용.")
         self._cb_auto_z.stateChanged.connect(self._on_auto_z_changed)
-        z_row.addWidget(self._cb_auto_z)
+        row.addWidget(self._cb_auto_z)
+
         self._cb_sym_z = QCheckBox("Sym")
         self._cb_sym_z.setFont(_MONO)
-        self._cb_sym_z.setToolTip("0 중심 대칭 범위 (±max). 파랑-흰색-빨강 diverging colormap에 적합.")
-        z_row.addWidget(self._cb_sym_z)
-        right_col.addLayout(z_row)
+        self._cb_sym_z.setToolTip(
+            "0 중심 대칭 범위 (±max). 파랑-흰색-빨강 diverging colormap에 적합.")
+        row.addWidget(self._cb_sym_z)
+        return row
 
-        cmap_row = QHBoxLayout()
-        cmap_row.addStretch()
-        cmap_row.addWidget(QLabel("Colormap:"))
+    def _build_colormap_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(QLabel("Colormap:"))
         self._cb_cmap = QComboBox()
         self._cb_cmap.setFont(_MONO)
         for name in _CMAP_NAMES:
             self._cb_cmap.addItem(name)
-        cmap_row.addWidget(self._cb_cmap)
-        right_col.addLayout(cmap_row)
+        row.addWidget(self._cb_cmap)
+        return row
 
-        ctrl_area.addLayout(right_col)
-        root.addLayout(ctrl_area)
+    def _build_action_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
 
-        # ── Action row ──────────────────────────────────
-        act_row = QHBoxLayout()
         self._btn_plot = QPushButton("Plot")
         self._btn_plot.setFont(_MONO)
         self._btn_plot.setFixedWidth(80)
         self._btn_plot.clicked.connect(self._on_plot)
-        act_row.addWidget(self._btn_plot)
+        row.addWidget(self._btn_plot)
+
         self._lbl_status = QLabel("—")
         self._lbl_status.setFont(_MONO)
         self._lbl_status.setStyleSheet("color: #888888;")
-        act_row.addWidget(self._lbl_status)
-        act_row.addStretch()
+        row.addWidget(self._lbl_status)
+        row.addStretch()
+
         btn_save = QPushButton("Save Image…")
         btn_save.setFont(_MONO)
         btn_save.clicked.connect(self._save_image)
-        act_row.addWidget(btn_save)
-        root.addLayout(act_row)
+        row.addWidget(btn_save)
+        return row
 
-        # ── pyqtgraph display ───────────────────────────
+    def _build_image_view(self) -> "pg.GraphicsLayoutWidget":
+        """이미지 + 대화형 컬러바."""
         self._gv = pg.GraphicsLayoutWidget()
         self._gv.setBackground("#0d1117")
-        root.addWidget(self._gv, stretch=1)
 
         self._plot = self._gv.addPlot(row=0, col=0)
         self._plot.setDefaultPadding(0.02)
@@ -1491,9 +1526,7 @@ class MapPanel(QFrame):
             interactive=True,
         )
         self._cbar.setImageItem(self._img, insert_in=self._plot)
-
-        # Initial state
-        self._on_auto_z_changed()
+        return self._gv
 
     # ── Helpers ───────────────────────────────────────────
 
