@@ -1703,40 +1703,67 @@ class MainWindow(QMainWindow):
             self._param_manager_window.refresh_library()
 
     def _on_start(self):
+        """Start 버튼 — 검증 → 상태 준비 → 초기 상태 측정 요청.
+
+        검증을 모두 통과한 뒤에만 UI 를 잠그고 파일을 연다. 파일 열기에 실패하면
+        (저장이 켜져 있는 경우) 측정을 시작하지 않고 되돌린다.
+        """
         if self._running:
             return
+        if not self._validate_start():
+            return
+
+        self._worker.reset_stop()   # 이전 sweep 의 Stop 잔류 플래그 제거
+        get_logger().info("sweep _on_start: ch=%s to=%s rate=%s tpp=%s",
+                          getattr(self._sweep_channel, "alias", "?"),
+                          self._sweep_config.sweep_to, self._sweep_config.sweep_rate,
+                          self._sweep_config.time_per_point)
+
+        self._begin_run_state()
+        if not self._open_data_file():
+            return
+
+        self._prepare_derivative_channels()
+        self._prepare_graph_session()
+        self._configure_metadata()
+        self._log_sweep_start()
+        self._request_initial_measurement()
+
+    # ── _on_start 의 단계별 처리 ──────────────────────────────────────────
+
+    def _validate_start(self) -> bool:
+        """시작 전 확인. 하나라도 걸리면 안내하고 False."""
         if self._sweep_channel is None:
             QMessageBox.warning(self, "No Sweep Channel",
-                "Parameter Manager에서 Paired Command를 선택하세요.")
-            return
-        # Rate/Time-per-Point 검증 — 0/음수면 무한정지·역방향 폭주 위험(core가 막긴 하지만
-        # 시작 전에 명확히 알려준다).
-        _cfg = self._sweep_config
-        if _cfg.sweep_rate <= 0 or _cfg.time_per_point <= 0:
+                                "Parameter Manager에서 Paired Command를 선택하세요.")
+            return False
+
+        # rate/tpp 가 0 이하이면 무한정지·역방향 폭주 위험. core 가 막긴 하지만
+        # 시작 전에 명확히 알려준다.
+        cfg = self._sweep_config
+        if cfg.sweep_rate <= 0 or cfg.time_per_point <= 0:
             QMessageBox.warning(
                 self, "잘못된 Sweep 파라미터",
-                f"Rate({_cfg.sweep_rate:g})와 Time/Point({_cfg.time_per_point:g})는 "
+                f"Rate({cfg.sweep_rate:g})와 Time/Point({cfg.time_per_point:g})는 "
                 "0보다 커야 합니다.")
-            return
-        # 저장 비활성 경고 — 장시간 측정이 저장 없이 진행되는 사고 방지
+            return False
+
+        # 장시간 측정이 저장 없이 진행되는 사고 방지
         if not self._cb_save_enable.isChecked():
-            ans = QMessageBox.question(
+            answer = QMessageBox.question(
                 self, "Auto-save 비활성화",
                 "Auto-save가 꺼져 있습니다. 측정 데이터가 파일로 저장되지 않습니다.\n\n"
                 "저장 없이 진행하시겠습니까?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
-            if ans != QMessageBox.StandardButton.Yes:
-                return
-        # 연결 상태 확인 — 실패 시 측정 중단
-        if not self._run_connection_test(include_second=False, show_success=False):
-            return
-        self._worker.reset_stop()   # 이전 sweep의 Stop 잔류 플래그 제거 (재시작 보장)
-        get_logger().info("sweep _on_start: ch=%s to=%s rate=%s tpp=%s",
-                          getattr(self._sweep_channel, "alias", "?"),
-                          self._sweep_config.sweep_to, self._sweep_config.sweep_rate,
-                          self._sweep_config.time_per_point)
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+
+        return self._run_connection_test(include_second=False, show_success=False)
+
+    def _begin_run_state(self):
+        """측정 중 상태로 전환 — 버튼·패널 잠금, 카운터 초기화, 채널 스냅샷."""
         self._running = True
         self._sweep_step_count = 0
         self._btn_start.setEnabled(False)
@@ -1746,81 +1773,95 @@ class MainWindow(QMainWindow):
         self._glow_timer.start()
         self._sweep_status_window.reset()
         self._last_write_value = None
-        # 체크된 measurement 인덱스 스냅샷 (sweep 중 고정)
+
+        # 체크된 measurement 인덱스를 여기서 고정한다 — sweep 도중 바뀌면 저장된
+        # .dat 의 열 구성과 어긋난다.
         self._active_meas_indices = [
             i for i, (_, cb) in enumerate(
-                zip(self._active_profile.measurements, self._meas_checkboxes)
-            )
+                zip(self._active_profile.measurements, self._meas_checkboxes))
             if cb.isChecked()
         ]
         self._sync_data_window_columns()
-        # sweep channel / measurement / save 컨트롤 비활성화
-        # (단, Copy / Open Folder 버튼은 측정 중에도 사용 가능하도록 유지)
+
+        # 측정 중 구성 변경 차단. Copy / Open Folder 는 계속 쓸 수 있게 남긴다.
         self._sweep_channel_panel.setEnabled(False)
         self._meas_panel.setEnabled(False)
         self._set_save_inputs_enabled(False)
-        # Double Sweep window UI 잠금
+        for window in (self._double_sweep_window, self._meta_data_window):
+            if window is not None:
+                window.lock_ui(True)
         if self._double_sweep_window is not None:
-            self._double_sweep_window.lock_ui(True)
-        # Meta Data Config window UI 잠금
-        if self._meta_data_window is not None:
-            self._meta_data_window.lock_ui(True)
-        self._update_save_preview()
-        filepath = self._data_saver.start_session()
+            self._double_sweep_window._btn_start.setEnabled(False)
+
         self._data_window.clear_values()
         self._lbl_idle.setText("—")
         self._lbl_idle.setStyleSheet("color: #555555;")
         self._lbl_remaining.setText("—")
+
+    def _open_data_file(self) -> bool:
+        """.dat 세션 시작. 저장이 켜져 있는데 실패하면 측정을 취소하고 False.
+
+        여기서 그냥 진행하면 장시간 측정이 통째로 유실된다.
+        """
+        self._update_save_preview()
+        filepath = self._data_saver.start_session()
         if filepath:
             self._log(f"  Data → {filepath}", color="#888888")
-        elif self._data_saver.start_error() is not None:
-            # 저장이 활성인데 실패 → 데이터 유실 위험. 측정 시작 중단.
-            err = self._data_saver.start_error()
-            self._log(f"  ✗ 데이터 저장 시작 실패 — 측정 취소: {err}", color="#f44747")
-            self._on_stop()
-            QMessageBox.critical(
-                self, "데이터 저장 실패 — 측정 취소",
-                f"데이터 파일을 시작할 수 없어 측정을 시작하지 않았습니다.\n\n"
-                f"사유: {err}\n\n"
-                "Main Folder 경로·권한·디스크 공간을 확인하세요.",
-            )
-            return
-        # disable Double Sweep while single sweep is running
-        if self._double_sweep_window is not None:
-            self._double_sweep_window._btn_start.setEnabled(False)
-        # Derivative channels — reconfigure and reset buffers
-        for order, ch in [(1, self._deriv_channel), (2, self._deriv_channel2), (3, self._deriv_channel3)]:
-            ch.reconfigure(self._build_deriv_config(order))
-            ch.reset()
-        # Disable derivative settings while running
+            return True
+
+        error = self._data_saver.start_error()
+        if error is None:
+            return True     # 저장을 의도적으로 끈 상태
+
+        self._log(f"  ✗ 데이터 저장 시작 실패 — 측정 취소: {error}", color="#f44747")
+        self._on_stop()
+        QMessageBox.critical(
+            self, "데이터 저장 실패 — 측정 취소",
+            f"데이터 파일을 시작할 수 없어 측정을 시작하지 않았습니다.\n\n"
+            f"사유: {error}\n\n"
+            "Main Folder 경로·권한·디스크 공간을 확인하세요.",
+        )
+        return False
+
+    def _prepare_derivative_channels(self):
+        """미분 채널을 현재 설정으로 다시 만들고 버퍼를 비운다. 측정 중 편집은 잠근다."""
+        for order, (channel, _key) in enumerate(self._deriv_channels(), start=1):
+            channel.reconfigure(self._build_deriv_config(order))
+            channel.reset()
         for suffix in ("", "2", "3"):
             getattr(self, f"_cb_deriv{suffix}_enable").setEnabled(False)
-            for w in getattr(self, f"_deriv{suffix}_setting_widgets"):
-                w.setEnabled(False)
+            for widget in getattr(self, f"_deriv{suffix}_setting_widgets"):
+                widget.setEnabled(False)
 
+    def _prepare_graph_session(self):
         self._graph_history.clear()
         self._graph_columns = self._build_graph_columns()
         if self._graph_window is not None:
             self._graph_window.begin_session(self._graph_columns)
-        # MetaDataManager: configure T/B buffer for this sweep
-        _meas_labels = [
+
+    def _configure_metadata(self):
+        """이번 sweep 의 T/B 버퍼 구성 — 화면에서 고른 측정 타입이 우선한다."""
+        labels = [
             self._meas_label_for(idx, self._active_profile.measurements[idx])
             for idx in self._active_meas_indices
         ]
-        _meas_type_overrides = {}
+        type_overrides = {}
         for idx in self._active_meas_indices:
-            if idx < len(self._meas_type_combos):
-                val = self._meas_type_combos[idx].currentData()
-                try:
-                    _meas_type_overrides[idx] = MeasType(val)
-                except Exception:
-                    pass
+            if idx >= len(self._meas_type_combos):
+                continue
+            try:
+                type_overrides[idx] = MeasType(self._meas_type_combos[idx].currentData())
+            except Exception:
+                pass    # 알 수 없는 값이면 모델 기본 타입을 쓴다
+
         self._meta_manager.configure(
             self._active_meas_indices,
             self._active_profile.measurements,
-            _meas_labels,
-            meas_type_overrides=_meas_type_overrides,
+            labels,
+            meas_type_overrides=type_overrides,
         )
+
+    def _log_sweep_start(self):
         self._log("Sweep started.", color="#4ec9b0")
         self._log_sweep(
             f"━━ Sweep started  target={self._sweep_config.sweep_to:.4g}  "
@@ -1828,26 +1869,28 @@ class MainWindow(QMainWindow):
             f"tpp={self._sweep_config.time_per_point:.3g}s",
             color="#4ec9b0",
         )
-        # 초기 상태 측정 (이동 없이 현재 위치에서 measurement만)
-        active_init = [
-            (row, self._active_profile.measurements[row].alias,
-             self._active_profile.measurements[row].description,
-             self._active_profile.measurements[row].resolved_cmd)
+
+    def _request_initial_measurement(self):
+        """이동 없이 현재 위치에서 measurement 만 한 번 — sweep 시작점 기록."""
+        measurements = self._active_profile.measurements
+        active = [
+            (row, measurements[row].alias, measurements[row].description,
+             measurements[row].resolved_cmd)
             for row in self._active_meas_indices
         ]
         self._auto_retry_used = False
-        _init_req = StepRequest(
+        request = StepRequest(
             sweep_channel=self._sweep_channel,
             sweep_to=self._sweep_config.sweep_to,
             sweep_rate=self._sweep_config.sweep_rate,
             time_per_point=self._sweep_config.time_per_point,
             t_emit=time.perf_counter(),
             last_write_value=None,
-            active_measurements=active_init,
+            active_measurements=active,
             measure_only=True,
         )
-        self._last_step_request = _init_req
-        self.request_step.emit(_init_req)
+        self._last_step_request = request
+        self.request_step.emit(request)
 
     def _on_stop_clicked(self):
         """사용자가 Stop 버튼을 누른 경우 — 직전 지점을 resume 로그에 저장 후 중단."""

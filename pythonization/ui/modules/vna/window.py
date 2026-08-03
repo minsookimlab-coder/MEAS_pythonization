@@ -6,6 +6,7 @@ VnaWindow: VNA 제어 창 (병렬 동작).
 """
 import os
 import time as _time
+from dataclasses import dataclass
 from pathlib import Path, Path as _P
 from typing import List, Optional, TYPE_CHECKING, Tuple
 
@@ -77,6 +78,34 @@ if TYPE_CHECKING:
     from pythonization.profiles.registry import ProfileRegistry
 
 _DEFAULT_CONFIG_PATH = SETTINGS_DIR / "vna_config.yaml"
+
+
+@dataclass
+class _FirstChannel:
+    """double sweep 의 안쪽 축 — 매 second 값마다 이 값들을 훑는다."""
+    cmd: object
+    values: list
+    advance: object
+    field_time: bool    # True 면 N 단계가 아니라 시간 기반(ramp → HOLD 대기)
+
+
+@dataclass
+class _SecondChannel:
+    """double sweep 의 바깥 축 (bias/온도). enabled=False 면 단일 sweep 이다."""
+    enabled: bool
+    cmd: object
+    values: list
+    advance: object
+
+    @property
+    def is_active(self) -> bool:
+        """실제로 값을 훑는 second 채널이 있는가 (하위폴더·데이터 열 판단용)."""
+        return self.enabled and self.cmd is not None
+
+
+#: _resolve_second_channel 이 '입력 오류' 를 알리는 표식.
+#: None 은 '채널을 안 씀'이라는 정상 상태라서 구분이 필요하다.
+_INVALID = object()
 
 # unit_type → [(label, multiplier), ...]
 _UNIT_OPTIONS: dict = {
@@ -2251,148 +2280,211 @@ class VnaWindow(QDialog):
                             resume_second_vals: Optional[list] = None,
                             resume_folder: Optional[Path] = None,
                             resume_full_vals: Optional[list] = None):
-        """First/Second 채널·방향·pre-advance를 묶어 double sweep 실행.
+        """First/Second 채널·방향·pre-advance 를 묶어 double sweep 을 실행한다.
 
-        resume_*: 재개 시 — 남은 second 값 목록(resume_second_vals), 전역 인덱스 오프셋
-        (resume_offset), 이어서 저장할 폴더(resume_folder)를 받아 그 지점부터 시작한다.
+        resume_*: 재개 시 — 남은 second 값 목록(resume_second_vals), 전역 인덱스
+        오프셋(resume_offset), 이어서 저장할 폴더(resume_folder)를 받아 그 지점부터
+        시작한다.
+
+        입력이 하나라도 잘못되면 상태줄에 알리고 아무것도 시작하지 않는다.
         """
-        first = self._get_selected_sweep_cmd()
+        first = self._resolve_first_channel()
         if first is None:
-            self._set_status("First sweep 명령을 선택하세요.", color="#f78166")
             return
-        ft_enabled = self._cb_field_time.isChecked()
+
+        second = self._resolve_second_channel(
+            resume_offset, resume_second_vals, resume_full_vals)
+        if second is _INVALID:
+            return
+
+        plan = self._build_ds_plan(first, second, resume_offset)
+        self._configure_ds_columns(first, second)
+        self._persist_ds_control()
+
+        self._start_acquire(sweep_values=None, ds_plan=plan,
+                            resume_folder=resume_folder)
+        self._init_resume_state(second, resume_second_vals)
+
+    # ── _start_double_sweep 의 단계별 처리 ────────────────────────────────
+
+    def _resolve_first_channel(self) -> Optional["_FirstChannel"]:
+        """First 채널 명령 + 값 목록. 입력이 잘못되면 상태줄에 알리고 None."""
+        cmd = self._get_selected_sweep_cmd()
+        if cmd is None:
+            self._set_status("First sweep 명령을 선택하세요.", color="#f78166")
+            return None
+
+        field_time = self._cb_field_time.isChecked()
         try:
-            f0 = float(self._le_sw_start.text())
-            f1 = float(self._le_sw_stop.text())
-            fn = 2 if ft_enabled else int(self._le_sw_n.text())  # field-time은 N 불필요
-            if fn < 1:
+            start = float(self._le_sw_start.text())
+            stop = float(self._le_sw_stop.text())
+            # field-time 모드는 스텝 수를 미리 알 수 없어 N 을 쓰지 않는다
+            count = 2 if field_time else int(self._le_sw_n.text())
+            if count < 1:
                 raise ValueError
         except ValueError:
             self._set_status("First 범위가 올바르지 않습니다.", color="#f78166")
-            return
-        f0 *= self._sweep_unit_mult(self._cb_sw_start_unit)
-        f1 *= self._sweep_unit_mult(self._cb_sw_stop_unit)
-        first_vals = self._linspace(f0, f1, fn)
-        first_adv = first.advance if first.sweep_kind == "controlled" else None
+            return None
 
-        second_enabled = self._cb_second_enable.isChecked()
-        second = None
-        second_vals: list = []
-        second_adv = None
-        if second_enabled:
-            si = self._combo_second_cmd.currentIndex()
-            if not (0 <= si < len(self._cfg.acquire.sweep_cmds)):
-                self._set_status("Second sweep 명령을 선택하세요.", color="#f78166")
-                return
-            second = self._cfg.acquire.sweep_cmds[si]
-            try:
-                s0 = float(self._le_2_start.text())
-                s1 = float(self._le_2_stop.text())
-                sn = int(self._le_2_n.text())
-                if sn < 1:
-                    raise ValueError
-            except ValueError:
-                self._set_status("Second 범위가 올바르지 않습니다.", color="#f78166")
-                return
-            # Feature 1: second 값 테이블(모델)이 source of truth. 워커는 실행 중 이 모델에서
-            # 매 행을 새로 읽는다 → 미래 행 편집/추가가 즉시 반영됨.
-            if resume_second_vals is not None:
-                full = list(resume_full_vals) if resume_full_vals is not None else list(resume_second_vals)
-                self._second_table.reset_from(full, done_prefix=resume_offset)
-                second_vals = self._second_table.values()[resume_offset:]
-            elif (self._cb_second_keep_table.isChecked()
-                  and self._second_table.count() > 0):
-                self._second_table.rearm()   # 커스텀 테이블 유지, 상태만 PENDING로
-                second_vals = self._second_table.values()
-            else:
-                self._second_table.reset_from(self._linspace(s0, s1, sn))
-                second_vals = self._second_table.values()
-            second_adv = second.advance if second.sweep_kind == "controlled" else None
+        start *= self._sweep_unit_mult(self._cb_sw_start_unit)
+        stop *= self._sweep_unit_mult(self._cb_sw_stop_unit)
+        return _FirstChannel(
+            cmd=cmd,
+            values=self._linspace(start, stop, count),
+            advance=cmd.advance if cmd.sweep_kind == "controlled" else None,
+            field_time=field_time,
+        )
 
-        pre_specs = [
-            {"cmd": r["cmd"], "sweep": r["sweep"].text().strip(),
-             "dummy": r["dummy"].text().strip()}
-            for r in self._pre_adv_rows if r["cb"].isChecked()
-        ]
-        direction = self._combo_direction.currentData() or "uni"
+    def _resolve_second_channel(self, resume_offset, resume_second_vals,
+                                resume_full_vals):
+        """Second 채널 설정. 꺼져 있으면 비활성 _SecondChannel, 오류면 _INVALID.
 
-        # Double Sweep with Time: field-time 설정 구성
-        field_time = None
-        if ft_enabled:
-            field_time = {
-                "enabled": True,
-                "interval": self._ds_f(self._ft_interval, 5.0),
-                "status_interval": self._ds_f(self._ft_stat_intv, 2.0),
-                "status_alias": "",   # First 채널 장비로 폴링 (워커 폴백)
-                "status_cmd": self._ft_status_cmd.text().strip(),
-                "hold_token": self._ft_hold.text().strip() or "HOLD",
-                "forward_cmds": list(self._ft_fwd_cmds),
-            }
+        second 값 목록의 source of truth 는 테이블 모델이다 — 워커가 실행 중 매 행을
+        모델에서 새로 읽으므로 아직 측정하지 않은 행은 도중에 고칠 수 있다.
+        """
+        if not self._cb_second_enable.isChecked():
+            return _SecondChannel(enabled=False, cmd=None, values=[], advance=None)
 
-        # second 채널 값으로 만들 하위폴더 라벨(figure_axis). 비면 하위폴더 없음.
-        self._ds_second_label = (self._sweep_col_meta(second)[0]
-                                 if (second_enabled and second is not None) else "")
+        index = self._combo_second_cmd.currentIndex()
+        if not (0 <= index < len(self._cfg.acquire.sweep_cmds)):
+            self._set_status("Second sweep 명령을 선택하세요.", color="#f78166")
+            return _INVALID
+        cmd = self._cfg.acquire.sweep_cmds[index]
 
-        if ft_enabled:
-            # 시간 기반: 스텝 수를 미리 알 수 없음 → 인덱스 기반 파일명
-            self._ds_step_labels = None
-            self._ds_field_time = True
-            # 데이터 열: second(온도) 값만 (자기장은 read 명령으로 기록됨)
-            self._extra_cols = ([self._sweep_col_meta(second)]
-                                if (second_enabled and second is not None) else [])
+        try:
+            start = float(self._le_2_start.text())
+            stop = float(self._le_2_stop.text())
+            count = int(self._le_2_n.text())
+            if count < 1:
+                raise ValueError
+        except ValueError:
+            self._set_status("Second 범위가 올바르지 않습니다.", color="#f78166")
+            return _INVALID
+
+        if resume_second_vals is not None:
+            full = list(resume_full_vals if resume_full_vals is not None
+                        else resume_second_vals)
+            self._second_table.reset_from(full, done_prefix=resume_offset)
+            values = self._second_table.values()[resume_offset:]
+        elif self._cb_second_keep_table.isChecked() and self._second_table.count() > 0:
+            self._second_table.rearm()   # 커스텀 테이블 유지, 상태만 PENDING 으로
+            values = self._second_table.values()
         else:
-            self._ds_field_time = False
-            # 스텝별 파일명 토큰 = first 값 (second 값은 이제 하위폴더가 담당)
-            labels = []
-            sv_list = second_vals if second_enabled else [None]
-            for si2, sv in enumerate(sv_list):
-                order = (first_vals if (direction == "uni" or si2 % 2 == 0)
-                         else list(reversed(first_vals)))
-                for fv in order:
-                    labels.append(f"{fv:.6g}".replace('+', ''))
-            self._ds_step_labels = labels
-            # swept value 데이터 열: first (+ second) — worker의 extra_values 순서와 일치
-            self._extra_cols = [self._sweep_col_meta(first)]
-            if second_enabled and second is not None:
-                self._extra_cols.append(self._sweep_col_meta(second))
+            self._second_table.reset_from(self._linspace(start, stop, count))
+            values = self._second_table.values()
 
-        plan = {
-            "first_cmd": first, "first_values": first_vals, "first_adv": first_adv,
-            "second_enabled": second_enabled, "second_cmd": second,
-            "second_values": second_vals, "second_adv": second_adv,
-            "direction": direction, "pre_specs": pre_specs,
-            "field_time": field_time, "second_index_offset": resume_offset,
-            # Feature 1/2/3
-            "second_table": (self._second_table if second_enabled else None),
-            "field_initial_sweep": (ft_enabled and second_enabled
+        return _SecondChannel(
+            enabled=True, cmd=cmd, values=values,
+            advance=cmd.advance if cmd.sweep_kind == "controlled" else None)
+
+    def _configure_ds_columns(self, first: "_FirstChannel", second: "_SecondChannel"):
+        """저장 파일의 열 구성과 파일명 토큰을 정한다.
+
+        second 값은 하위폴더 이름이 되고(_ds_second_label), first 값은 파일명 토큰이
+        된다. field-time 모드는 스텝 수를 모르므로 인덱스 기반 파일명을 쓴다.
+        """
+        self._ds_second_label = (self._sweep_col_meta(second.cmd)[0]
+                                 if second.is_active else "")
+        self._ds_field_time = first.field_time
+
+        if first.field_time:
+            self._ds_step_labels = None
+            # 자기장은 read 명령으로 기록되므로 열에는 second(온도) 값만 넣는다
+            self._extra_cols = ([self._sweep_col_meta(second.cmd)]
+                                if second.is_active else [])
+            return
+
+        self._ds_step_labels = self._build_step_labels(first, second)
+        # worker 의 extra_values 순서와 일치해야 한다
+        self._extra_cols = [self._sweep_col_meta(first.cmd)]
+        if second.is_active:
+            self._extra_cols.append(self._sweep_col_meta(second.cmd))
+
+    def _build_step_labels(self, first: "_FirstChannel",
+                           second: "_SecondChannel") -> list:
+        """스텝별 파일명 토큰 = first 값.
+
+        다중방향이면 second 스텝마다 first 진행 방향이 뒤집힌다.
+        """
+        direction = self._combo_direction.currentData() or "uni"
+        outer = second.values if second.enabled else [None]
+        labels = []
+        for si, _ in enumerate(outer):
+            forward = direction == "uni" or si % 2 == 0
+            order = first.values if forward else list(reversed(first.values))
+            labels.extend(f"{value:.6g}".replace('+', '') for value in order)
+        return labels
+
+    def _build_ds_plan(self, first: "_FirstChannel", second: "_SecondChannel",
+                       resume_offset: int) -> dict:
+        pre_specs = [
+            {"cmd": row["cmd"], "sweep": row["sweep"].text().strip(),
+             "dummy": row["dummy"].text().strip()}
+            for row in self._pre_adv_rows if row["cb"].isChecked()
+        ]
+        return {
+            "first_cmd": first.cmd,
+            "first_values": first.values,
+            "first_adv": first.advance,
+            "second_enabled": second.enabled,
+            "second_cmd": second.cmd,
+            "second_values": second.values,
+            "second_adv": second.advance,
+            "direction": self._combo_direction.currentData() or "uni",
+            "pre_specs": pre_specs,
+            "field_time": self._build_field_time_plan() if first.field_time else None,
+            "second_index_offset": resume_offset,
+            "second_table": (self._second_table if second.enabled else None),
+            # 첫 second 목표 도달을 기다리지 않고 현재 상태에서 한 번 먼저 sweep
+            "field_initial_sweep": (first.field_time and second.enabled
                                     and resume_offset == 0
                                     and self._cb_ft_initial.isChecked()),
             "dummy_measure": self._cb_dummy_measure.isChecked(),
         }
-        # 실행 시점에 double-sweep 설정(특히 pre-advance sweep/dummy 값·체크박스, stop 명령)을
-        # 프로파일에 영속화 → '방금 돌린 설정'이 재시작 후에도 유지된다.
+
+    def _build_field_time_plan(self) -> dict:
+        return {
+            "enabled": True,
+            "interval": self._ds_f(self._ft_interval, 5.0),
+            "status_interval": self._ds_f(self._ft_stat_intv, 2.0),
+            "status_alias": "",   # First 채널 장비로 폴링 (워커 폴백)
+            "status_cmd": self._ft_status_cmd.text().strip(),
+            "hold_token": self._ft_hold.text().strip() or "HOLD",
+            "forward_cmds": list(self._ft_fwd_cmds),
+        }
+
+    def _persist_ds_control(self):
+        """방금 돌린 설정이 재시작 후에도 남도록 프로파일에 저장한다.
+
+        저장 실패가 측정을 막지는 않는다 — 경고만 남기고 진행.
+        """
         try:
             self._cfg.ds_control = self._collect_ds_control()
             save_vna_config(self._cfg, self._config_path())
         except Exception as e:
             self._set_status(f"설정 저장 경고: {type(e).__name__}: {e}", color="#888")
-        self._start_acquire(sweep_values=None, ds_plan=plan, resume_folder=resume_folder)
 
-        # ── resume 상태 설정 (second 채널 사용 시에만) ──
-        if second_enabled and self._cb_save.isChecked() and self._sweep_folder is not None:
-            if resume_second_vals is None:
-                # 새 측정: 전체 second 시퀀스로 resume 상태 새로 생성·저장
-                self._resume_state = VnaResumeState(
-                    active=True, sweep_folder=str(self._sweep_folder),
-                    second_values=[float(v) for v in second_vals],
-                    completed_second_idx=-1, field_time=ft_enabled,
-                    filename=self._le_filename.text().strip() or "vna_data",
-                    figure_axis=self._sweep_figure_axis,
-                    control=self._cfg.ds_control)
-                self._save_resume()
-            # 재개일 땐 _resume_double_sweep에서 이미 self._resume_state를 설정해 둠
-        else:
+    def _init_resume_state(self, second: "_SecondChannel", resume_second_vals):
+        """중단 시 이어갈 지점을 기록한다. second 채널을 쓰고 저장이 켜져 있을 때만.
+
+        재개로 들어온 경우에는 _resume_double_sweep 이 이미 상태를 세팅해 뒀다.
+        """
+        can_resume = (second.enabled and self._cb_save.isChecked()
+                      and self._sweep_folder is not None)
+        if not can_resume:
             self._resume_state = None
+            return
+        if resume_second_vals is not None:
+            return
+
+        self._resume_state = VnaResumeState(
+            active=True, sweep_folder=str(self._sweep_folder),
+            second_values=[float(v) for v in second.values],
+            completed_second_idx=-1, field_time=self._ds_field_time,
+            filename=self._le_filename.text().strip() or "vna_data",
+            figure_axis=self._sweep_figure_axis,
+            control=self._cfg.ds_control)
+        self._save_resume()
 
     @Slot(int, float)
     def _on_step_elapsed(self, step_idx: int, elapsed: float):
