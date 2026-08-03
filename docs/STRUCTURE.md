@@ -303,11 +303,17 @@ Worker Thread: SecondChannelWorker  [double sweep advance 시 활성]
    `thread.wait()`와 데드락). 워커→테이블 창 갱신은 bound `@Slot`으로만.
    완료(DONE) 행은 앞쪽 prefix 고정 → 미래 행 편집/추가 안전.
 7. **非VISA 드라이버(`instruments/drivers/zurich_mfli.py`)** — pyvisa 대신
-   `zhinst.core.ziDAQServer`로 **이미 떠 있는** LabOne Data Server(localhost:8004)에 접속하고
+   `zhinst.core.ziDAQServer`로 **이미 떠 있는** LabOne Data Server에 접속하고
    노드 경로를 명령 문자열로 번역(`connect`/`write`/`query` override). `self.inst`는 가드
-   통과용 sentinel. 두 번째 Data Server를 새로 띄우지 않는다. **`connectDevice`는
-   `/zi/devices/connected`에 장비가 없을 때만** 호출한다 — 이미 연결돼 있으면(LabOne 사용 중)
-   재연결 시도가 오래 걸리다 timeout(예: PCIe)나므로 건너뛰고 노드만 읽는다. 주의:
+   통과용 sentinel. 두 번째 Data Server를 새로 띄우지 않는다.
+   **`connectDevice`는 노드를 읽어 접근 불가일 때만** 호출한다(`_device_accessible()`) —
+   이미 연결돼 있으면(LabOne 사용 중) 재연결이 오래 걸리다 timeout 나거나 'in use'로
+   거부되고, 성공하면 오히려 LabOne 측정을 방해한다.
+   **`server_host`는 LabOne이 접속한 Data Server 주소여야 한다.** MFLI는 장비 자체가
+   Data Server를 돌리므로 보통 **장비 IP**(예: 192.168.0.13)이고, 로컬(127.0.0.1)을
+   넣으면 장비가 `/zi/devices/visible`에는 보이지만 `/zi/devices/connected`에는 없어
+   `DeviceInUseError`가 난다. `_connect_failure_hint()`가 두 목록을 대조해 이 상황을
+   구체적으로 알려 준다. 주의:
    `_evict_broken`은 `pyvisa.VisaIOError`만 처리하므로 MFLI 오류엔 세션 자동 eviction/재연결이
    걸리지 않는다(설계상 허용). 락 키(`lan|localhost|8004`)가 ITC/M81과 달라 per-point 다중
    alias 병렬 읽기 안전.
