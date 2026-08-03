@@ -82,8 +82,19 @@ class TestConnectFailureHint(unittest.TestCase):
         """가장 흔한 원인 — 엉뚱한 Data Server 에 접속."""
         message = self.hint(FakeDaq(visible="DEV32704", connected=""))
         self.assertIn("server_host", message)
-        self.assertIn("장비 IP", message)
         self.assertIn("connected=''", message)
+        self.assertIn("/zi/devices/connected", message, "확인 방법을 알려 줘야 한다")
+
+    def test_hint_suggests_the_opposite_host(self):
+        """어느 쪽이 정답인지는 LabOne 설정에 달렸다 — 방향을 넘겨짚지 않는다."""
+        daq = FakeDaq(visible="DEV32704", connected="")
+        error = RuntimeError("DeviceInUseError: already in use")
+
+        local = make_driver(daq, host="127.0.0.1")._connect_failure_hint(error)
+        self.assertIn("장비 IP", local, "로컬 설정이면 장비 IP 를 제안")
+
+        remote = make_driver(daq, host="192.168.0.13")._connect_failure_hint(error)
+        self.assertIn("127.0.0.1", remote, "장비 IP 설정이면 로컬을 제안")
 
     def test_not_visible_points_at_hardware(self):
         message = self.hint(FakeDaq(visible="DEV11111", connected=""))

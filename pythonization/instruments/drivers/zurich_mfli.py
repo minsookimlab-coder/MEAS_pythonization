@@ -108,11 +108,15 @@ class ZurichMFLI(BaseInstrument):
     def _connect_failure_hint(self, error: Exception) -> str:
         """connectDevice 실패 원인을 서버의 장비 목록과 대조해 구체적으로 알려 준다.
 
-        가장 흔한 원인은 **엉뚱한 Data Server 에 접속한 것**이다. MFLI 는 장비 자체가
-        Data Server 를 돌리므로, LabOne 이 장비 IP 로 붙어 있으면 로컬(127.0.0.1)
-        서버에는 그 장비가 'visible' 로만 보이고 'connected' 에는 없다. 이 상태에서
-        connectDevice 를 하면 'in use' 로 거부된다 — 메시지만 보면 장비 문제처럼
-        읽히지만 실제로는 server_host 설정 문제다.
+        가장 흔한 원인은 **엉뚱한 Data Server 에 접속한 것**이다. MFLI 는 장비 자체도
+        Data Server 를 돌리기 때문에 후보가 둘이다 — 로컬 서버(127.0.0.1)와 장비
+        IP. LabOne 이 어느 쪽에 붙였느냐에 따라 정답이 바뀌고, **연결 방식을 바꾸면
+        정답도 바뀐다**(과거에는 로컬이 맞았던 적도 있다). 그래서 방향을 넘겨짚지
+        않고 두 목록을 그대로 보여 준다.
+
+        틀린 서버에 붙으면 장비가 'visible' 로만 보이고 'connected' 에는 없으며,
+        이 상태에서 connectDevice 를 하면 'in use' 로 거부된다 — 메시지만 보면 장비
+        고장처럼 읽히지만 실제로는 server_host 설정 문제다.
         """
         visible, connected = self._server_device_lists()
         dev_upper = self.dev_id.upper()
@@ -124,12 +128,17 @@ class ZurichMFLI(BaseInstrument):
                     f"나오는데 노드를 읽지 못했습니다. api_level({self.api_level})을 확인하세요.")
 
         if dev_upper in visible.upper():
+            other = ("장비 IP" if self.server_host in ("127.0.0.1", "localhost")
+                     else "127.0.0.1")
             return (
                 f"{head}\n→ 이 장비는 {self.server_host}:{self.server_port} 서버에 "
-                f"'보이기만' 하고 연결돼 있지 않습니다(connected='{connected}').\n"
-                f"   다른 Data Server(대개 MFLI 자체 IP)가 이 장비를 쓰고 있습니다.\n"
-                f"   Instrument Settings 에서 server_host 를 LabOne 이 접속한 주소"
-                f"(장비 IP)로 바꾸세요.")
+                f"'보이기만' 하고 연결돼 있지 않습니다"
+                f"(visible='{visible}', connected='{connected}').\n"
+                f"   다른 Data Server 가 장비를 쓰고 있습니다. Instrument Settings 의 "
+                f"server_host 를 LabOne 이 접속한 서버 주소로 바꾸세요 "
+                f"— 지금 설정의 반대편({other})을 먼저 시도해 보세요.\n"
+                f"   확인 방법: 각 후보 주소로 ziDAQServer 를 열어 "
+                f"'/zi/devices/connected' 에 {self.dev_id} 가 있는 쪽이 정답입니다.")
 
         return (f"{head}\n→ 서버({self.server_host}:{self.server_port})에 이 장비가 보이지 "
                 f"않습니다(visible='{visible}'). 전원·케이블·네트워크와 device_id"
