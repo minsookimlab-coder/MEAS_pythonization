@@ -1,9 +1,12 @@
 """
 Network and VISA address utility functions.
 """
-import subprocess
+import logging
 import socket
+import subprocess
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 
 def build_visa_string(interface_type: str, address: str, port: Optional[int] = None) -> str:
@@ -76,7 +79,14 @@ def resolve_address(interface_type: str, address: str, mac_address: str = "") ->
     if mac_to_find:
         resolved = find_ip_for_mac(mac_to_find)
         if resolved:
-            print(f"[Auto-IP-Resolver] MAC '{mac_to_find}' resolved to dynamic IP: {resolved}")
+            if resolved != address:
+                # 설정에 적힌 IP 와 다른 곳으로 연결된다. DHCP 로 IP 가 바뀐 정상 상황일
+                # 수도 있지만, MAC 을 잘못 적어 '다른 기기'에 붙는 경우도 같은 모습이다.
+                # 후자는 명령이 정상 응답하고 값도 그럴듯해서 알아채기 어렵다.
+                log.warning("[Auto-IP-Resolver] MAC '%s' -> %s (설정된 주소 %s 아님). "
+                            "MAC 이 맞는 장비의 것인지 확인하세요.",
+                            mac_to_find, resolved, address)
+            log.info("[Auto-IP-Resolver] MAC '%s' resolved to %s", mac_to_find, resolved)
             return resolved
 
     # 3. 일반 IPv4 형태면 그대로 통과
@@ -86,7 +96,7 @@ def resolve_address(interface_type: str, address: str, mac_address: str = "") ->
     # 4. 호스트명이면 DNS 조회
     try:
         resolved = socket.gethostbyname(address)
-        print(f"[Auto-IP-Resolver] Hostname '{address}' resolved to IP: {resolved}")
+        log.info("[Auto-IP-Resolver] Hostname '%s' resolved to %s", address, resolved)
         return resolved
     except socket.gaierror:
         pass

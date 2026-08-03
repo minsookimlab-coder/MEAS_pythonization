@@ -2,13 +2,17 @@
 InstrumentRegistry: instruments.yaml 기반 alias → VISA 주소 조회 클래스.
 InstrumentFactory와 달리 실제 연결 없이 설정 조회만 수행합니다.
 """
-import yaml
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
+
+import yaml
 
 from pythonization.config.models import InstrumentConfig
 from pythonization.util.network import resolve_address, build_visa_string
 from pythonization.app.paths import SETTINGS_DIR
+
+log = logging.getLogger(__name__)
 
 
 def _default_settings_path() -> Path:
@@ -25,6 +29,7 @@ class InstrumentRegistry:
         self._path = settings_file or _default_settings_path()
         self._configs: Dict[str, InstrumentConfig] = {}
         self._visa_addr_cache: Dict[str, str] = {}   # alias → VISA 주소 (ARP 결과 캐시)
+        self._logged_warnings: set = set()           # 같은 경고를 매 reload 마다 찍지 않는다
         self._load()
 
     def _load(self):
@@ -44,6 +49,46 @@ class InstrumentRegistry:
                         print(f"[Registry] Skipping invalid entry: {e}")
         except Exception as e:
             print(f"[Registry] Failed to load {self._path}: {e}")
+        for warning in self.config_warnings():
+            # 설정이 그대로면 reload 마다 같은 경고를 반복하지 않는다.
+            if warning in self._logged_warnings:
+                continue
+            self._logged_warnings.add(warning)
+            # print 가 아니라 로깅. 콘솔이 cp949 면 일부 문자에서 UnicodeEncodeError 가
+            # 나고, 그러면 경고 때문에 설정 로드 자체가 죽는다. app.log 는 utf-8 이다.
+            log.warning("[Registry] %s", warning)
+
+    def config_warnings(self) -> List[str]:
+        """설정만 보고 알 수 있는 위험 신호. 연결하지 않고 검사한다.
+
+        **서로 다른 주소인데 MAC 이 같은 경우가 위험하다.** resolve_address 는 MAC 을
+        IP 보다 우선하므로, 이러면 둘 다 같은 기기로 연결된다. 명령은 정상 응답하고
+        값도 그럴듯하게 나오기 때문에 **엉뚱한 기기 값을 한참 기록한 뒤에야** 알아채게
+        된다(실제로 ITC 자리에서 iPS 온도를 읽고 있었다).
+
+        같은 기기에 alias 를 여러 개 붙이는 것(예: MFLI / Zurich)은 정상이므로,
+        주소까지 같으면 경고하지 않는다.
+        """
+        warnings = []
+        by_mac: Dict[str, List[str]] = {}
+        for alias, cfg in self._configs.items():
+            mac = (cfg.mac_address or "").replace(":", "-").upper()
+            if mac:
+                by_mac.setdefault(mac, []).append(alias)
+
+        for mac, aliases in sorted(by_mac.items()):
+            if len(aliases) < 2:
+                continue
+            addresses = {self._configs[a].address for a in aliases}
+            if len(addresses) < 2:
+                continue    # 같은 기기의 별칭 — 정상
+            warnings.append(
+                f"MAC {mac} 이 {', '.join(sorted(aliases))} 에 중복 등록됐는데 "
+                f"주소는 서로 다릅니다({', '.join(sorted(addresses))}). "
+                f"MAC 이 IP 보다 우선하므로 이들이 모두 한 기기로 연결되어 "
+                f"다른 장비 값을 기록하게 됩니다. "
+                f"Instrument Settings 에서 각 장비의 MAC 을 확인하세요.")
+        return warnings
 
     def reload(self):
         """설정 파일을 다시 읽습니다."""

@@ -58,5 +58,50 @@ class TestAnnotationsResolve(unittest.TestCase):
                            "평가된 어노테이션이 너무 적다 — 탐색 범위를 확인할 것")
 
 
+class TestConsoleSafePrints(unittest.TestCase):
+    """print() 로 나가는 문자열이 cp949 콘솔에서 죽지 않는지.
+
+    랩 PC 는 한국어 Windows 라 콘솔 코드페이지가 cp949 다. `pythonization.bat` 은
+    콘솔에서 python main.py 를 돌리므로, print 에 cp949 에 없는 문자(예: em-dash
+    U+2014, U+2713)가 있으면 그 줄에서 UnicodeEncodeError 가 나고 **경고 하나 때문에
+    그 경로 전체가 죽는다**. 실제로 VNA 설정 저장 경로에 그런 print 가 두 개 있었다.
+
+    사용자에게 보여 줄 진단 메시지는 print 대신 logging 을 쓴다 (app.log 는 utf-8).
+    """
+
+    def test_no_print_literal_breaks_cp949(self):
+        import ast
+        from pathlib import Path
+
+        def encodable(ch: str) -> bool:
+            try:
+                ch.encode("cp949")
+                return True
+            except UnicodeEncodeError:
+                return False
+
+        pkg_root = Path(__file__).resolve().parent.parent / "pythonization"
+        problems = []
+        for path in sorted(pkg_root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                is_print = (isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Name)
+                            and node.func.id == "print")
+                if not is_print:
+                    continue
+                for sub in ast.walk(node):
+                    if not (isinstance(sub, ast.Constant) and isinstance(sub.value, str)):
+                        continue
+                    bad = sorted({c for c in sub.value if not encodable(c)})
+                    if bad:
+                        problems.append(
+                            f"{path.relative_to(pkg_root.parent)}:{node.lineno} "
+                            f"{bad} in {sub.value[:40]!r}")
+
+        self.assertEqual(
+            [], problems,
+            "cp949 콘솔에서 UnicodeEncodeError 를 낼 print:\n  " + "\n  ".join(problems))
+
 if __name__ == "__main__":
     unittest.main()

@@ -81,7 +81,7 @@ pythonization/                      (저장소 루트)
 | `profiles/registry.py` | 명명된 프로파일 관리 |
 | `analysis/mfli_merge.py` | LabOne CSV + MFLI `.dat` sweep별 병합. **Qt·numpy 비의존 → CLI 겸용** |
 | `notify/alarm_manager.py` | 사운드·이메일·텔레그램 알람 (데몬 오프로드) |
-| `util/network.py` | LAN·MAC 유틸 (DHCP 대응 IP 추적) |
+| `util/network.py` | LAN·MAC 유틸. **MAC 이 IP 보다 우선**하므로 MAC 을 잘못 적으면 조용히 다른 기기에 붙는다 |
 
 ### `pythonization/ui/` — GUI
 
@@ -317,6 +317,25 @@ Worker Thread: SecondChannelWorker  [double sweep advance 시 활성]
    `_evict_broken`은 `pyvisa.VisaIOError`만 처리하므로 MFLI 오류엔 세션 자동 eviction/재연결이
    걸리지 않는다(설계상 허용). 락 키(`lan|localhost|8004`)가 ITC/M81과 달라 per-point 다중
    alias 병렬 읽기 안전.
+
+### 계측기 주소 해석 — MAC 이 IP 보다 우선한다
+
+`resolve_address()` 는 DHCP 로 IP 가 바뀌어도 장비를 따라가려고 **MAC 을 먼저** 본다.
+그래서 MAC 을 잘못 적으면 설정된 IP 를 무시하고 다른 기기에 연결된다. 이때 명령은
+정상 응답하고 값도 그럴듯해서 **엉뚱한 기기 값을 한참 기록한 뒤에야** 드러난다
+(실제로 ITC/IPS 에 같은 MAC 이 적혀 있어 ITC 자리에서 iPS 온도를 읽고 있었다).
+
+방어 장치 둘:
+- `InstrumentRegistry.config_warnings()` — 주소는 다른데 MAC 이 같은 항목을 로드 시 경고.
+  같은 기기에 alias 를 여럿 붙이는 것(MFLI/Zurich)은 정상이라 경고하지 않는다.
+- `resolve_address()` — 해석 결과가 설정된 주소와 다르면 경고 로그.
+
+### 콘솔 출력은 cp949 를 넘지 않는다
+
+랩 PC 는 한국어 Windows 라 콘솔 코드페이지가 cp949 다. `print` 에 cp949 에 없는
+문자(em-dash `—`, `✓` 등)가 있으면 그 줄에서 `UnicodeEncodeError` 가 나고 **경고 하나
+때문에 그 경로 전체가 죽는다**. 진단 메시지는 `print` 대신 `logging` 을 쓴다
+(`app.log` 는 utf-8). `test_annotations.TestConsoleSafePrints` 가 이를 검사한다.
 
 ### 조건부 import 규칙
 

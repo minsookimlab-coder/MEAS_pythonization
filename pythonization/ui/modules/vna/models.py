@@ -1,6 +1,7 @@
 """
 VNA 공유 데이터 모델 + 설정 IO.
 """
+import logging
 import re
 import yaml
 import numpy as np
@@ -12,6 +13,8 @@ import shutil
 
 from pythonization.config.models import AlarmConfig, SecondSweepAdvanceType
 from pythonization.instruments.parameter import _parse_float
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +252,8 @@ def load_vna_config(path: Path) -> VnaConfigData:
             if text is not None:
                 data = yaml.load(text, Loader=yaml.UnsafeLoader) or {}
                 cfg = VnaConfigData(**data)
-                print(f"[VNA] {path.name}: 구형식(enum 태그) 로드 — 다음 저장 시 정상 형식으로 변환됨")
+                log.info("[VNA] %s: 구형식(enum 태그) 로드. 다음 저장 시 정상 형식으로 변환됨",
+                         path.name)
                 return cfg
         except Exception:
             pass
@@ -286,7 +290,7 @@ def save_vna_config(cfg: VnaConfigData, path: Path):
                     shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
                 except Exception:
                     pass
-                print(f"[VNA] 빈 설정으로 덮어쓰기 거부 — 기존 내용 보존: {path.name}")
+                log.warning("[VNA] 빈 설정으로 덮어쓰기 거부. 기존 내용 보존: %s", path.name)
                 return
         # 직전 버전 백업 + 원자적 저장(임시파일 → 교체)으로 부분쓰기 손상 방지
         if path.exists():
