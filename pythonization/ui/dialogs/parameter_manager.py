@@ -6,6 +6,7 @@ independent table of instantiated entries with Add/Edit/Delete/Copy/Up/Down
 buttons.  An Apply button saves the profile and emits selection_applied.
 """
 import re
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 from PySide6.QtWidgets import (
@@ -78,6 +79,49 @@ def _truncate(s: str, n: int = 60) -> str:
 # ---------------------------------------------------------------------------
 # AddEntryDialog — pick from library, fill placeholders
 # ---------------------------------------------------------------------------
+
+#: sweep 축으로 지정한 placeholder 자리에 넣어 두는 표식.
+#: 프로파일에 이대로 저장되어, 나중에 다시 편집할 때 어느 자리가 축이었는지 복원한다.
+_SWEEP_MARKER = "[SWEEP]"
+
+
+class _ValidationError(Exception):
+    """입력이 유효하지 않다 — _on_ok 가 잡아서 경고 창으로 보여 준다."""
+
+    def __init__(self, message: str, title: str = "Validation"):
+        super().__init__(message)
+        self.title = title
+
+
+@dataclass
+class _EntryMeta:
+    """섹션 종류와 무관하게 공통으로 들어가는 필드."""
+    alias: str
+    description: str
+    figure_axis: str
+    unit: str
+
+
+def _fill_command(template: str, filled: dict, sweep_placeholder: Optional[str]) -> str:
+    """명령 템플릿의 placeholder 를 채운다.
+
+    sweep 축으로 지정한 자리는 `{v}` 로 남긴다 — 측정 중 매 스텝의 값이 여기 들어간다.
+    나머지는 사용자가 입력한 고정값으로 바꾼다.
+    """
+    result = template
+    for name, value in filled.items():
+        replacement = "{v}" if name == sweep_placeholder else value
+        result = result.replace(f"{{{name}}}", replacement)
+    return result
+
+
+def _fill_read_command(template: str, filled: dict) -> str:
+    """읽기 명령에는 sweep 축이 없다 — 모든 placeholder 를 입력값 그대로 채운다."""
+    result = template
+    for name, value in filled.items():
+        result = result.replace(f"{{{name}}}", value)
+    return result
+
 
 class AddEntryDialog(QDialog):
     """
@@ -720,217 +764,195 @@ class AddEntryDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _on_ok(self):
-        alias = self._combo_alias.currentText()
-        desc  = self._le_desc.text().strip()
-        axis  = self._le_axis.text().strip()
-        unit  = self._le_unit.text().strip()
-
-        if not alias:
-            QMessageBox.warning(self, "Validation", "Select an instrument alias.")
+        """입력을 검증해 항목을 만든다. 검증 실패는 예외로 올라와 경고 창이 된다."""
+        try:
+            self._result = self._build_entry()
+        except _ValidationError as err:
+            QMessageBox.warning(self, err.title, str(err))
             return
-        if not desc:
-            QMessageBox.warning(self, "Validation", "Description is required.")
-            return
-
-        idx = self._combo_entry.currentIndex()
-        if idx < 0 or not hasattr(self, '_lib_entries') or idx >= len(self._lib_entries):
-            QMessageBox.warning(self, "Validation", "Select a library entry.")
-            return
-
-        entry = self._lib_entries[idx]
-
-        # Validate and collect placeholder values
-        filled: Dict[str, str] = {}   # ph -> value (or '[SWEEP]' for sweep placeholder)
-        sweep_ph: Optional[str] = None
-
-        for ph, (combo, le) in self._ph_widgets.items():
-            if combo is not None:
-                if combo.currentIndex() == 0:  # [SWEEP]
-                    if sweep_ph is not None:
-                        QMessageBox.warning(
-                            self, "Validation",
-                            "Exactly one placeholder must be [SWEEP]."
-                        )
-                        return
-                    sweep_ph = ph
-                    filled[ph] = '[SWEEP]'
-                else:
-                    val = le.text().strip()
-                    if not val:
-                        QMessageBox.warning(
-                            self, "Validation",
-                            f"Placeholder {{{ph}}} needs a fixed value."
-                        )
-                        return
-                    filled[ph] = val
-            else:
-                val = le.text().strip()
-                if not val:
-                    QMessageBox.warning(
-                        self, "Validation",
-                        f"Placeholder {{{ph}}} needs a value."
-                    )
-                    return
-                filled[ph] = val
-
-        # Section-specific validation & instantiation
-        if self._section_type == 'measurement':
-            if not hasattr(entry, 'cmd_query'):
-                QMessageBox.warning(self, "Validation", "Selected entry is not a measurement.")
-                return
-            try:
-                fixed_filled = {k: v for k, v in filled.items()}
-                resolved = entry.cmd_query.format(**fixed_filled) if fixed_filled else entry.cmd_query
-            except KeyError as e:
-                QMessageBox.warning(self, "Error", f"Placeholder error: {e}")
-                return
-            self._result = InstantiatedMeasurement(
-                alias=alias,
-                description=desc,
-                resolved_cmd=resolved,
-                figure_axis=axis,
-                unit=unit,
-                fill_params=filled,
-            )
-
-        elif self._section_type == 'sweep':
-            if not hasattr(entry, 'cmd_set'):
-                QMessageBox.warning(self, "Validation", "Selected entry is not a paired command.")
-                return
-            if sweep_ph is None:
-                QMessageBox.warning(
-                    self, "Validation",
-                    "Exactly one placeholder in cmd_set must be set to [SWEEP]."
-                )
-                return
-
-            # Build cmd_set: replace sweep_ph with {v}, others with fixed values
-            cmd_set = entry.cmd_set
-            for ph, val in filled.items():
-                if ph == sweep_ph:
-                    cmd_set = cmd_set.replace(f"{{{ph}}}", "{v}")
-                else:
-                    cmd_set = cmd_set.replace(f"{{{ph}}}", val)
-
-            # Build paired_read_cmd: replace all placeholders with fixed values
-            paired_read_cmd = entry.paired_read_cmd
-            for ph, val in filled.items():
-                fixed_val = val if val != '[SWEEP]' else filled.get(ph, val)
-                paired_read_cmd = paired_read_cmd.replace(f"{{{ph}}}", fixed_val)
-
-            safety_on = self._cb_safety.isChecked()
-            self._result = InstantiatedSweepValue(
-                alias=alias,
-                description=desc,
-                cmd_set=cmd_set,
-                paired_read_cmd=paired_read_cmd,
-                figure_axis=axis,
-                unit=unit,
-                fill_params=filled,
-                safety_steps=self._sb_safety_steps.value() if safety_on else 0,
-                safety_interval_ms=self._sb_safety_interval.value() if safety_on else 0.0,
-            )
-
-        elif self._section_type == 'write':
-            if not hasattr(entry, 'cmd_set'):
-                QMessageBox.warning(self, "Validation", "Selected entry is not a write command.")
-                return
-            # For write: sweep_ph is optional (at most one)
-            cmd_set = entry.cmd_set
-            for ph, val in filled.items():
-                if val == '[SWEEP]':
-                    cmd_set = cmd_set.replace(f"{{{ph}}}", "{v}")
-                else:
-                    cmd_set = cmd_set.replace(f"{{{ph}}}", val)
-            self._result = InstantiatedWriteCmd(
-                alias=alias,
-                description=desc,
-                cmd_set=cmd_set,
-                figure_axis=axis,
-                unit=unit,
-                fill_params=filled,
-            )
-
-        else:  # 'second'
-            if sweep_ph is None and self._ph_widgets:
-                QMessageBox.warning(
-                    self, "Validation",
-                    "Exactly one placeholder in cmd_set must be set to [SWEEP]."
-                )
-                return
-
-            source_type = self._current_source_type()
-            at: SecondSweepAdvanceType = self._combo_advance.currentData()
-
-            # Build cmd_set
-            cmd_set = entry.cmd_set if hasattr(entry, 'cmd_set') else ""
-            for ph, val in filled.items():
-                if ph == sweep_ph:
-                    cmd_set = cmd_set.replace(f"{{{ph}}}", "{v}")
-                else:
-                    cmd_set = cmd_set.replace(f"{{{ph}}}", val)
-
-            # paired_read_cmd for sweep_value source
-            paired_read_cmd = ""
-            if source_type == 'sweep_value' and hasattr(entry, 'paired_read_cmd'):
-                paired_read_cmd = entry.paired_read_cmd
-                for ph, val in filled.items():
-                    paired_read_cmd = paired_read_cmd.replace(f"{{{ph}}}", val if val != '[SWEEP]' else val)
-
-            if at == SecondSweepAdvanceType.FEEDBACK:
-                if source_type == "sweep_value":
-                    # Paired read command를 feedback read로 자동 사용
-                    fb_cmd = paired_read_cmd
-                else:
-                    fb_cmd = self._combo_fb_cmd.currentData() or ""
-                if not fb_cmd:
-                    QMessageBox.warning(self, "Validation",
-                        "Feedback read command is required.\n"
-                        "VISA 라이브러리에 measurement 항목을 추가한 후 선택하세요.")
-                    return
-                try:
-                    fb_poll    = float(self._le_fb_poll.text().strip())
-                    fb_tol     = float(self._le_fb_tol.text().strip())
-                    fb_std_win = self._sb_fb_std_window.value()
-                    fb_nf      = float(self._le_fb_noisefloor.text().strip())
-                    fb_std_thr = float(self._le_fb_std_threshold.text().strip())
-                except ValueError:
-                    QMessageBox.warning(self, "Validation", "Feedback parameters must be numbers.")
-                    return
-                self._result = InstantiatedSecondSweepChannel(
-                    alias=alias, description=desc,
-                    source_type=source_type, advance_type=at, cmd_set=cmd_set,
-                    paired_read_cmd=paired_read_cmd,
-                    feedback_read_cmd=fb_cmd,
-                    feedback_poll_interval=fb_poll,
-                    feedback_tolerance_pct=fb_tol,
-                    feedback_std_window=fb_std_win,
-                    feedback_noisefloor=fb_nf,
-                    feedback_std_threshold=fb_std_thr,
-                    figure_axis=axis, unit=unit,
-                )
-            elif at == SecondSweepAdvanceType.WAIT_FOR_TIME:
-                try:
-                    wait_time = float(self._le_wait.text().strip())
-                except ValueError:
-                    QMessageBox.warning(self, "Validation", "Wait time must be a number.")
-                    return
-                self._result = InstantiatedSecondSweepChannel(
-                    alias=alias, description=desc,
-                    source_type=source_type, advance_type=at, cmd_set=cmd_set,
-                    paired_read_cmd=paired_read_cmd,
-                    wait_time=wait_time,
-                    figure_axis=axis, unit=unit,
-                )
-            else:  # SIMPLE_HOP or SWEEP
-                self._result = InstantiatedSecondSweepChannel(
-                    alias=alias, description=desc,
-                    source_type=source_type, advance_type=at, cmd_set=cmd_set,
-                    paired_read_cmd=paired_read_cmd,
-                    figure_axis=axis, unit=unit,
-                )
-
         self.accept()
+
+    def _build_entry(self):
+        """섹션 타입에 맞는 Instantiated* 항목을 만든다.
+
+        검증에 실패하면 _ValidationError 를 던진다 — 실패 지점마다 경고 창을 띄우고
+        return 하던 것을 한 곳(_on_ok)으로 모으기 위함이다.
+        """
+        meta = self._collect_meta()
+        entry = self._selected_library_entry()
+        filled, sweep_placeholder = self._collect_placeholder_values()
+
+        builders = {
+            'measurement': self._build_measurement,
+            'sweep':       self._build_sweep_value,
+            'write':       self._build_write_cmd,
+            'second':      self._build_second_channel,
+        }
+        build = builders[self._section_type]
+        return build(entry, meta, filled, sweep_placeholder)
+
+    # ── 입력 수집 / 검증 ──────────────────────────────────────────────────
+
+    def _collect_meta(self) -> "_EntryMeta":
+        alias = self._combo_alias.currentText()
+        description = self._le_desc.text().strip()
+        if not alias:
+            raise _ValidationError("Select an instrument alias.")
+        if not description:
+            raise _ValidationError("Description is required.")
+        return _EntryMeta(
+            alias=alias,
+            description=description,
+            figure_axis=self._le_axis.text().strip(),
+            unit=self._le_unit.text().strip(),
+        )
+
+    def _selected_library_entry(self):
+        idx = self._combo_entry.currentIndex()
+        entries = getattr(self, '_lib_entries', None)
+        if idx < 0 or entries is None or idx >= len(entries):
+            raise _ValidationError("Select a library entry.")
+        return entries[idx]
+
+    def _collect_placeholder_values(self) -> tuple:
+        """placeholder 입력을 모은다. 반환: ({이름: 값}, sweep 축 이름 또는 None)
+
+        sweep 축으로 지정한 자리는 값 대신 '[SWEEP]' 을 넣어 둔다 — 나중에 다시
+        편집할 때 어느 자리가 축이었는지 복원하기 위해 프로파일에도 이대로 저장된다.
+        """
+        filled: Dict[str, str] = {}
+        sweep_placeholder: Optional[str] = None
+
+        for name, (combo, line_edit) in self._ph_widgets.items():
+            is_sweep = combo is not None and combo.currentIndex() == 0
+            if is_sweep:
+                if sweep_placeholder is not None:
+                    raise _ValidationError("Exactly one placeholder must be [SWEEP].")
+                sweep_placeholder = name
+                filled[name] = _SWEEP_MARKER
+                continue
+
+            value = line_edit.text().strip()
+            if not value:
+                suffix = " a fixed" if combo is not None else " a"
+                raise _ValidationError(
+                    f"Placeholder {{{name}}} needs{suffix} value.")
+            filled[name] = value
+
+        return filled, sweep_placeholder
+
+    # ── 섹션별 생성 ───────────────────────────────────────────────────────
+
+    def _build_measurement(self, entry, meta, filled, sweep_placeholder):
+        if not hasattr(entry, 'cmd_query'):
+            raise _ValidationError("Selected entry is not a measurement.")
+        try:
+            resolved = entry.cmd_query.format(**filled) if filled else entry.cmd_query
+        except KeyError as e:
+            raise _ValidationError(f"Placeholder error: {e}", title="Error")
+        return InstantiatedMeasurement(
+            alias=meta.alias,
+            description=meta.description,
+            resolved_cmd=resolved,
+            figure_axis=meta.figure_axis,
+            unit=meta.unit,
+            fill_params=filled,
+        )
+
+    def _build_sweep_value(self, entry, meta, filled, sweep_placeholder):
+        if not hasattr(entry, 'cmd_set'):
+            raise _ValidationError("Selected entry is not a paired command.")
+        if sweep_placeholder is None:
+            raise _ValidationError(
+                "Exactly one placeholder in cmd_set must be set to [SWEEP].")
+
+        safety_on = self._cb_safety.isChecked()
+        return InstantiatedSweepValue(
+            alias=meta.alias,
+            description=meta.description,
+            cmd_set=_fill_command(entry.cmd_set, filled, sweep_placeholder),
+            paired_read_cmd=_fill_read_command(entry.paired_read_cmd, filled),
+            figure_axis=meta.figure_axis,
+            unit=meta.unit,
+            fill_params=filled,
+            safety_steps=self._sb_safety_steps.value() if safety_on else 0,
+            safety_interval_ms=self._sb_safety_interval.value() if safety_on else 0.0,
+        )
+
+    def _build_write_cmd(self, entry, meta, filled, sweep_placeholder):
+        if not hasattr(entry, 'cmd_set'):
+            raise _ValidationError("Selected entry is not a write command.")
+        # write 는 sweep 축이 없어도 된다 (있으면 최대 하나)
+        return InstantiatedWriteCmd(
+            alias=meta.alias,
+            description=meta.description,
+            cmd_set=_fill_command(entry.cmd_set, filled, sweep_placeholder),
+            figure_axis=meta.figure_axis,
+            unit=meta.unit,
+            fill_params=filled,
+        )
+
+    def _build_second_channel(self, entry, meta, filled, sweep_placeholder):
+        if sweep_placeholder is None and self._ph_widgets:
+            raise _ValidationError(
+                "Exactly one placeholder in cmd_set must be set to [SWEEP].")
+
+        source_type = self._current_source_type()
+        advance_type: SecondSweepAdvanceType = self._combo_advance.currentData()
+
+        cmd_set = _fill_command(getattr(entry, 'cmd_set', ""), filled, sweep_placeholder)
+        paired_read_cmd = ""
+        if source_type == 'sweep_value' and hasattr(entry, 'paired_read_cmd'):
+            paired_read_cmd = _fill_read_command(entry.paired_read_cmd, filled)
+
+        common = dict(
+            alias=meta.alias, description=meta.description,
+            source_type=source_type, advance_type=advance_type,
+            cmd_set=cmd_set, paired_read_cmd=paired_read_cmd,
+            figure_axis=meta.figure_axis, unit=meta.unit,
+        )
+
+        if advance_type == SecondSweepAdvanceType.FEEDBACK:
+            return InstantiatedSecondSweepChannel(
+                **common, **self._collect_feedback_settings(source_type, paired_read_cmd))
+        if advance_type == SecondSweepAdvanceType.WAIT_FOR_TIME:
+            return InstantiatedSecondSweepChannel(
+                **common, wait_time=self._collect_wait_time())
+        # SIMPLE_HOP / SWEEP — 추가 설정 없음
+        return InstantiatedSecondSweepChannel(**common)
+
+    def _collect_feedback_settings(self, source_type: str, paired_read_cmd: str) -> dict:
+        """FEEDBACK advance 에 필요한 값들.
+
+        source 가 sweep value 면 짝꿍 read 명령을 그대로 feedback read 로 쓴다
+        (같은 값을 읽는 명령이므로). write command 면 사용자가 따로 골라야 한다.
+        """
+        if source_type == "sweep_value":
+            read_cmd = paired_read_cmd
+        else:
+            read_cmd = self._combo_fb_cmd.currentData() or ""
+        if not read_cmd:
+            raise _ValidationError(
+                "Feedback read command is required.\n"
+                "VISA 라이브러리에 measurement 항목을 추가한 후 선택하세요.")
+
+        try:
+            return {
+                "feedback_read_cmd":      read_cmd,
+                "feedback_poll_interval": float(self._le_fb_poll.text().strip()),
+                "feedback_tolerance_pct": float(self._le_fb_tol.text().strip()),
+                "feedback_std_window":    self._sb_fb_std_window.value(),
+                "feedback_noisefloor":    float(self._le_fb_noisefloor.text().strip()),
+                "feedback_std_threshold": float(self._le_fb_std_threshold.text().strip()),
+            }
+        except ValueError:
+            raise _ValidationError("Feedback parameters must be numbers.")
+
+    def _collect_wait_time(self) -> float:
+        try:
+            return float(self._le_wait.text().strip())
+        except ValueError:
+            raise _ValidationError("Wait time must be a number.")
 
     def get_result(self):
         return self._result
