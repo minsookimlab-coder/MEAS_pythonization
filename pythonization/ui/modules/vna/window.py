@@ -1269,21 +1269,58 @@ class VnaWindow(QDialog):
         return outer
 
     def _build_acquire_group(self) -> QGroupBox:
-        grp = QGroupBox("Acquire")
-        lay = QVBoxLayout(grp)
-        lay.setSpacing(4)
-        lay.setContentsMargins(8, 10, 8, 8)
+        """측정 실행 패널 — 파일명, 단발 acquire, sweep 설정, double sweep, 실행 버튼."""
+        group = QGroupBox("Acquire")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(4)
+        layout.setContentsMargins(8, 10, 8, 8)
 
-        # Filename
-        fn_row = QHBoxLayout()
-        fn_row.addWidget(QLabel("Filename:"))
-        self._le_filename = QLineEdit(self._cfg.acquire.filename)
-        self._le_filename.setFont(_MONO)
+        layout.addLayout(self._build_filename_row())
+        layout.addWidget(self._build_single_acquire_button())
+        layout.addWidget(self._hline())
+        layout.addLayout(self._build_sweep_cmd_row())
+        layout.addWidget(self._build_sweep_param_row())
+        layout.addWidget(self._build_time_mode_row())
+
+        # Idle / Overrun 표시 (시간 모드 전용)
+        self._lbl_idle = QLabel("Idle: —")
+        self._lbl_idle.setFont(_MONO)
+        self._lbl_idle.setStyleSheet("color: #555;")
+        layout.addWidget(self._lbl_idle)
+
+        self._ds_section = self._build_double_sweep_section()
+        layout.addWidget(self._ds_section)
+        layout.addLayout(self._build_sweep_action_row())
+        layout.addWidget(self._build_resume_button())
+
+        # 파라미터 행 / 시간 행 중 무엇을 보일지는 콤보 선택에 달렸다
+        self._populate_sweep_cmds()
+        self._update_resume_button()
+        return group
+
+    @staticmethod
+    def _hline() -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("color: #30363d;")
+        return line
+
+    def _mono_edit(self, text: str = "", width: int = 0) -> QLineEdit:
+        edit = QLineEdit(text)
+        edit.setFont(_MONO)
+        if width:
+            edit.setFixedWidth(width)
+        return edit
+
+    def _build_filename_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Filename:"))
+        self._le_filename = self._mono_edit(self._cfg.acquire.filename)
         self._le_filename.setPlaceholderText("vna_data")
-        fn_row.addWidget(self._le_filename, stretch=1)
-        lay.addLayout(fn_row)
+        row.addWidget(self._le_filename, stretch=1)
+        return row
 
-        # Single acquire button
+    def _build_single_acquire_button(self) -> QPushButton:
         self._btn_single = QPushButton("▶ Single Acquire")
         self._btn_single.setFixedHeight(26)
         self._btn_single.setStyleSheet(
@@ -1292,97 +1329,76 @@ class VnaWindow(QDialog):
             "QPushButton:disabled{background:#222;color:#555;}"
         )
         self._btn_single.clicked.connect(self._on_single_acquire)
-        lay.addWidget(self._btn_single)
+        return self._btn_single
 
-        # Divider
-        div = QFrame()
-        div.setFrameShape(QFrame.Shape.HLine)
-        div.setStyleSheet("color: #30363d;")
-        lay.addWidget(div)
-
-        # Sweep command selector (first sweep channel)
-        sw_cmd_row = QHBoxLayout()
-        sw_cmd_row.addWidget(QLabel("First sweep ch:"))
+    def _build_sweep_cmd_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addWidget(QLabel("First sweep ch:"))
         self._combo_sweep_cmd = QComboBox()
         self._combo_sweep_cmd.setFont(_MONO)
         self._combo_sweep_cmd.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self._combo_sweep_cmd.currentIndexChanged.connect(
-            self._on_sweep_cmd_changed)
-        sw_cmd_row.addWidget(self._combo_sweep_cmd, stretch=1)
-        lay.addLayout(sw_cmd_row)
+        self._combo_sweep_cmd.currentIndexChanged.connect(self._on_sweep_cmd_changed)
+        row.addWidget(self._combo_sweep_cmd, stretch=1)
+        return row
 
-        # Sweep params (Start / Stop / N) with optional unit combos
-        sw_row = QHBoxLayout()
-        sw_row.setSpacing(4)
+    def _build_sweep_param_row(self) -> QWidget:
+        """Start / Stop / N. 단위 콤보는 선택한 명령에 단위가 있을 때만 나타난다.
 
-        sw_row.addWidget(QLabel("Start:"))
-        self._le_sw_start = QLineEdit(str(self._cfg.acquire.sweep_start))
-        self._le_sw_start.setFont(_MONO)
-        self._le_sw_start.setFixedWidth(60)
-        sw_row.addWidget(self._le_sw_start)
+        '⏱ Time' 을 고르면 이 행 대신 _time_row_widget 이 보인다.
+        """
+        row = QHBoxLayout()
+        row.setSpacing(4)
+
+        self._le_sw_start = self._mono_edit(str(self._cfg.acquire.sweep_start), 60)
         self._cb_sw_start_unit = QComboBox()
         self._cb_sw_start_unit.setFont(_MONO)
         self._cb_sw_start_unit.setFixedWidth(52)
         self._cb_sw_start_unit.setVisible(False)
-        sw_row.addWidget(self._cb_sw_start_unit)
+        row.addWidget(QLabel("Start:"))
+        row.addWidget(self._le_sw_start)
+        row.addWidget(self._cb_sw_start_unit)
 
-        sw_row.addWidget(QLabel("Stop:"))
-        self._le_sw_stop = QLineEdit(str(self._cfg.acquire.sweep_stop))
-        self._le_sw_stop.setFont(_MONO)
-        self._le_sw_stop.setFixedWidth(60)
-        sw_row.addWidget(self._le_sw_stop)
+        self._le_sw_stop = self._mono_edit(str(self._cfg.acquire.sweep_stop), 60)
         self._cb_sw_stop_unit = QComboBox()
         self._cb_sw_stop_unit.setFont(_MONO)
         self._cb_sw_stop_unit.setFixedWidth(52)
         self._cb_sw_stop_unit.setVisible(False)
-        sw_row.addWidget(self._cb_sw_stop_unit)
+        row.addWidget(QLabel("Stop:"))
+        row.addWidget(self._le_sw_stop)
+        row.addWidget(self._cb_sw_stop_unit)
 
-        sw_row.addWidget(QLabel("N:"))
-        self._le_sw_n = QLineEdit(str(self._cfg.acquire.sweep_n))
-        self._le_sw_n.setFont(_MONO)
-        self._le_sw_n.setFixedWidth(44)
-        sw_row.addWidget(self._le_sw_n)
-        sw_row.addStretch()
-        # Start/Stop/N 입력은 파라미터 sweep 선택 시에만 표시 (Time 선택 시 숨김)
+        self._le_sw_n = self._mono_edit(str(self._cfg.acquire.sweep_n), 44)
+        row.addWidget(QLabel("N:"))
+        row.addWidget(self._le_sw_n)
+        row.addStretch()
+
         self._sweep_param_widget = QWidget()
-        self._sweep_param_widget.setLayout(sw_row)
-        lay.addWidget(self._sweep_param_widget)
+        self._sweep_param_widget.setLayout(row)
+        return self._sweep_param_widget
 
-        # 시간 기반 sweep: Sweep 콤보에서 '⏱ Time' 선택 시 사용
-        #   → Interval(초)마다 VNA acquire를 1회씩 Count번 반복
-        time_row = QHBoxLayout()
-        time_row.setSpacing(4)
-        time_row.addWidget(QLabel("Interval:"))
-        self._le_time_interval = QLineEdit(str(self._cfg.acquire.time_interval))
-        self._le_time_interval.setFont(_MONO)
-        self._le_time_interval.setFixedWidth(56)
-        time_row.addWidget(self._le_time_interval)
-        time_row.addWidget(QLabel("s"))
-        time_row.addSpacing(8)
-        time_row.addWidget(QLabel("Count:"))
-        self._le_time_count = QLineEdit(str(self._cfg.acquire.time_count))
-        self._le_time_count.setFont(_MONO)
-        self._le_time_count.setFixedWidth(44)
-        time_row.addWidget(self._le_time_count)
-        time_row.addStretch()
+    def _build_time_mode_row(self) -> QWidget:
+        """시간 기반 sweep — Interval(초)마다 acquire 를 Count 번 반복."""
+        row = QHBoxLayout()
+        row.setSpacing(4)
+
+        self._le_time_interval = self._mono_edit(
+            str(self._cfg.acquire.time_interval), 56)
+        row.addWidget(QLabel("Interval:"))
+        row.addWidget(self._le_time_interval)
+        row.addWidget(QLabel("s"))
+        row.addSpacing(8)
+
+        self._le_time_count = self._mono_edit(str(self._cfg.acquire.time_count), 44)
+        row.addWidget(QLabel("Count:"))
+        row.addWidget(self._le_time_count)
+        row.addStretch()
+
         self._time_row_widget = QWidget()
-        self._time_row_widget.setLayout(time_row)
-        lay.addWidget(self._time_row_widget)
+        self._time_row_widget.setLayout(row)
+        return self._time_row_widget
 
-        # Idle / Overrun 표시 (시간 모드 전용)
-        self._lbl_idle = QLabel("Idle: —")
-        self._lbl_idle.setFont(_MONO)
-        self._lbl_idle.setStyleSheet("color: #555;")
-        lay.addWidget(self._lbl_idle)
-        # 시간 행/파라미터 행의 초기 표시 여부는 _populate_sweep_cmds() →
-        # _on_sweep_cmd_changed()에서 콤보 선택에 따라 결정한다.
-
-        # Double Sweep 섹션 (방향 / second channel / pre-advance 값 / 시간 예상)
-        self._ds_section = self._build_double_sweep_section()
-        lay.addWidget(self._ds_section)
-
-        sweep_row = QHBoxLayout()
+    def _build_sweep_action_row(self) -> QHBoxLayout:
         self._btn_sweep = QPushButton("▶ Sweep Acquire")
         self._btn_sweep.setFixedHeight(26)
         self._btn_sweep.setStyleSheet(
@@ -1391,18 +1407,21 @@ class VnaWindow(QDialog):
             "QPushButton:disabled{background:#222;color:#555;}"
         )
         self._btn_sweep.clicked.connect(self._on_sweep_acquire)
-        sweep_row.addWidget(self._btn_sweep)
 
         self._btn_stop_acq = QPushButton("■ Stop")
         self._btn_stop_acq.setFixedHeight(26)
         self._btn_stop_acq.setMinimumWidth(90)
         self._btn_stop_acq.setEnabled(False)
         self._btn_stop_acq.clicked.connect(self._on_stop_acquire)
-        sweep_row.addWidget(self._btn_stop_acq, stretch=1)
-        sweep_row.addStretch(1)
-        lay.addLayout(sweep_row)
 
-        # Resume (중단된 double sweep을 마지막 second 값부터 재개)
+        row = QHBoxLayout()
+        row.addWidget(self._btn_sweep)
+        row.addWidget(self._btn_stop_acq, stretch=1)
+        row.addStretch(1)
+        return row
+
+    def _build_resume_button(self) -> QPushButton:
+        """중단된 double sweep 을 마지막 second 값부터 재개."""
         self._btn_resume = QPushButton("▶ Resume (중단된 측정 재개)")
         self._btn_resume.setFixedHeight(24)
         self._btn_resume.setStyleSheet(
@@ -1412,198 +1431,244 @@ class VnaWindow(QDialog):
         )
         self._btn_resume.setEnabled(False)
         self._btn_resume.clicked.connect(self._on_resume_clicked)
-        lay.addWidget(self._btn_resume)
-
-        # Populate sweep command combo
-        self._populate_sweep_cmds()
-        self._update_resume_button()
-        return grp
+        return self._btn_resume
 
     # ---- Double Sweep section ----------------------------------------
 
     def _build_double_sweep_section(self) -> QWidget:
-        sec = QFrame()
-        sec.setObjectName("dsSec")
-        sec.setStyleSheet(
+        """2차 축(bias/온도) 루프 설정. 위에서 아래로 진행 순서대로 배치한다."""
+        section = QFrame()
+        section.setObjectName("dsSec")
+        section.setStyleSheet(
             "#dsSec{border:1px solid #30363d;border-radius:4px;background:#0f1117;}")
-        v = QVBoxLayout(sec)
-        v.setContentsMargins(8, 6, 8, 6)
-        v.setSpacing(5)
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(5)
 
-        title_row = QHBoxLayout(); title_row.setSpacing(6)
-        title = QLabel("◆ Double Sweep")
-        title.setStyleSheet("color:#c586c0; font-weight:bold;")
-        title_row.addWidget(title)
-        title_row.addStretch()
-        title_row.addWidget(
-            make_help_button(self._double_sweep_help_html(), "Double Sweep 도움말"))
-        v.addLayout(title_row)
+        layout.addLayout(self._build_ds_title_row())
 
-        # Second sweep channel (가장 위 — bias loop을 먼저 정한다)
+        # Second sweep channel — bias loop 을 먼저 정한다
         self._cb_second_enable = QCheckBox("Second sweep channel 사용")
         self._cb_second_enable.toggled.connect(self._on_second_enable_toggled)
-        v.addWidget(self._cb_second_enable)
+        layout.addWidget(self._cb_second_enable)
+        layout.addWidget(self._build_second_channel_widget())
 
-        self._second_widget = QWidget()
-        sw2 = QVBoxLayout(self._second_widget)
-        sw2.setContentsMargins(14, 0, 0, 0); sw2.setSpacing(4)
-        c2 = QHBoxLayout(); c2.setSpacing(6)
-        c2.addWidget(QLabel("ch:"))
-        self._combo_second_cmd = QComboBox(); self._combo_second_cmd.setFont(_MONO)
-        c2.addWidget(self._combo_second_cmd, 1)
-        sw2.addLayout(c2)
-        r2 = QHBoxLayout(); r2.setSpacing(4)
-        r2.addWidget(QLabel("Start:")); self._le_2_start = QLineEdit("0")
-        self._le_2_start.setFixedWidth(54); self._le_2_start.setFont(_MONO); r2.addWidget(self._le_2_start)
-        r2.addWidget(QLabel("Stop:"));  self._le_2_stop = QLineEdit("1")
-        self._le_2_stop.setFixedWidth(54); self._le_2_stop.setFont(_MONO); r2.addWidget(self._le_2_stop)
-        r2.addWidget(QLabel("N:"));     self._le_2_n = QLineEdit("10")
-        self._le_2_n.setFixedWidth(40); self._le_2_n.setFont(_MONO); r2.addWidget(self._le_2_n)
-        r2.addStretch()
-        for le in (self._le_2_start, self._le_2_stop, self._le_2_n):
-            le.textChanged.connect(self._update_time_estimate)
-        sw2.addLayout(r2)
+        layout.addLayout(self._build_direction_row())
+        layout.addWidget(self._build_pre_advance_widget())
 
-        # Feature 1: second 값 테이블 편집 창 + '커스텀 테이블 유지' 옵션
-        tbl_row = QHBoxLayout(); tbl_row.setSpacing(6)
-        self._btn_second_table = QPushButton("Second 값 테이블…")
-        self._btn_second_table.setToolTip(
-            "Second 채널 값 배열을 표로 편집하는 창을 엽니다.\n"
-            "측정 중에도 아직 측정 안 한(대기) 행은 값 수정·추가·삭제할 수 있습니다.")
-        self._btn_second_table.clicked.connect(self._open_second_table)
-        tbl_row.addWidget(self._btn_second_table)
-        tbl_row.addStretch()
-        sw2.addLayout(tbl_row)
-        self._cb_second_keep_table = QCheckBox("테이블 초기화 안 함 (커스텀 테이블 그대로 측정)")
-        self._cb_second_keep_table.setToolTip(
-            "체크 시 시작할 때 Start/Stop/N으로 테이블을 새로 만들지 않고,\n"
-            "테이블 창에서 직접 넣은 값 목록 그대로 측정합니다.")
-        sw2.addWidget(self._cb_second_keep_table)
-
-        self._second_widget.setVisible(False)
-        v.addWidget(self._second_widget)
-
-        # First sweep 방향
-        dir_row = QHBoxLayout(); dir_row.setSpacing(6)
-        dir_row.addWidget(QLabel("First 방향:"))
-        self._combo_direction = QComboBox()
-        self._combo_direction.addItem("단방향 (시작→끝 고정, dummy 복귀)", "uni")
-        self._combo_direction.addItem("다중방향 (스텝마다 방향 교대)", "multi")
-        self._combo_direction.currentIndexChanged.connect(self._refresh_ds_dynamic)
-        dir_row.addWidget(self._combo_direction, 1)
-        v.addLayout(dir_row)
-
-        # Pre-advance 값 (first=controlled + 단방향 + pre_cmds 있을 때만)
-        self._pre_adv_widget = QWidget()
-        self._pre_adv_lay = QVBoxLayout(self._pre_adv_widget)
-        self._pre_adv_lay.setContentsMargins(0, 0, 0, 0); self._pre_adv_lay.setSpacing(3)
-        self._pre_adv_rows: list = []
-        self._pre_adv_widget.setVisible(False)
-        v.addWidget(self._pre_adv_widget)
-
-        # ── Double Sweep with Time (First 채널 시간 기반 측정) ──
         self._cb_field_time = QCheckBox("Double Sweep with Time (First=자기장 시간측정)")
         self._cb_field_time.setToolTip(
             "First 채널을 N단계가 아니라 '시간 기반'으로 측정합니다.\n"
             "목표로 ramp 시작 → acquire 간격마다 측정 → 상태가 HOLD면 완료.\n"
             "단방향이면 완료 후 controlled로 시작점 복귀·안정화.")
         self._cb_field_time.toggled.connect(self._on_field_time_toggled)
-        v.addWidget(self._cb_field_time)
+        layout.addWidget(self._cb_field_time)
+        layout.addWidget(self._build_field_time_widget())
 
+        self._build_stop_cmd_section(layout)
+        layout.addLayout(self._build_time_estimate_row())
+
+        # first channel N 이 바뀌어도 예상 시간을 다시 계산한다
+        self._le_sw_n.textChanged.connect(self._update_time_estimate)
+        return section
+
+    def _build_ds_title_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        title = QLabel("◆ Double Sweep")
+        title.setStyleSheet("color:#c586c0; font-weight:bold;")
+        row.addWidget(title)
+        row.addStretch()
+        row.addWidget(make_help_button(self._double_sweep_help_html(),
+                                       "Double Sweep 도움말"))
+        return row
+
+    def _build_second_channel_widget(self) -> QWidget:
+        """second 채널 선택 + 값 범위 + 테이블 편집. 체크박스로 접힌다."""
+        self._second_widget = QWidget()
+        layout = QVBoxLayout(self._second_widget)
+        layout.setContentsMargins(14, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self._combo_second_cmd = QComboBox()
+        self._combo_second_cmd.setFont(_MONO)
+        cmd_row = QHBoxLayout()
+        cmd_row.setSpacing(6)
+        cmd_row.addWidget(QLabel("ch:"))
+        cmd_row.addWidget(self._combo_second_cmd, 1)
+        layout.addLayout(cmd_row)
+
+        self._le_2_start = self._mono_edit("0", 54)
+        self._le_2_stop = self._mono_edit("1", 54)
+        self._le_2_n = self._mono_edit("10", 40)
+        range_row = QHBoxLayout()
+        range_row.setSpacing(4)
+        range_row.addWidget(QLabel("Start:"))
+        range_row.addWidget(self._le_2_start)
+        range_row.addWidget(QLabel("Stop:"))
+        range_row.addWidget(self._le_2_stop)
+        range_row.addWidget(QLabel("N:"))
+        range_row.addWidget(self._le_2_n)
+        range_row.addStretch()
+        for field in (self._le_2_start, self._le_2_stop, self._le_2_n):
+            field.textChanged.connect(self._update_time_estimate)
+        layout.addLayout(range_row)
+
+        self._btn_second_table = QPushButton("Second 값 테이블…")
+        self._btn_second_table.setToolTip(
+            "Second 채널 값 배열을 표로 편집하는 창을 엽니다.\n"
+            "측정 중에도 아직 측정 안 한(대기) 행은 값 수정·추가·삭제할 수 있습니다.")
+        self._btn_second_table.clicked.connect(self._open_second_table)
+        table_row = QHBoxLayout()
+        table_row.setSpacing(6)
+        table_row.addWidget(self._btn_second_table)
+        table_row.addStretch()
+        layout.addLayout(table_row)
+
+        self._cb_second_keep_table = QCheckBox(
+            "테이블 초기화 안 함 (커스텀 테이블 그대로 측정)")
+        self._cb_second_keep_table.setToolTip(
+            "체크 시 시작할 때 Start/Stop/N으로 테이블을 새로 만들지 않고,\n"
+            "테이블 창에서 직접 넣은 값 목록 그대로 측정합니다.")
+        layout.addWidget(self._cb_second_keep_table)
+
+        self._second_widget.setVisible(False)
+        return self._second_widget
+
+    def _build_direction_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(QLabel("First 방향:"))
+        self._combo_direction = QComboBox()
+        self._combo_direction.addItem("단방향 (시작→끝 고정, dummy 복귀)", "uni")
+        self._combo_direction.addItem("다중방향 (스텝마다 방향 교대)", "multi")
+        self._combo_direction.currentIndexChanged.connect(self._refresh_ds_dynamic)
+        row.addWidget(self._combo_direction, 1)
+        return row
+
+    def _build_pre_advance_widget(self) -> QWidget:
+        """first=controlled + 단방향 + pre_cmds 가 있을 때만 _refresh_pre_advance 가 채운다."""
+        self._pre_adv_widget = QWidget()
+        self._pre_adv_lay = QVBoxLayout(self._pre_adv_widget)
+        self._pre_adv_lay.setContentsMargins(0, 0, 0, 0)
+        self._pre_adv_lay.setSpacing(3)
+        self._pre_adv_rows: list = []
+        self._pre_adv_widget.setVisible(False)
+        return self._pre_adv_widget
+
+    def _build_field_time_widget(self) -> QWidget:
+        """First 채널을 시간 기반으로 측정할 때의 설정 (ramp 시작 → HOLD 감지)."""
         self._ft_widget = QWidget()
-        ftl = QVBoxLayout(self._ft_widget)
-        ftl.setContentsMargins(14, 0, 0, 0); ftl.setSpacing(4)
-        row_i = QHBoxLayout(); row_i.setSpacing(6)
-        row_i.addWidget(QLabel("acquire 간격(s):"))
-        self._ft_interval = QLineEdit("5"); self._ft_interval.setFixedWidth(46); self._ft_interval.setFont(_MONO)
-        row_i.addWidget(self._ft_interval)
-        row_i.addWidget(QLabel("상태폴링(s):"))
-        self._ft_stat_intv = QLineEdit("2"); self._ft_stat_intv.setFixedWidth(46); self._ft_stat_intv.setFont(_MONO)
-        row_i.addWidget(self._ft_stat_intv); row_i.addStretch()
-        ftl.addLayout(row_i)
-        row_s = QHBoxLayout(); row_s.setSpacing(6)
-        row_s.addWidget(QLabel("상태 읽기 cmd:"))
-        self._ft_status_cmd = QLineEdit("READ:DEV:GRPZ:PSU:ACTN"); self._ft_status_cmd.setFont(_MONO)
+        layout = QVBoxLayout(self._ft_widget)
+        layout.setContentsMargins(14, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self._ft_interval = self._mono_edit("5", 46)
+        self._ft_stat_intv = self._mono_edit("2", 46)
+        interval_row = QHBoxLayout()
+        interval_row.setSpacing(6)
+        interval_row.addWidget(QLabel("acquire 간격(s):"))
+        interval_row.addWidget(self._ft_interval)
+        interval_row.addWidget(QLabel("상태폴링(s):"))
+        interval_row.addWidget(self._ft_stat_intv)
+        interval_row.addStretch()
+        layout.addLayout(interval_row)
+
+        self._ft_status_cmd = self._mono_edit("READ:DEV:GRPZ:PSU:ACTN")
         self._ft_status_cmd.setToolTip(
             "First 채널(자기장) 장비로 보내 HOLD/RTOS 상태를 읽는 명령")
-        row_s.addWidget(self._ft_status_cmd, 1)
-        ftl.addLayout(row_s)
-        row_h = QHBoxLayout(); row_h.setSpacing(6)
-        row_h.addWidget(QLabel("완료(HOLD) 토큰:"))
-        self._ft_hold = QLineEdit("HOLD"); self._ft_hold.setFixedWidth(80); self._ft_hold.setFont(_MONO)
-        self._ft_hold.setToolTip("상태 응답에 이 문자열이 있으면 sweep 완료로 판단 "
-                                 "(예: STAT:DEV:GRPZ:PSU:ACTN:HOLD → 'HOLD')")
-        row_h.addWidget(self._ft_hold); row_h.addStretch()
-        ftl.addLayout(row_h)
-        _ft_fwd_lbl = QLabel("ramp 시작 명령 (선택):")
-        _ft_fwd_lbl.setToolTip(
+        status_row = QHBoxLayout()
+        status_row.setSpacing(6)
+        status_row.addWidget(QLabel("상태 읽기 cmd:"))
+        status_row.addWidget(self._ft_status_cmd, 1)
+        layout.addLayout(status_row)
+
+        self._ft_hold = self._mono_edit("HOLD", 80)
+        self._ft_hold.setToolTip(
+            "상태 응답에 이 문자열이 있으면 sweep 완료로 판단 "
+            "(예: STAT:DEV:GRPZ:PSU:ACTN:HOLD → 'HOLD')")
+        hold_row = QHBoxLayout()
+        hold_row.setSpacing(6)
+        hold_row.addWidget(QLabel("완료(HOLD) 토큰:"))
+        hold_row.addWidget(self._ft_hold)
+        hold_row.addStretch()
+        layout.addLayout(hold_row)
+
+        forward_label = QLabel("ramp 시작 명령 (선택):")
+        forward_label.setToolTip(
             "목표값을 write한 뒤 실제 ramp를 '시작'시키는 트리거 명령.\n"
             "예: Mercury iPS는 목표 설정만으로 안 움직이므로 RTOS(ramp-to-set) 명령이 필요.\n"
             "First 명령 자체가 ramp까지 시작시키는 장비면 비워두세요.")
-        ftl.addWidget(_ft_fwd_lbl)
-        self._ft_fwd_list = QListWidget(); self._ft_fwd_list.setFont(_MONO)
+        layout.addWidget(forward_label)
+        self._ft_fwd_list = QListWidget()
+        self._ft_fwd_list.setFont(_MONO)
         self._ft_fwd_list.setMaximumHeight(56)
-        ftl.addWidget(self._ft_fwd_list)
-        fb = QHBoxLayout()
-        b_add = QPushButton("+ 명령"); b_add.clicked.connect(self._ft_add_cmd)
-        b_del = QPushButton("✕"); b_del.setFixedWidth(26); b_del.clicked.connect(self._ft_del_cmd)
-        fb.addWidget(b_add); fb.addWidget(b_del); fb.addStretch()
-        ftl.addLayout(fb)
+        layout.addWidget(self._ft_fwd_list)
+        layout.addLayout(self._cmd_button_row(self._ft_add_cmd, self._ft_del_cmd))
         self._ft_fwd_cmds: list = []
 
-        # Feature 2: 기다리지 않고 바로 시작 — 첫 실행 시 온도 도달을 기다리지 않고
-        #            '현재 온도에서' 정상 field sweep을 1회 선행한 뒤 T1→T2… 진행.
         self._cb_ft_initial = QCheckBox("기다리지 않고 현재 온도에서 먼저 sweep")
         self._cb_ft_initial.setToolTip(
             "체크 시: 첫 second(온도) 목표 도달을 기다리지 않고, 현재 온도에서 정상 field\n"
             "sweep을 먼저 1회 수행합니다. 그다음 T1 도달→sweep→T2 도달→sweep… 로 이어갑니다.\n"
             "(재개 시에는 적용되지 않습니다.)")
-        ftl.addWidget(self._cb_ft_initial)
+        layout.addWidget(self._cb_ft_initial)
 
-        # Feature 3: dummy(복귀) 램프도 측정 — 시작점 복귀 구간을 별도 폴더에 저장.
         self._cb_dummy_measure = QCheckBox("dummy(복귀) 구간도 측정")
         self._cb_dummy_measure.setToolTip(
             "체크 시: First 채널을 시작점으로 되돌리는 dummy 램프 동안에도 acquire 하여\n"
             "'<second>_dummy' 하위폴더에 저장합니다. (Double Sweep with Time에서 동작)")
-        ftl.addWidget(self._cb_dummy_measure)
+        layout.addWidget(self._cb_dummy_measure)
 
         self._ft_widget.setVisible(False)
-        v.addWidget(self._ft_widget)
+        return self._ft_widget
 
-        # ── Stop 시 실행 명령 (예: 자기장 HOLD로 ramp 정지) ──
-        stop_lbl = QLabel("⏹ Stop 시 실행 명령 (선택):")
-        stop_lbl.setStyleSheet("color:#f78166; font-size:10px;")
-        stop_lbl.setToolTip(
+    @staticmethod
+    def _cmd_button_row(add_slot, del_slot) -> QHBoxLayout:
+        """명령 목록에 딸린 '+ 명령' / '✕' 버튼 한 쌍."""
+        row = QHBoxLayout()
+        btn_add = QPushButton("+ 명령")
+        btn_add.clicked.connect(add_slot)
+        btn_del = QPushButton("✕")
+        btn_del.setFixedWidth(26)
+        btn_del.clicked.connect(del_slot)
+        row.addWidget(btn_add)
+        row.addWidget(btn_del)
+        row.addStretch()
+        return row
+
+    def _build_stop_cmd_section(self, layout: QVBoxLayout) -> None:
+        """Stop(또는 오류 중단) 시 자동 전송할 명령 목록."""
+        label = QLabel("⏹ Stop 시 실행 명령 (선택):")
+        label.setStyleSheet("color:#f78166; font-size:10px;")
+        label.setToolTip(
             "측정 중 Stop(또는 오류 중단) 시 자동 전송할 명령.\n"
             "예: 자기장 ramp를 멈추려면 IPS의 HOLD(SET:DEV:GRPZ:PSU:ACTN:HOLD)를 등록.\n"
             "여러 개 등록 가능하며 위에서 아래 순서로 전송됩니다.")
-        v.addWidget(stop_lbl)
-        self._stop_cmd_list = QListWidget(); self._stop_cmd_list.setFont(_MONO)
+        layout.addWidget(label)
+
+        self._stop_cmd_list = QListWidget()
+        self._stop_cmd_list.setFont(_MONO)
         self._stop_cmd_list.setMaximumHeight(56)
-        v.addWidget(self._stop_cmd_list)
-        sb = QHBoxLayout()
-        sb_add = QPushButton("+ 명령"); sb_add.clicked.connect(self._stop_add_cmd)
-        sb_del = QPushButton("✕"); sb_del.setFixedWidth(26); sb_del.clicked.connect(self._stop_del_cmd)
-        sb.addWidget(sb_add); sb.addWidget(sb_del); sb.addStretch()
-        v.addLayout(sb)
+        layout.addWidget(self._stop_cmd_list)
+        layout.addLayout(self._cmd_button_row(self._stop_add_cmd, self._stop_del_cmd))
         self._stop_cmds: list = []
 
-        # 시간 예상
-        te = QHBoxLayout(); te.setSpacing(6)
-        te.addWidget(QLabel("초/스텝:"))
-        self._le_sec_per_step = QLineEdit("1.0")
-        self._le_sec_per_step.setFixedWidth(54); self._le_sec_per_step.setFont(_MONO)
-        self._le_sec_per_step.setToolTip("1회 acquire 예상 소요(초) — 전체 측정 시간 추정용")
+    def _build_time_estimate_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(QLabel("초/스텝:"))
+
+        self._le_sec_per_step = self._mono_edit("1.0", 54)
+        self._le_sec_per_step.setToolTip(
+            "1회 acquire 예상 소요(초) — 전체 측정 시간 추정용")
         self._le_sec_per_step.textChanged.connect(self._update_time_estimate)
-        te.addWidget(self._le_sec_per_step)
+        row.addWidget(self._le_sec_per_step)
+
         self._lbl_time_est = QLabel("예상: —")
         self._lbl_time_est.setStyleSheet("color:#7ee787;")
-        te.addWidget(self._lbl_time_est, 1)
-        v.addLayout(te)
-
-        # first channel N 변경도 시간 예상에 반영
-        self._le_sw_n.textChanged.connect(self._update_time_estimate)
-        return sec
+        row.addWidget(self._lbl_time_est, 1)
+        return row
 
     def _on_second_enable_toggled(self, checked: bool):
         self._second_widget.setVisible(checked)

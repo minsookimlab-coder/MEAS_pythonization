@@ -396,199 +396,266 @@ class MfliWindow(QDialog):
     # UI
     # ------------------------------------------------------------------
     def _build_ui(self):
+        """좌측 = 설정 세로 나열, 우측 = 라이브 플롯."""
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         root.addWidget(splitter, stretch=1)
 
-        # ── 좌측: 설정 ──
         left = QWidget()
-        lv = QVBoxLayout(left)
-        lv.setContentsMargins(4, 4, 4, 4)
-        lv.setSpacing(8)
+        column = QVBoxLayout(left)
+        column.setContentsMargins(4, 4, 4, 4)
+        column.setSpacing(8)
+        column.addWidget(self._build_mode_group())
+        column.addWidget(self._build_frequency_group())
+        column.addWidget(self._build_mfli_group())
+        column.addWidget(self._build_aux_group())
+        column.addWidget(self._build_save_group())
+        column.addWidget(self._build_merge_group())
+        column.addLayout(self._build_action_row())
 
-        # 측정 방식 (driven vs follow)
-        gb_mode = QGroupBox("측정 방식")
-        mo = QVBoxLayout(gb_mode)
+        self._lbl_status = QLabel("Ready.")
+        self._lbl_status.setWordWrap(True)
+        column.addWidget(self._lbl_status)
+        column.addStretch()
+
+        left.setMaximumWidth(560)
+        splitter.addWidget(left)
+
+        self._panel = PlotPanel(start_color_idx=0, log_toggles=True)
+        splitter.addWidget(self._panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+    # ── _build_ui 가 쓰는 입력 위젯 ──────────────────────────────────────
+
+    @staticmethod
+    def _mono_edit(width: int = 0, tooltip: str = "") -> QLineEdit:
+        """이 창의 입력칸은 전부 고정폭 글꼴 + 선택적 고정 너비."""
+        edit = QLineEdit()
+        edit.setFont(_MONO)
+        if width:
+            edit.setFixedWidth(width)
+        if tooltip:
+            edit.setToolTip(tooltip)
+        return edit
+
+    # ── 구획별 빌더 ───────────────────────────────────────────────────────
+
+    def _build_mode_group(self) -> QGroupBox:
+        """driven(내가 sweep) / follow(LabOne이 sweep, 나는 읽기)."""
+        box = QGroupBox("측정 방식")
+        layout = QVBoxLayout(box)
+
         self._rb_driven = QRadioButton("이 프로그램이 주파수를 직접 sweep")
         self._rb_follow = QRadioButton("LabOne이 sweep하고, 나는 따라 읽기 (time-based)")
         self._rb_follow.setToolTip(
             "LabOne(Sweeper 등)이 주파수를 몰 때, 주파수를 쓰지 않고 일정 간격마다\n"
             "현재 주파수 노드 + noise + 보조값을 읽어 기록합니다.")
+
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self._rb_driven, 0)
         self._mode_group.addButton(self._rb_follow, 1)
         self._rb_driven.setChecked(True)
-        mo.addWidget(self._rb_driven)
-        mo.addWidget(self._rb_follow)
+        layout.addWidget(self._rb_driven)
+        layout.addWidget(self._rb_follow)
         self._mode_group.idToggled.connect(self._on_mode_changed)
-        lv.addWidget(gb_mode)
+        return box
 
-        # Frequency sweep (driven) + follow 폴링 설정
-        gb_freq = QGroupBox("Frequency / Sampling")
-        gf = QVBoxLayout(gb_freq)
-        # driven 행
+    def _build_frequency_group(self) -> QGroupBox:
+        """모드별 행을 둘 다 만들고 _on_mode_changed 가 하나만 보여 준다."""
+        box = QGroupBox("Frequency / Sampling")
+        layout = QVBoxLayout(box)
+        layout.addWidget(self._build_driven_row())
+        layout.addWidget(self._build_follow_row())
+        return box
+
+    def _build_driven_row(self) -> QWidget:
         self._row_driven = QWidget()
-        fl = QHBoxLayout(self._row_driven); fl.setContentsMargins(0, 0, 0, 0)
-        fl.addWidget(QLabel("Start(Hz):"))
-        self._le_start = QLineEdit(); self._le_start.setFont(_MONO); self._le_start.setFixedWidth(90)
-        fl.addWidget(self._le_start)
-        fl.addWidget(QLabel("Stop(Hz):"))
-        self._le_stop = QLineEdit(); self._le_stop.setFont(_MONO); self._le_stop.setFixedWidth(90)
-        fl.addWidget(self._le_stop)
-        fl.addWidget(QLabel("Points:"))
-        self._le_n = QLineEdit(); self._le_n.setFont(_MONO); self._le_n.setFixedWidth(50)
-        fl.addWidget(self._le_n)
-        fl.addStretch()
-        gf.addWidget(self._row_driven)
-        # follow 행
+        row = QHBoxLayout(self._row_driven)
+        row.setContentsMargins(0, 0, 0, 0)
+
+        self._le_start = self._mono_edit(90)
+        self._le_stop = self._mono_edit(90)
+        self._le_n = self._mono_edit(50)
+        row.addWidget(QLabel("Start(Hz):"))
+        row.addWidget(self._le_start)
+        row.addWidget(QLabel("Stop(Hz):"))
+        row.addWidget(self._le_stop)
+        row.addWidget(QLabel("Points:"))
+        row.addWidget(self._le_n)
+        row.addStretch()
+        return self._row_driven
+
+    def _build_follow_row(self) -> QWidget:
         self._row_follow = QWidget()
-        pl = QHBoxLayout(self._row_follow); pl.setContentsMargins(0, 0, 0, 0)
-        pl.addWidget(QLabel("Poll interval(s):"))
-        self._le_poll = QLineEdit(); self._le_poll.setFont(_MONO); self._le_poll.setFixedWidth(60)
-        self._le_poll.setToolTip("주파수 노드를 확인하는 간격(초). 촘촘히(예: 0.1~0.5) 두어\n"
-                                 "LabOne dwell보다 짧게 하면 주파수를 놓치지 않습니다.\n"
-                                 "온도/M81은 매 폴이 아니라 '주파수가 바뀔 때만' 읽습니다.")
-        pl.addWidget(self._le_poll)
-        pl.addWidget(QLabel("Samples(0=until Stop):"))
-        self._le_polln = QLineEdit(); self._le_polln.setFont(_MONO); self._le_polln.setFixedWidth(60)
-        self._le_polln.setToolTip("기록할 데이터 포인트(=서로 다른 주파수) 개수. 0이면 Stop까지.")
-        pl.addWidget(self._le_polln)
-        pl.addStretch()
-        gf.addWidget(self._row_follow)
-        lv.addWidget(gb_freq)
+        row = QHBoxLayout(self._row_follow)
+        row.setContentsMargins(0, 0, 0, 0)
 
-        # MFLI node config
-        gb_mfli = QGroupBox("MFLI")
-        ml = QVBoxLayout(gb_mfli)
-        r1 = QHBoxLayout()
-        r1.addWidget(QLabel("alias:"))
-        self._le_alias = QLineEdit(); self._le_alias.setFont(_MONO); self._le_alias.setFixedWidth(80)
-        r1.addWidget(self._le_alias)
-        r1.addWidget(QLabel("freq node:"))
-        self._le_freq_cmd = QLineEdit(); self._le_freq_cmd.setFont(_MONO)
-        self._le_freq_cmd.setToolTip("주파수 설정 노드 (worker가 ' = {값}'을 덧붙임). {dev}는 device_id로 치환")
-        r1.addWidget(self._le_freq_cmd, stretch=1)
-        ml.addLayout(r1)
-        r2 = QHBoxLayout()
-        r2.addWidget(QLabel("noise node:"))
-        self._le_noise = QLineEdit(); self._le_noise.setFont(_MONO)
-        self._le_noise.setToolTip("LabOne에서 구성한 스칼라 noise/PSD 노드 경로. {dev}는 device_id로 치환")
-        r2.addWidget(self._le_noise, stretch=1)
-        ml.addLayout(r2)
-        r3 = QHBoxLayout()
-        r3.addWidget(QLabel("noise label:"))
-        self._le_noise_label = QLineEdit(); self._le_noise_label.setFont(_MONO); self._le_noise_label.setFixedWidth(100)
-        r3.addWidget(self._le_noise_label)
-        r3.addWidget(QLabel("unit:"))
-        self._le_noise_unit = QLineEdit(); self._le_noise_unit.setFont(_MONO); self._le_noise_unit.setFixedWidth(80)
-        r3.addWidget(self._le_noise_unit)
-        r3.addStretch()
-        ml.addLayout(r3)
-        lv.addWidget(gb_mfli)
+        self._le_poll = self._mono_edit(
+            60,
+            "주파수 노드를 확인하는 간격(초). 촘촘히(예: 0.1~0.5) 두어\n"
+            "LabOne dwell보다 짧게 하면 주파수를 놓치지 않습니다.\n"
+            "온도/M81은 매 폴이 아니라 '주파수가 바뀔 때만' 읽습니다.")
+        self._le_polln = self._mono_edit(
+            60, "기록할 데이터 포인트(=서로 다른 주파수) 개수. 0이면 Stop까지.")
+        row.addWidget(QLabel("Poll interval(s):"))
+        row.addWidget(self._le_poll)
+        row.addWidget(QLabel("Samples(0=until Stop):"))
+        row.addWidget(self._le_polln)
+        row.addStretch()
+        return self._row_follow
 
-        # Aux reads
-        gb_aux = QGroupBox("Aux reads (per frequency point)")
-        al = QVBoxLayout(gb_aux)
+    def _build_mfli_group(self) -> QGroupBox:
+        """MFLI 노드 경로. `{dev}` 는 드라이버가 device_id 로 치환한다."""
+        box = QGroupBox("MFLI")
+        layout = QVBoxLayout(box)
+
+        self._le_alias = self._mono_edit(80)
+        self._le_freq_cmd = self._mono_edit(
+            tooltip="주파수 설정 노드 (worker가 ' = {값}'을 덧붙임). {dev}는 device_id로 치환")
+        alias_row = QHBoxLayout()
+        alias_row.addWidget(QLabel("alias:"))
+        alias_row.addWidget(self._le_alias)
+        alias_row.addWidget(QLabel("freq node:"))
+        alias_row.addWidget(self._le_freq_cmd, stretch=1)
+        layout.addLayout(alias_row)
+
+        self._le_noise = self._mono_edit(
+            tooltip="LabOne에서 구성한 스칼라 noise/PSD 노드 경로. {dev}는 device_id로 치환")
+        noise_row = QHBoxLayout()
+        noise_row.addWidget(QLabel("noise node:"))
+        noise_row.addWidget(self._le_noise, stretch=1)
+        layout.addLayout(noise_row)
+
+        self._le_noise_label = self._mono_edit(100)
+        self._le_noise_unit = self._mono_edit(80)
+        label_row = QHBoxLayout()
+        label_row.addWidget(QLabel("noise label:"))
+        label_row.addWidget(self._le_noise_label)
+        label_row.addWidget(QLabel("unit:"))
+        label_row.addWidget(self._le_noise_unit)
+        label_row.addStretch()
+        layout.addLayout(label_row)
+        return box
+
+    def _build_aux_group(self) -> QGroupBox:
+        """주파수 포인트마다 함께 읽을 보조 계측기 목록."""
+        box = QGroupBox("Aux reads (per frequency point)")
+        layout = QVBoxLayout(box)
+
         self._aux_container = QWidget()
         self._aux_lay = QVBoxLayout(self._aux_container)
         self._aux_lay.setContentsMargins(0, 0, 0, 0)
         self._aux_lay.setSpacing(2)
-        al.addWidget(self._aux_container)
-        ab = QHBoxLayout()
-        btn_aux_add = QPushButton("+ 보조값"); btn_aux_add.clicked.connect(lambda: self._add_aux_row())
-        ab.addWidget(btn_aux_add)
-        ab.addSpacing(12)
-        ab.addWidget(QLabel("명령의 {M} ="))
-        self._le_m = QLineEdit(); self._le_m.setFont(_MONO); self._le_m.setFixedWidth(46)
-        self._le_m.setToolTip("명령어 안의 '{M}' 자리에 넣을 값 (예: M81 sense 모듈 번호).\n"
-                              "전송 직전 치환됩니다. 예: FETCh:SENSe{M}:DC? + M=2 → FETCh:SENSe2:DC?")
-        ab.addWidget(self._le_m)
-        ab.addStretch()
-        al.addLayout(ab)
-        lv.addWidget(gb_aux)
+        layout.addWidget(self._aux_container)
 
-        # Save
-        gb_save = QGroupBox("Save")
-        sl = QVBoxLayout(gb_save)
-        sr1 = QHBoxLayout()
+        btn_add = QPushButton("+ 보조값")
+        btn_add.clicked.connect(lambda: self._add_aux_row())
+        self._le_m = self._mono_edit(
+            46,
+            "명령어 안의 '{M}' 자리에 넣을 값 (예: M81 sense 모듈 번호).\n"
+            "전송 직전 치환됩니다. 예: FETCh:SENSe{M}:DC? + M=2 → FETCh:SENSe2:DC?")
+
+        row = QHBoxLayout()
+        row.addWidget(btn_add)
+        row.addSpacing(12)
+        row.addWidget(QLabel("명령의 {M} ="))
+        row.addWidget(self._le_m)
+        row.addStretch()
+        layout.addLayout(row)
+        return box
+
+    def _build_save_group(self) -> QGroupBox:
+        """한 frequency sweep = .dat 파일 1개."""
+        box = QGroupBox("Save")
+        layout = QVBoxLayout(box)
+
         self._cb_save = QCheckBox("Auto-save (.dat)")
-        sr1.addWidget(self._cb_save); sr1.addStretch()
-        sl.addLayout(sr1)
-        sr2 = QHBoxLayout()
-        sr2.addWidget(QLabel("main:"))
-        self._le_main = QLineEdit(); self._le_main.setFont(_MONO)
-        sr2.addWidget(self._le_main, stretch=1)
-        btn_browse = QPushButton("…"); btn_browse.setFixedWidth(28); btn_browse.clicked.connect(self._browse_main)
-        sr2.addWidget(btn_browse)
-        sl.addLayout(sr2)
-        sr3 = QHBoxLayout()
-        sr3.addWidget(QLabel("sub:"))
-        self._le_sub = QLineEdit(); self._le_sub.setFont(_MONO)
-        sr3.addWidget(self._le_sub, stretch=1)
-        sr3.addWidget(QLabel("file:"))
-        self._le_filename = QLineEdit(); self._le_filename.setFont(_MONO); self._le_filename.setFixedWidth(120)
-        sr3.addWidget(self._le_filename)
-        sl.addLayout(sr3)
-        lv.addWidget(gb_save)
+        enable_row = QHBoxLayout()
+        enable_row.addWidget(self._cb_save)
+        enable_row.addStretch()
+        layout.addLayout(enable_row)
 
-        # Merge with LabOne (pythonization.analysis.mfli_merge) — CSV·dat·저장폴더 선택 후 sweep별 병합
-        gb_merge = QGroupBox("Merge with LabOne sweep (sweep_N_merged_data.dat)")
-        mg = QVBoxLayout(gb_merge)
-        def _path_row(label, browse_slot):
+        self._le_main = self._mono_edit()
+        btn_browse = QPushButton("…")
+        btn_browse.setFixedWidth(28)
+        btn_browse.clicked.connect(self._browse_main)
+        main_row = QHBoxLayout()
+        main_row.addWidget(QLabel("main:"))
+        main_row.addWidget(self._le_main, stretch=1)
+        main_row.addWidget(btn_browse)
+        layout.addLayout(main_row)
+
+        self._le_sub = self._mono_edit()
+        self._le_filename = self._mono_edit(120)
+        sub_row = QHBoxLayout()
+        sub_row.addWidget(QLabel("sub:"))
+        sub_row.addWidget(self._le_sub, stretch=1)
+        sub_row.addWidget(QLabel("file:"))
+        sub_row.addWidget(self._le_filename)
+        layout.addLayout(sub_row)
+        return box
+
+    def _build_merge_group(self) -> QGroupBox:
+        """LabOne sweeper CSV 와 우리 측정을 sweep 단위로 병합 (analysis.mfli_merge)."""
+        box = QGroupBox("Merge with LabOne sweep (sweep_N_merged_data.dat)")
+        layout = QVBoxLayout(box)
+
+        def path_row(label: str, browse_slot) -> QLineEdit:
             row = QHBoxLayout()
             row.addWidget(QLabel(label))
-            le = QLineEdit(); le.setFont(_MONO)
-            row.addWidget(le, stretch=1)
-            b = QPushButton("…"); b.setFixedWidth(28); b.clicked.connect(browse_slot)
-            row.addWidget(b)
-            mg.addLayout(row)
-            return le
-        self._le_merge_csv = _path_row("LabOne CSV:", self._browse_merge_csv)
-        self._le_merge_csv.setToolTip("LabOne sweeper autosave CSV 파일, 또는 그 폴더(자동 탐색)")
-        self._le_merge_dat = _path_row("측정 폴더/.dat:", self._browse_merge_dat)
-        self._le_merge_dat.setToolTip("측정 sweep 폴더(per-sweep test_xNNN.dat 들이 있는 폴더) "
-                                      "또는 단일 .dat. 폴더면 안의 .dat를 각 sweep으로 병합.")
-        self._le_merge_out = _path_row("저장 폴더:", self._browse_merge_out)
-        mrow = QHBoxLayout()
-        self._btn_merge = QPushButton("Merge sweeps")
-        self._btn_merge.setToolTip("두 파일을 sweep별로 분리·대응해 sweep_N_merged_data.dat 저장 "
-                                   "(Noise level 컬럼 추가)")
-        self._btn_merge.clicked.connect(self._run_merge)
-        mrow.addWidget(self._btn_merge); mrow.addStretch()
-        mg.addLayout(mrow)
-        lv.addWidget(gb_merge)
+            edit = self._mono_edit()
+            row.addWidget(edit, stretch=1)
+            btn = QPushButton("…")
+            btn.setFixedWidth(28)
+            btn.clicked.connect(browse_slot)
+            row.addWidget(btn)
+            layout.addLayout(row)
+            return edit
 
-        # Buttons + status
-        bl = QHBoxLayout()
+        self._le_merge_csv = path_row("LabOne CSV:", self._browse_merge_csv)
+        self._le_merge_csv.setToolTip(
+            "LabOne sweeper autosave CSV 파일, 또는 그 폴더(자동 탐색)")
+        self._le_merge_dat = path_row("측정 폴더/.dat:", self._browse_merge_dat)
+        self._le_merge_dat.setToolTip(
+            "측정 sweep 폴더(per-sweep test_xNNN.dat 들이 있는 폴더) "
+            "또는 단일 .dat. 폴더면 안의 .dat를 각 sweep으로 병합.")
+        self._le_merge_out = path_row("저장 폴더:", self._browse_merge_out)
+
+        self._btn_merge = QPushButton("Merge sweeps")
+        self._btn_merge.setToolTip(
+            "두 파일을 sweep별로 분리·대응해 sweep_N_merged_data.dat 저장 "
+            "(Noise level 컬럼 추가)")
+        self._btn_merge.clicked.connect(self._run_merge)
+        merge_row = QHBoxLayout()
+        merge_row.addWidget(self._btn_merge)
+        merge_row.addStretch()
+        layout.addLayout(merge_row)
+        return box
+
+    def _build_action_row(self) -> QHBoxLayout:
         self._btn_start = QPushButton("▶ Start Sweep")
         self._btn_start.setMinimumHeight(34)
         self._btn_start.clicked.connect(self._start_acquire)
+
         self._btn_stop = QPushButton("■ Stop")
         self._btn_stop.setMinimumHeight(34)
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._on_stop_acquire)
+
         self._btn_clear = QPushButton("Clear plot")
         self._btn_clear.setMinimumHeight(34)
-        self._btn_clear.setToolTip("플롯에 표시된 데이터를 즉시 비웁니다(저장된 .dat엔 영향 없음).\n"
-                                   "follow 모드는 새 주파수 sweep 시작 시 자동으로도 비워집니다.")
+        self._btn_clear.setToolTip(
+            "플롯에 표시된 데이터를 즉시 비웁니다(저장된 .dat엔 영향 없음).\n"
+            "follow 모드는 새 주파수 sweep 시작 시 자동으로도 비워집니다.")
         self._btn_clear.clicked.connect(self._clear_plot)
-        bl.addWidget(self._btn_start); bl.addWidget(self._btn_stop); bl.addWidget(self._btn_clear)
-        lv.addLayout(bl)
 
-        self._lbl_status = QLabel("Ready.")
-        self._lbl_status.setWordWrap(True)
-        lv.addWidget(self._lbl_status)
-        lv.addStretch()
-
-        left.setMaximumWidth(560)
-        splitter.addWidget(left)
-
-        # ── 우측: 플롯 ──
-        self._panel = PlotPanel(start_color_idx=0, log_toggles=True)
-        splitter.addWidget(self._panel)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
+        row = QHBoxLayout()
+        row.addWidget(self._btn_start)
+        row.addWidget(self._btn_stop)
+        row.addWidget(self._btn_clear)
+        return row
 
     def _add_aux_row(self, aux: Optional[MfliAuxRead] = None):
         row = _AuxRow(aux if aux is not None else MfliAuxRead(label="aux"))

@@ -160,85 +160,100 @@ class AddEntryDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _build_ui(self):
+        """섹션 타입에 따라 구획을 켜고 끈다.
+
+        sweep   → Safety Ramp 구획
+        second  → Second Sweep Channel 구획 (advance type 별 하위 필드 포함)
+        나머지  → 둘 다 숨김
+        위젯은 항상 모두 만들어 두고 보이기만 조절한다 — 타입이 바뀔 일이 없어서
+        조건부로 만들면 나중에 참조할 때 AttributeError 가 나기 쉽다.
+        """
         outer = QVBoxLayout(self)
         outer.setSpacing(8)
 
-        # ── Alias + Entry selection ───────────────────────────────────
-        sel_form = QFormLayout()
-        sel_form.setHorizontalSpacing(12)
-
-        self._combo_alias = QComboBox()
         aliases = self._lib_reg.list_aliases()
-        for a in aliases:
-            self._combo_alias.addItem(a)
-        sel_form.addRow("Instrument:", self._combo_alias)
+        outer.addLayout(self._build_selection_form(aliases))
+        outer.addWidget(self._hline())
+        outer.addWidget(self._build_command_preview())
+        outer.addWidget(self._build_placeholder_area())
 
-        self._combo_entry = QComboBox()
-        self._combo_entry.setFont(_MONO)
-        sel_form.addRow("Library entry:", self._combo_entry)
-        outer.addLayout(sel_form)
-
-        self._combo_alias.currentTextChanged.connect(self._refresh_entry_combo)
-        self._combo_entry.currentIndexChanged.connect(self._refresh_placeholders)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #30363d;")
-        outer.addWidget(sep)
-
-        # ── Command preview ───────────────────────────────────────────
-        self._lbl_cmd_preview = QLabel("")
-        self._lbl_cmd_preview.setFont(_MONO)
-        self._lbl_cmd_preview.setStyleSheet("color: #888888;")
-        self._lbl_cmd_preview.setWordWrap(True)
-        outer.addWidget(self._lbl_cmd_preview)
-
-        # ── Placeholder section (dynamic) ─────────────────────────────
-        self._ph_widget = QWidget()
-        self._ph_layout = QFormLayout(self._ph_widget)
-        self._ph_layout.setHorizontalSpacing(12)
-        self._ph_layout.setContentsMargins(0, 4, 0, 4)
-        outer.addWidget(self._ph_widget)
-
-        # Sweep note
         if self._section_type in ('sweep', 'second'):
-            note = QLabel("For sweep entries: exactly one placeholder must be set to [SWEEP].")
+            note = QLabel(
+                "For sweep entries: exactly one placeholder must be set to [SWEEP].")
             note.setStyleSheet("color: #79c0ff; font-size: 11px;")
             note.setWordWrap(True)
             outer.addWidget(note)
 
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet("color: #30363d;")
-        outer.addWidget(sep2)
+        outer.addWidget(self._hline())
+        outer.addLayout(self._build_metadata_form())
+        outer.addWidget(self._build_safety_section())
+        outer.addWidget(self._build_second_section())
+        outer.addLayout(self._build_button_row())
 
-        # ── Metadata fields ───────────────────────────────────────────
-        meta_form = QFormLayout()
-        meta_form.setHorizontalSpacing(12)
+        self._connect_signals()
+
+        if aliases:
+            self._refresh_entry_combo(aliases[0])
+            self._refresh_fb_cmd_combo(aliases[0])
+        self._update_advance_visibility(0)
+
+    @staticmethod
+    def _hline() -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("color: #30363d;")
+        return line
+
+    def _build_selection_form(self, aliases) -> QFormLayout:
+        """장비 + 라이브러리 항목 선택."""
+        form = QFormLayout()
+        form.setHorizontalSpacing(12)
+
+        self._combo_alias = QComboBox()
+        for alias in aliases:
+            self._combo_alias.addItem(alias)
+        form.addRow("Instrument:", self._combo_alias)
+
+        self._combo_entry = QComboBox()
+        self._combo_entry.setFont(_MONO)
+        form.addRow("Library entry:", self._combo_entry)
+        return form
+
+    def _build_command_preview(self) -> QLabel:
+        """플레이스홀더를 채운 결과 명령을 미리 보여 준다."""
+        self._lbl_cmd_preview = QLabel("")
+        self._lbl_cmd_preview.setFont(_MONO)
+        self._lbl_cmd_preview.setStyleSheet("color: #888888;")
+        self._lbl_cmd_preview.setWordWrap(True)
+        return self._lbl_cmd_preview
+
+    def _build_placeholder_area(self) -> QWidget:
+        """선택한 명령의 `{이름}` 개수만큼 _refresh_placeholders 가 채우는 빈 영역."""
+        self._ph_widget = QWidget()
+        self._ph_layout = QFormLayout(self._ph_widget)
+        self._ph_layout.setHorizontalSpacing(12)
+        self._ph_layout.setContentsMargins(0, 4, 0, 4)
+        return self._ph_widget
+
+    def _build_metadata_form(self) -> QFormLayout:
+        """설명·그래프 축 이름·단위. 사용자가 직접 고치면 자동 갱신을 멈춘다."""
+        form = QFormLayout()
+        form.setHorizontalSpacing(12)
         self._le_desc = QLineEdit()
         self._le_axis = QLineEdit()
         self._le_unit = QLineEdit()
-        meta_form.addRow("Description:", self._le_desc)
-        meta_form.addRow("Figure Axis:", self._le_axis)
-        meta_form.addRow("Unit:", self._le_unit)
-        outer.addLayout(meta_form)
+        form.addRow("Description:", self._le_desc)
+        form.addRow("Figure Axis:", self._le_axis)
+        form.addRow("Unit:", self._le_unit)
+        return form
 
-        # Detect manual desc edits (suppress auto-update when user types)
-        self._le_desc.textEdited.connect(lambda: setattr(self, '_desc_auto', False))
-
-        # Detect manual axis edits (suppress auto-update when user types)
-        self._le_axis.textEdited.connect(lambda: setattr(self, '_axis_auto', False))
-
-        # ── Safety Ramp (sweep section only) ─────────────────────────
+    def _build_safety_section(self) -> QWidget:
+        """Safety Ramp — 목표값까지 나눠서 천천히 이동 (sweep 섹션 전용)."""
         self._safety_widget = QWidget()
-        safety_vbox = QVBoxLayout(self._safety_widget)
-        safety_vbox.setContentsMargins(0, 0, 0, 0)
-        safety_vbox.setSpacing(4)
-
-        sep_safety = QFrame()
-        sep_safety.setFrameShape(QFrame.Shape.HLine)
-        sep_safety.setStyleSheet("color: #30363d;")
-        safety_vbox.addWidget(sep_safety)
+        layout = QVBoxLayout(self._safety_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self._hline())
 
         self._cb_safety = QCheckBox("Safety Ramp")
         self._cb_safety.setToolTip(
@@ -246,19 +261,20 @@ class AddEntryDialog(QDialog):
             "균등 분할하여 천천히 이동합니다."
         )
         self._cb_safety.setStyleSheet("font-weight: bold; color: #ffa657;")
-        safety_vbox.addWidget(self._cb_safety)
+        layout.addWidget(self._cb_safety)
 
         self._safety_detail = QWidget()
-        safety_form = QFormLayout(self._safety_detail)
-        safety_form.setContentsMargins(12, 0, 0, 0)
-        safety_form.setHorizontalSpacing(12)
-        safety_form.setVerticalSpacing(4)
+        detail = QFormLayout(self._safety_detail)
+        detail.setContentsMargins(12, 0, 0, 0)
+        detail.setHorizontalSpacing(12)
+        detail.setVerticalSpacing(4)
 
         self._sb_safety_steps = QSpinBox()
         self._sb_safety_steps.setRange(1, 10000)
         self._sb_safety_steps.setValue(10)
-        self._sb_safety_steps.setToolTip("목표값까지 나눌 중간 스텝 수 (예: 10 → 10번에 나눠 이동)")
-        safety_form.addRow("Steps:", self._sb_safety_steps)
+        self._sb_safety_steps.setToolTip(
+            "목표값까지 나눌 중간 스텝 수 (예: 10 → 10번에 나눠 이동)")
+        detail.addRow("Steps:", self._sb_safety_steps)
 
         self._sb_safety_interval = QDoubleSpinBox()
         self._sb_safety_interval.setRange(0.0, 60000.0)
@@ -271,67 +287,70 @@ class AddEntryDialog(QDialog):
             "   인터벌 없이 기기 펌웨어 속도로 연속 실행됨\n"
             "> 0 = VISA write 소요 시간을 차감한 실제 settle 대기"
         )
-        safety_form.addRow("Interval:", self._sb_safety_interval)
+        detail.addRow("Interval:", self._sb_safety_interval)
+        layout.addWidget(self._safety_detail)
 
-        safety_vbox.addWidget(self._safety_detail)
-
-        self._cb_safety.toggled.connect(self._safety_detail.setVisible)
-        self._safety_detail.setVisible(False)   # collapsed by default
-
+        self._safety_detail.setVisible(False)   # 체크하기 전까지 접어 둔다
         self._safety_widget.setVisible(self._section_type == 'sweep')
-        outer.addWidget(self._safety_widget)
+        return self._safety_widget
 
-        # ── Second sweep advance type ─────────────────────────────────
+    def _build_second_section(self) -> QWidget:
+        """Second Sweep Channel — advance type 과 그에 딸린 필드들 (second 섹션 전용)."""
         self._second_widget = QWidget()
-        second_layout = QVBoxLayout(self._second_widget)
-        second_layout.setContentsMargins(0, 0, 0, 0)
+        layout = QVBoxLayout(self._second_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._hline())
 
-        sep3 = QFrame()
-        sep3.setFrameShape(QFrame.Shape.HLine)
-        sep3.setStyleSheet("color: #30363d;")
-        second_layout.addWidget(sep3)
-
-        adv_lbl = QLabel("Second Sweep Channel Settings")
-        adv_lbl.setStyleSheet("font-weight: bold; color: #f78166;")
-        second_layout.addWidget(adv_lbl)
-
-        adv_form = QFormLayout()
-        adv_form.setHorizontalSpacing(12)
+        title = QLabel("Second Sweep Channel Settings")
+        title.setStyleSheet("font-weight: bold; color: #f78166;")
+        layout.addWidget(title)
 
         # Source Type(sweep value / write command)은 선택한 라이브러리 명령의 종류로
         # 자동 판별하므로 별도 선택 UI를 두지 않는다. (_current_source_type 참고)
+        form = QFormLayout()
+        form.setHorizontalSpacing(12)
         self._combo_advance = QComboBox()
-        for at, lbl in _ADVANCE_LABELS.items():
-            self._combo_advance.addItem(lbl, at)
-        _adv_row = QHBoxLayout()
-        _adv_row.setContentsMargins(0, 0, 0, 0)
-        _adv_row.addWidget(self._combo_advance, stretch=1)
-        _adv_row.addWidget(make_help_button(self._advance_help_html(), "Advance Type 도움말"))
-        _adv_cnt = QWidget(); _adv_cnt.setLayout(_adv_row)
-        adv_form.addRow("Advance Type:", _adv_cnt)
-        second_layout.addLayout(adv_form)
+        for advance_type, label in _ADVANCE_LABELS.items():
+            self._combo_advance.addItem(label, advance_type)
 
-        # FEEDBACK fields
+        advance_row = QHBoxLayout()
+        advance_row.setContentsMargins(0, 0, 0, 0)
+        advance_row.addWidget(self._combo_advance, stretch=1)
+        advance_row.addWidget(make_help_button(self._advance_help_html(),
+                                               "Advance Type 도움말"))
+        advance_container = QWidget()
+        advance_container.setLayout(advance_row)
+        form.addRow("Advance Type:", advance_container)
+        layout.addLayout(form)
+
+        layout.addWidget(self._build_feedback_fields())
+        layout.addWidget(self._build_wait_fields())
+
+        self._second_widget.setVisible(self._section_type == 'second')
+        return self._second_widget
+
+    def _build_feedback_fields(self) -> QWidget:
+        """FEEDBACK advance type 전용 필드.
+
+        판정이 2단계다: Tolerance 로 목표 도달을 보고, 그 뒤 Std Window 로 안정화를 본다.
+        """
         self._fb_widget = QWidget()
-        fb_form = QFormLayout(self._fb_widget)
-        fb_form.setContentsMargins(0, 0, 0, 0)
+        form = QFormLayout(self._fb_widget)
+        form.setContentsMargins(0, 0, 0, 0)
+
         self._combo_fb_cmd = QComboBox()
         self._combo_fb_cmd.setFont(_MONO)
         self._combo_fb_cmd.setMinimumWidth(200)
         self._le_fb_poll = QLineEdit("1.0")
-        self._le_fb_tol  = QLineEdit("95.0")
-        fb_form.addRow("Feedback Read Cmd:", self._combo_fb_cmd)
-        fb_form.addRow("Poll Interval (s):",  self._le_fb_poll)
-        fb_form.addRow("Tolerance (%):",      self._le_fb_tol)
+        self._le_fb_tol = QLineEdit("95.0")
+        form.addRow("Feedback Read Cmd:", self._combo_fb_cmd)
+        form.addRow("Poll Interval (s):", self._le_fb_poll)
+        form.addRow("Tolerance (%):", self._le_fb_tol)
 
-        # Stability check (std dev) — phase 2 after threshold reached
-        fb_sep = QFrame()
-        fb_sep.setFrameShape(QFrame.Shape.HLine)
-        fb_sep.setStyleSheet("color: #30363d;")
-        fb_form.addRow(fb_sep)
-        fb_stab_lbl = QLabel("Stability Check (after threshold):")
-        fb_stab_lbl.setStyleSheet("color: #79c0ff; font-size: 11px;")
-        fb_form.addRow(fb_stab_lbl)
+        form.addRow(self._hline())
+        stability_label = QLabel("Stability Check (after threshold):")
+        stability_label.setStyleSheet("color: #79c0ff; font-size: 11px;")
+        form.addRow(stability_label)
 
         self._sb_fb_std_window = QSpinBox()
         self._sb_fb_std_window.setRange(0, 1000)
@@ -352,51 +371,50 @@ class AddEntryDialog(QDialog):
             "무차원 안정성 기준 (예: 0.01 = 1%).\n"
             "metric = SD / (max(|mean|, |next_v|) + noisefloor) < 이 값이면 안정 판정."
         )
-        fb_form.addRow("Std Window (n):",       self._sb_fb_std_window)
-        fb_form.addRow("Noise Floor:",           self._le_fb_noisefloor)
-        fb_form.addRow("Stability Threshold:",   self._le_fb_std_threshold)
+        form.addRow("Std Window (n):", self._sb_fb_std_window)
+        form.addRow("Noise Floor:", self._le_fb_noisefloor)
+        form.addRow("Stability Threshold:", self._le_fb_std_threshold)
+        return self._fb_widget
 
-        second_layout.addWidget(self._fb_widget)
-
-        # WAIT_FOR_TIME fields
+    def _build_wait_fields(self) -> QWidget:
+        """WAIT_FOR_TIME advance type 전용 필드."""
         self._wait_widget = QWidget()
-        wait_form = QFormLayout(self._wait_widget)
-        wait_form.setContentsMargins(0, 0, 0, 0)
+        form = QFormLayout(self._wait_widget)
+        form.setContentsMargins(0, 0, 0, 0)
         self._le_wait = QLineEdit("1.0")
-        wait_form.addRow("Wait Time (s):", self._le_wait)
-        second_layout.addWidget(self._wait_widget)
+        form.addRow("Wait Time (s):", self._le_wait)
+        return self._wait_widget
 
-        outer.addWidget(self._second_widget)
+    def _build_button_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addStretch()
 
-        self._combo_advance.currentIndexChanged.connect(self._update_advance_visibility)
-        # 선택한 명령이 바뀌면 (sweep value/write command) advance 옵션 자동 갱신
-        self._combo_entry.currentIndexChanged.connect(self._update_advance_options)
-        self._second_widget.setVisible(self._section_type == 'second')
-
-        # Feedback cmd combobox: refresh when alias changes
-        self._combo_alias.currentTextChanged.connect(self._refresh_fb_cmd_combo)
-
-        # ── OK / Cancel ───────────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
         btn_cancel = QPushButton("Cancel")
         btn_cancel.clicked.connect(self.reject)
         btn_cancel.setAutoDefault(False)
+        row.addWidget(btn_cancel)
+
         btn_ok = QPushButton("OK")
         btn_ok.setStyleSheet(
             "background-color: #2e7d32; color: white; font-weight: bold; padding: 4px 16px;"
         )
         btn_ok.clicked.connect(self._on_ok)
-        btn_ok.setDefault(True)   # Enter 키로 OK 활성화
-        btn_row.addWidget(btn_cancel)
-        btn_row.addWidget(btn_ok)
-        outer.addLayout(btn_row)
+        btn_ok.setDefault(True)   # Enter 키로 OK
+        row.addWidget(btn_ok)
+        return row
 
-        # Initial population
-        if aliases:
-            self._refresh_entry_combo(aliases[0])
-            self._refresh_fb_cmd_combo(aliases[0])
-        self._update_advance_visibility(0)
+    def _connect_signals(self):
+        """위젯이 모두 만들어진 뒤 한곳에서 연결한다."""
+        self._combo_alias.currentTextChanged.connect(self._refresh_entry_combo)
+        self._combo_alias.currentTextChanged.connect(self._refresh_fb_cmd_combo)
+        self._combo_entry.currentIndexChanged.connect(self._refresh_placeholders)
+        # 선택한 명령 종류(sweep value / write command)에 따라 advance 옵션이 달라진다
+        self._combo_entry.currentIndexChanged.connect(self._update_advance_options)
+        self._combo_advance.currentIndexChanged.connect(self._update_advance_visibility)
+        self._cb_safety.toggled.connect(self._safety_detail.setVisible)
+        # 사용자가 직접 고치면 자동 채움을 멈춘다
+        self._le_desc.textEdited.connect(lambda: setattr(self, '_desc_auto', False))
+        self._le_axis.textEdited.connect(lambda: setattr(self, '_axis_auto', False))
 
     def _refresh_fb_cmd_combo(self, alias: str = ""):
         """Feedback read cmd 콤보박스를 선택된 alias의 measurement 목록으로 갱신."""
