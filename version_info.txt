@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(1, 8, 0, 0),
+    prodvers=(1, 8, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -15,13 +15,13 @@ VSVersionInfo(
       StringTable(
         u'040904B0',
         [StringStruct(u'CompanyName', u''),
-         StringStruct(u'FileDescription', u'Pythonization'),
-         StringStruct(u'FileVersion', u'1.0.0.0'),
+         StringStruct(u'FileDescription', u'Pythonization - 계측 자동화'),
+         StringStruct(u'FileVersion', u'1.8.0.0'),
          StringStruct(u'InternalName', u'Pythonization'),
          StringStruct(u'LegalCopyright', u''),
          StringStruct(u'OriginalFilename', u'Pythonization.exe'),
          StringStruct(u'ProductName', u'Pythonization'),
-         StringStruct(u'ProductVersion', u'1.0.0.0')])
+         StringStruct(u'ProductVersion', u'1.8.0.0')])
     ]),
     VarFileInfo([VarStruct(u'Translation', [0x0409, 1200])])
   ]

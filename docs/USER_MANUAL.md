@@ -59,7 +59,7 @@ python main.py
 | 항목 | 설명 |
 |------|------|
 | **Alias** | 장비를 식별하는 고유 이름 (예: `2636A`, `ITC`) |
-| **Device Type (Driver)** | 장비 드라이버 클래스 (`driver/` 폴더에서 자동 검색됨) |
+| **Device Type (Driver)** | 장비 드라이버 클래스 (`instruments/drivers/` 폴더에서 자동 검색됨) |
 | **Interface Type** | 연결 방식: `LAN` / `GPIB` / `RS232` / `USB` |
 | **Address** | IP 주소, GPIB 번호, COM 포트, USB 리소스 문자열 |
 | **MAC Address** | LAN 장비에서 DHCP 고정용 MAC 주소 (선택). **Fetch MAC** 버튼으로 자동 입력 |
@@ -83,7 +83,8 @@ python main.py
 
 ### 2.5 저장
 
-**Save & Apply** 버튼을 누르면 `settings/instruments.yaml`에 저장되고 즉시 시스템에 반영됩니다.
+**Save & Apply** 버튼을 누르면 설정 폴더의 `instruments.yaml`에 저장되고 즉시 시스템에 반영됩니다.
+(정확한 경로는 [부록 B](#부록-b--설정-파일-위치) 참고.)
 
 ---
 
@@ -591,18 +592,28 @@ RETRACE 완료 후 측정값이 조건을 충족하면 알람을 발생시킵니
 
 ## 부록 A — 드라이버 목록
 
+모두 `pythonization/instruments/drivers/` 안에 있으며, 모듈 이름은 `vendor_model.py`
+규칙을 따릅니다.
+
 | 드라이버 | 클래스 | 적합 장비 |
 |----------|--------|-----------|
-| `driver/keithley_2636a.py` | `Keithley2636A` | Keithley 2636A SourceMeter |
-| `driver/generic_scpi.py` | `GenericSCPIInstrument` | SCPI 표준 장비 전반 (ITC, IPS, E5071 등) |
-| `driver/m81.py` | `M81Instrument` | M81, VNA, SR830, SIGGEN 등 LAN 장비 |
-| `driver/oxford_itc.py` | `OxfordITC` | Oxford Instruments ITC (비표준 CR 종단) |
-| `driver/dummy_instrument.py` | `DummyInstrument` | 하드웨어 없이 테스트용 |
+| `keithley_2636a.py` | `Keithley2636A` | Keithley 2636A SourceMeter |
+| `generic_scpi.py` | `GenericSCPIInstrument` | SCPI 표준 장비 전반 (ITC, IPS, E5071 등) |
+| `lakeshore_m81.py` | `M81Instrument` | M81, VNA, SIGGEN 등 LAN Raw Socket 장비 |
+| `oxford_itc.py` | `OxfordITC` | Oxford Instruments ITC (비표준 CR 종단) |
+| `oxford_ips.py` | `OxfordIPS` | Oxford Instruments IPS 마그넷 전원 |
+| `srs_sr830.py` | `SR830` | SRS SR830 lock-in |
+| `zurich_mfli.py` | `ZurichMFLI` | Zurich MFLI (LabOne Data Server 경유, 非VISA) |
+| `dummy.py` | `DummyInstrument` | 하드웨어 없이 테스트용 |
+
+> 이전 버전에서 등록한 장비는 설정 파일에 옛 경로(`driver.m81.M81Instrument` 등)가
+> 저장돼 있지만 그대로 동작합니다. Instrument Settings 에서 한 번 저장하면 새 경로로
+> 갱신됩니다.
 
 ### 커스텀 드라이버 추가
 
-1. `driver/` 폴더에 `.py` 파일 생성
-2. `from core.instrument_base import BaseInstrument` 임포트
+1. `pythonization/instruments/drivers/` 에 `vendor_model.py` 생성
+2. `from pythonization.instruments.base import BaseInstrument` 임포트
 3. `BaseInstrument` 상속 클래스 작성
 4. Instrument Settings에서 드라이버 드롭다운에 자동으로 표시됨
 
@@ -610,13 +621,22 @@ RETRACE 완료 후 측정값이 조건을 충족하면 알람을 발생시킵니
 
 ## 부록 B — 설정 파일 위치
 
+기본 폴더는 `%USERPROFILE%\Documents\pythonization\settings\` 이며,
+**Settings → Config** 의 `data_dir` 로 바꿀 수 있습니다(재시작 후 적용).
+
 | 파일 | 내용 |
 |------|------|
-| `settings/instruments.yaml` | 등록된 장비 목록 및 연결 설정 |
-| `settings/visa_libraries.yaml` | VISA 라이브러리 (측정/Sweep/Write 명령) |
-| `settings/profiles/` | 측정 프로파일 (Parameter Manager 설정) |
-| `settings/profiles/double_sweep.yaml` | Double Sweep 파라미터 |
-| `settings/meta_data_config.yaml` | Meta Data 설정 |
+| `logs/app.log` | 실행 로그 + 오류 트레이스백 — **문제 신고 시 이 파일** |
+| `logs/fault.log` | 프로그램이 갑자기 사라졌을 때의 크래시 덤프 |
+| `instruments.yaml` | 등록된 장비 목록 및 연결 설정 |
+| `visa_libraries.yaml` | VISA 라이브러리 (측정/Sweep/Write 명령) |
+| `profiles/` | 측정 프로파일 (Parameter Manager 설정) |
+| `profiles/double_sweep.yaml` | Double Sweep 파라미터 |
+| `meta_data_config.yaml` | Meta Data 설정 |
+| `resume_points.json` | 중단된 측정의 재개 지점 |
+
+프로그램 폴더의 `app_config.yaml` 에는 측정 임계값·병렬 측정 여부와 알람 전송 수단
+(SMTP·텔레그램)이 들어갑니다. **비밀번호와 토큰이 담기므로 남에게 그대로 보내지 마세요.**
 
 ---
 

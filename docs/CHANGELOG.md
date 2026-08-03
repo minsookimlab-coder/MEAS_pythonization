@@ -1,4 +1,103 @@
-# Patch Notes
+# Changelog
+
+> 이 파일은 이전에 저장소 루트의 `PATCH_NOTES.md` 였습니다.
+
+---
+
+## v1.8.0 — 2026-08-03 (구조 개편)
+
+기능 변경은 없습니다. 디렉토리 구조·코드 정리와 그 과정에서 드러난 버그 수정입니다.
+**기존 설정 파일과 프로파일은 그대로 쓸 수 있습니다.**
+
+### ■ 사용자가 체감하는 변화
+
+- **없음** — 창 구성, 조작, 저장 형식, 프로파일 모두 그대로입니다.
+- 예외적으로 **패키징된 exe 에서 이메일·텔레그램 알람이 동작하게 됐습니다**(아래 버그 수정).
+- 기존 `instruments.yaml` 의 드라이버 경로는 자동으로 새 경로로 해석됩니다.
+  Instrument Settings 에서 한 번 저장하면 파일 내용도 갱신됩니다.
+
+### ■ 디렉토리 구조
+
+`core/` `gui/` `driver/` `config/` 4개 평면 패키지에 62개 파일이 성격 구분 없이
+섞여 있어 어떤 기능이 어느 파일인지 예측할 수 없었습니다. 단일 패키지
+`pythonization/` 아래 도메인별로 나눴습니다.
+
+```
+app/  config/  instruments/(+drivers/)  measurement/
+profiles/  analysis/  notify/  util/
+ui/(main_window + widgets/ dialogs/ panels/ modules/ assets/)
+```
+
+드라이버 모듈명을 `vendor_model.py` 로 통일했습니다.
+`m81` → `lakeshore_m81`, `sr830` → `srs_sr830`, `mfli` → `zurich_mfli`,
+`dummy_instrument` → `dummy`.
+
+진입점도 정리했습니다. `main.py` 는 얇은 셸이고 실제 기동 순서는
+`app/bootstrap.py` 에 있습니다. `python -m pythonization` 으로도 실행됩니다.
+
+### ■ 버그 수정
+
+- **[치명] 패키징된 exe 에서 이메일·텔레그램 알람이 죽던 문제** — `build_exe.spec` 의
+  `excludes` 에 `email` / `urllib` / `http` 가 들어 있었는데 `alarm_manager` 가
+  `smtplib`·`email.mime`·`urllib.request` 를 씁니다. 소스 실행에서는 멀쩡하고 exe
+  에서만 ImportError 로 실패해 알아채기 어려웠습니다.
+- **[치명] exe 빌드가 아예 실패하던 상태** — `build_exe.spec` 의 `datas` 가 존재하지
+  않는 `settings` 폴더를 가리키고 있었습니다. GUI 자산 폴더로 교체했습니다.
+- **VNA 플롯에서 y 소스를 바꾸면 TypeError** — `currentIndexChanged(int)` 를 인자
+  없는 시그널의 `emit` 에 직접 연결했습니다. MFLI 쪽 복사본에는 고쳐져 있었는데
+  VNA 쪽만 남아 있었습니다(복붙이 갈라진 전형적인 사례).
+- **드라이버 초기화 오류가 엉뚱한 메시지로 둔갑** — `InstrumentFactory` 의 `try` 범위가
+  인스턴스 생성까지 덮고 있어, 드라이버 `__init__` 이 던진 `ValueError` 가
+  "class_name 형식 오류"로 보고됐습니다.
+- **의존성 명세에 `zhinst`·`scipy` 누락** — `.bat` 이 설치하던 하드코딩 목록에
+  MFLI 측정용 `zhinst` 와 미분 채널용 `scipy` 가 빠져 있었습니다. 둘 다 선택
+  의존성으로 `requirements-optional.txt` 에 명시했습니다.
+
+### ■ 코드 정리
+
+- **중복 제거** — VNA 창과 MFLI 창이 플롯 패널 코드를 각각 ~325줄씩 복사해 갖고
+  있었습니다(diff 149줄). `ui/widgets/plot_panel.py` 하나로 합치고 두 창의 차이는
+  생성자 플래그(`square_hint`, `log_toggles`)로 남겼습니다.
+- **함수 내부 import 정리** — 166곳이 함수 안에 숨어 있었습니다. 의존 그래프로
+  확인해 보니 순환 참조 때문인 것은 하나도 없어 대부분 모듈 상단으로 옮겼습니다.
+  선택 의존성·플랫폼 분기·부트스트랩의 의도적 지연만 남겼습니다.
+- **거대 함수 분해** — `DoubleSweepWindow._build_ui` 513→44줄,
+  `MainWindow._build_sequence_panel` 328→14줄, `MainWindow._on_step_done` 200→40줄.
+  100줄 넘는 함수 21→18개.
+- 미사용 import 18건 제거, 중복 로컬 import 16건 제거.
+- `resume_log` 가 재노출하던 `is_comm_error` 제거 — 같은 함수가 두 경로로 보였습니다.
+
+### ■ 저장소 위생
+
+- **`.gitignore` 신규** (없었습니다). `dist/` 950개(exe·Qt DLL 포함), `build/` 16개,
+  `.pyc` 57개가 추적되고 있었습니다. 추적 파일 1084 → 71개.
+- **`app_config.yaml` 추적 해제** — SMTP 비밀번호와 텔레그램 봇 토큰이 담기는
+  파일입니다. `app_config.example.yaml` 템플릿을 대신 뒀습니다.
+- 루트 임시 파일 정리 (`_diff_vna.txt` 94KB, `memo.txt`).
+- 의존성 명세 신규: `requirements.txt` / `requirements-optional.txt` / `pyproject.toml`.
+
+### ■ 테스트 (기존 0개 → 120개)
+
+표준 라이브러리 `unittest` 만 써서 추가 설치 없이 어느 랩 PC에서도 돌아갑니다.
+
+```
+python -m unittest discover -s tests -t .
+```
+
+구조 변경 회귀를 잡는 축이 셋입니다: 전 모듈 import, 소스의 모든 import 문 정적
+검사(ast — 함수 내부 포함), 메뉴가 여는 창 10개 실제 생성. 실제로 이 중 창 생성
+검사가 리팩터링 도중 발생한 회귀(MainWindow 의 `ResumeLog` import 유실)를 잡았습니다.
+나머지는 sweep 진행 규칙, 스텝 기록(값/nan/ERR), `.dat` 저장, 응답 파싱, 통신 오류
+판정, 미분 채널, LabOne 병합, 공용 플롯 패널의 계약을 고정합니다.
+
+### ■ 문서
+
+- `README.md` 신규 — 실행 방법, 무엇이 어디 있는지, 로그·설정 파일 위치, 테스트 목록.
+- `STRUCTURE.md` / `USER_MANUAL.md` / `PATCH_NOTES.md` 를 `docs/` 로 이동.
+  `PATCH_NOTES.md` → `CHANGELOG.md` 로 이름 변경.
+- `STRUCTURE.md` 재작성 — 기존 문서는 이미 낡아서 `resume_log`, `command_window`,
+  `meta_data_window`, `profile_launch_dialog`, `resume_dialog`, `oxford_ips`,
+  `sr830`, `app_config` 등 8개 파일이 빠져 있었습니다.
 
 ---
 
