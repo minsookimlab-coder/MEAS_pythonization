@@ -1,8 +1,11 @@
 """
 AlarmManager: Double Sweep 알람 발생 시 사운드 재생 및 이메일 전송.
 """
+import ssl
 import threading
-from typing import Dict, List, Optional, TYPE_CHECKING  # noqa: F401
+from typing import Dict, List, Optional, TYPE_CHECKING
+
+from pythonization.config.models import AlarmOperator
 
 if TYPE_CHECKING:
     from pythonization.config.models import AlarmConfig, AlarmTrigger
@@ -36,7 +39,6 @@ class AlarmManager:
         활성화된 measurement 트리거를 평가해 발동된 조건 설명 목록 반환.
         meas_values: {description: value}
         """
-        from pythonization.config.models import AlarmOperator
         fired = []
         _ops = {
             AlarmOperator.GT:  lambda v, t: v > t,
@@ -126,7 +128,6 @@ class AlarmManager:
     def _tg_ssl_ctx():
         # 검증된 TLS 컨텍스트. (예전엔 CERT_NONE+check_hostname=False로 인증서 검증을
         # 꺼서 봇 토큰이 MITM에 노출됐다. api.telegram.org는 공인 CA 인증서라 검증이 정상.)
-        import ssl
         return ssl.create_default_context()
 
     def _send_telegram(self, token: str, chat_id: str, reason: str) -> None:

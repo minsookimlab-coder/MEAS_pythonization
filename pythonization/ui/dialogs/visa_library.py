@@ -1,18 +1,33 @@
 from typing import List, Optional, Tuple, Union
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
-    QLabel, QLineEdit, QPushButton, QComboBox,
-    QTableWidget, QTableWidgetItem, QHeaderView,
-    QMessageBox, QInputDialog, QFrame
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QComboBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QMessageBox,
+    QInputDialog,
 )
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QKeySequence, QShortcut
 
-from pythonization.config.models import MeasurementParamDef, SweepValueDef, WriteCmdDef, InstrumentCmdLibrary
+from pythonization.config.models import (
+    InstrumentCmdLibrary,
+    MeasurementParamDef,
+    SweepValueDef,
+    WriteCmdDef,
+)
 from pythonization.instruments.command_library import VisaLibraryRegistry
 from pythonization.instruments.registry import InstrumentRegistry
+from pythonization.ui.widgets.help_button import make_help_button
 
 _MONO = QFont("Consolas", 10)
 _COL_MEAS  = QColor("#56d364")
@@ -341,7 +356,6 @@ class VisaLibraryWindow(QDialog):
         btn_add_inst.clicked.connect(self._add_instrument)
         top.addWidget(btn_add_inst)
         top.addStretch()
-        from pythonization.ui.widgets.help_button import make_help_button
         top.addWidget(make_help_button(self._help_html(), "VISA Library 도움말"))
         layout.addLayout(top)
 

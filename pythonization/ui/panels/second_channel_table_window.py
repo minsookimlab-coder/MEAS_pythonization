@@ -7,7 +7,6 @@ SecondChannelModel(스레드 안전)을 감싸 표시/편집한다. 완료 행�
 워커(다른 스레드)는 절대 이 창/QTableWidget을 직접 만지지 않는다 — VnaWindow가 bound
 @Slot(on_current/on_done)으로 이 창의 refresh만 호출한다.
 """
-from typing import Optional
 
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QColor, QFont

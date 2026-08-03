@@ -16,18 +16,35 @@ from __future__ import annotations
 
 from typing import List
 
-from PySide6.QtCore import Signal, Slot, Qt
+from PySide6.QtCore import QMetaObject, Q_ARG, Qt, Qt as _Qt, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-    QVBoxLayout, QWidget,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
+import threading
 
 from pythonization.config.models import (
-    AlarmConfig, AlarmOperator, AlarmTrigger, InstantiatedMeasurement,
+    AlarmConfig,
+    AlarmDeliveryConfig,
+    AlarmOperator,
+    AlarmTrigger,
+    InstantiatedMeasurement,
     TelegramContact,
 )
+from pythonization.config.app_config import load_alarm_delivery, save_alarm_delivery
 
 _MONO = QFont("Consolas", 10)
 _OP_LABELS = [">", "<", ">=", "<=", "==", "!="]
@@ -209,10 +226,8 @@ class TelegramPanel(QFrame):
             self._set_status("Token과 수신자를 설정하세요.", "#f44747"); return
         self._btn_test.setEnabled(False)
         self._set_status("전송 중...", "#888")
-        import threading
         def _do():
             err = self._alarm_manager.send_telegram_test(token, chat_id)
-            from PySide6.QtCore import QMetaObject, Qt as _Qt, Q_ARG
             QMetaObject.invokeMethod(
                 self, "_on_test_result", _Qt.ConnectionType.QueuedConnection,
                 Q_ARG(str, err or ""), Q_ARG(bool, err is None),
@@ -557,7 +572,6 @@ class AlarmConfigWindow(QDialog):
     def _load(self):
         # 전송 수단(소리·이메일·텔레그램)은 전역 공유값에서 로드한다.
         # 전역이 아직 비어 있으면(최초) 현재 컨텍스트 cfg의 값으로 시드한다.
-        from pythonization.config.app_config import load_alarm_delivery
         d = load_alarm_delivery()
         if d.is_configured():
             merged = self._cfg.model_copy(update={
@@ -583,8 +597,6 @@ class AlarmConfigWindow(QDialog):
 
     def _save_delivery_global(self, cfg: AlarmConfig):
         """전송 수단을 전역 공유 저장소에 기록 → 다른 창(VNA/Double Sweep)과 동기화."""
-        from pythonization.config.app_config import save_alarm_delivery
-        from pythonization.config.models import AlarmDeliveryConfig
         save_alarm_delivery(AlarmDeliveryConfig(
             use_sound=cfg.use_sound, use_email=cfg.use_email, email_to=cfg.email_to,
             smtp_host=cfg.smtp_host, smtp_port=cfg.smtp_port, smtp_user=cfg.smtp_user,

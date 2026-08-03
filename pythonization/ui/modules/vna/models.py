@@ -7,8 +7,11 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional
 from pydantic import BaseModel, Field
+import os
+import shutil
 
 from pythonization.config.models import AlarmConfig, SecondSweepAdvanceType
+from pythonization.instruments.parameter import _parse_float
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +205,6 @@ def save_resume_state(state: VnaResumeState, path: Path):
         tmp = path.with_suffix(path.suffix + ".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             yaml.dump(state.model_dump(mode="json"), f, allow_unicode=True)
-        import os
         os.replace(tmp, path)
     except Exception as e:
         print(f"[VNA] resume save failed: {e}")
@@ -254,7 +256,6 @@ def load_vna_config(path: Path) -> VnaConfigData:
         # 진짜 파싱 불가 → 손상 추적용 백업 후 빈 기본값. (빈 값으로 덮어쓰는 것은 save가 막음)
         print(f"[VNA] Config load failed ({path.name}): {type(e_safe).__name__}: {e_safe}")
         try:
-            import shutil
             shutil.copy2(path, path.with_suffix(path.suffix + ".loadfail-bak"))
         except Exception:
             pass
@@ -269,8 +270,6 @@ def _vna_cfg_is_empty(cfg: VnaConfigData) -> bool:
 
 
 def save_vna_config(cfg: VnaConfigData, path: Path):
-    import os
-    import shutil
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         # ── 데이터 유실 방지 안전장치 ──────────────────────────────────────
@@ -371,7 +370,6 @@ def parse_vna_array(raw: str) -> np.ndarray:
     if arr.size > 0:
         return arr
     # 2) 폴백: 토큰별로 Mercury 형식(콜론 경로 + 단위 접미사) 숫자 추출
-    from pythonization.instruments.parameter import _parse_float
     vals = []
     for tok in cleaned.split(","):
         tok = tok.strip()

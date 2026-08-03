@@ -5,23 +5,40 @@ import inspect
 from typing import Dict, List
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
-    QSplitter, QListWidget, QLineEdit, QComboBox, QSpinBox, 
-    QPushButton, QLabel, QMessageBox, QFrame, QScrollArea, QListWidgetItem, QAbstractItemView
+    QAbstractItemView,
+    QComboBox,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
 )
 from PySide6.QtCore import Qt
+import traceback
 
 from pythonization.config.models import InstrumentConfig, cast_extra_params
 from pythonization.instruments import drivers as drivers_pkg
 from pythonization.instruments.base import BaseInstrument
 from pythonization.instruments.factory import (
     DEFAULT_DRIVER_CLASS_PATH,
+    InstrumentFactory,
     resolve_class_path,
 )
 from pythonization.util.network import find_mac_for_ip
 
 # --- Exe 호환 경로 설정 처리 ---
 from pythonization.app.paths import SETTINGS_DIR
+from pythonization.ui.widgets.help_button import make_help_button
 SETTINGS_FILE = SETTINGS_DIR / "instruments.yaml"
 
 class InstrumentSettingsUI(QMainWindow):
@@ -65,7 +82,6 @@ class InstrumentSettingsUI(QMainWindow):
         self.instrument_list = QListWidget()
         self.instrument_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.instrument_list.itemDoubleClicked.connect(self._on_item_double_clicked)
-        from pythonization.ui.widgets.help_button import make_help_button
         list_hdr = QHBoxLayout()
         list_hdr.setSpacing(6)
         list_hdr.addWidget(QLabel("Instruments:"))
@@ -639,8 +655,6 @@ class InstrumentSettingsUI(QMainWindow):
 
     def _test_connection(self):
         """Tests the connection and query command (*IDN?) dynamically."""
-        import traceback
-        from pythonization.instruments.factory import InstrumentFactory
         
         # Try to initialize PyVISA ResourceManager
         try:

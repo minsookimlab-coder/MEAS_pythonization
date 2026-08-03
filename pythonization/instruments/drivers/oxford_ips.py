@@ -1,3 +1,4 @@
+import time
 from pythonization.instruments.base import BaseInstrument
 
 
@@ -88,7 +89,6 @@ class OxfordIPS(BaseInstrument):
         GPIB: clear() (SDC) 후 장비 복구 대기가 필요합니다.
         RS232: C1(Remote) 설정 후 V를 조회합니다.
         """
-        import time
 
         try:
             self.inst.clear()

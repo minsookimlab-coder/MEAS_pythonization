@@ -23,10 +23,6 @@ from pythonization.app.paths import SETTINGS_DIR
 _MAX_POINTS = 10
 _LOG_PATH = SETTINGS_DIR / "resume_points.json"
 
-# 통신 오류 판별은 pythonization.instruments.errors 로 일원화 (VISA error_code + 폭넓은 키워드).
-# 하위호환을 위해 같은 이름으로 재노출.
-from pythonization.instruments.errors import is_comm_error  # noqa: E402,F401  (re-export)
-
 
 @dataclass
 class ResumePoint:

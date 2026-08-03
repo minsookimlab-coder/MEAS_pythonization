@@ -2,34 +2,78 @@ import math
 import time
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton,
-    QFormLayout, QFrame, QMessageBox,
-    QButtonGroup, QRadioButton, QCheckBox, QFileDialog,
-    QComboBox, QInputDialog, QScrollArea, QSizePolicy,
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QDoubleValidator, QFont, QPainter, QPixmap
+import os
+import subprocess
+from datetime import datetime
 
 from pythonization.measurement.data_saver import DataSaver
 from pythonization.measurement.derivative import (
-    DerivativeChannel, DerivativeConfig,
-    OUTPUT_KEY as _DERIV_KEY, OUTPUT_KEY_2 as _DERIV2_KEY, OUTPUT_KEY_3 as _DERIV3_KEY,
+    DerivativeChannel,
+    DerivativeConfig,
+    OUTPUT_KEY as _DERIV_KEY,
+    OUTPUT_KEY_2 as _DERIV2_KEY,
+    OUTPUT_KEY_3 as _DERIV3_KEY,
 )
 from pythonization.measurement.metadata import MetaDataManager
 from pythonization.instruments.registry import InstrumentRegistry
 from pythonization.instruments.session import InstrumentSession
 from pythonization.measurement.sweep import SweepConfig, calculate_next_step
-from pythonization.measurement.channel import sweep_channel_from_instantiated, TimeChannel, TIME_CHANNEL
-from pythonization.measurement.sweep_worker import SweepWorker, StepRequest, StepResult
+from pythonization.measurement.channel import (
+    TIME_CHANNEL,
+    sweep_channel_from_instantiated,
+)
+from pythonization.measurement.sweep_worker import StepRequest, StepResult, SweepWorker
 from pythonization.instruments.command_library import VisaLibraryRegistry
 from pythonization.profiles.registry import ProfileRegistry
 from pythonization.config.app_config import AppConfig, load_app_config, save_app_config
-from pythonization.config.models import MainUIProfile, DerivConfigData
+from pythonization.config.models import DerivConfigData, MainUIProfile, MeasType
 from pythonization.ui.assets import WHALE_BACKGROUND, asset_path
-from pythonization.ui.panels.console_handler import ConsoleCommand, ConsoleCommandHandler
+from pythonization.ui.panels.console_handler import (
+    ConsoleCommand,
+    ConsoleCommandHandler,
+)
 from pythonization.ui.panels.debug_window import DebugWindow
 from pythonization.ui.panels.sweep_array_window import SweepArrayWindow
+from pythonization.app.logging_setup import get_logger
+from pythonization.instruments.errors import humanize_error, is_comm_error
+from pythonization.measurement.resume_log import ResumeLog, ResumePoint
+from pythonization.ui.dialogs.app_config import ConfigWindow
+from pythonization.ui.dialogs.instrument_settings import InstrumentSettingsUI
+from pythonization.ui.dialogs.meta_data import MetaDataConfigWindow
+from pythonization.ui.dialogs.parameter_manager import ParameterManagerWindow
+from pythonization.ui.dialogs.resume import ResumePickerDialog
+from pythonization.ui.dialogs.visa_library import VisaLibraryWindow
+from pythonization.ui.modules.double_sweep.window import DoubleSweepWindow
+from pythonization.ui.modules.mfli.window import MfliWindow
+from pythonization.ui.modules.vna.window import VnaWindow
+from pythonization.ui.panels.command_window import CommandWindow
+from pythonization.ui.panels.data_window import DataWindow
+from pythonization.ui.panels.graph_window import GraphDataPoint, GraphWindow
+from pythonization.ui.panels.timing_window import TimingWindow
+from pythonization.ui.widgets.help_button import make_help_button
 
 _MONO = QFont("Consolas", 10)
 
@@ -50,7 +94,6 @@ class _WhaleBgFrame(QFrame):
     """배경에 이미지를 반투명하게 채워 그리는 QFrame."""
     def __init__(self, image_path: str, opacity: float = 0.3, parent=None):
         super().__init__(parent)
-        from PySide6.QtGui import QPixmap
         self._pixmap = QPixmap(image_path)
         self._opacity = opacity  # 0.0 ~ 1.0
 
@@ -58,7 +101,6 @@ class _WhaleBgFrame(QFrame):
         super().paintEvent(event)
         if self._pixmap.isNull():
             return
-        from PySide6.QtGui import QPainter
         painter = QPainter(self)
         painter.setOpacity(self._opacity)
         scaled = self._pixmap.scaled(
@@ -120,7 +162,6 @@ class MainWindow(QMainWindow):
         self._last_write_value: "float | None" = None
         self._step_context: str = ""   # 마지막 sweep tick 컨텍스트 (오류 시 참조)
         # 통신 오류 자동 재개 상태
-        from pythonization.measurement.resume_log import ResumeLog
         self._resume_log = ResumeLog()
         self._last_step_request = None        # 자동 재개 시 재전송할 StepRequest
         self._auto_retry_used = False         # 연속 자동 재개 1회 제한 (성공 시 리셋)
@@ -167,8 +208,6 @@ class MainWindow(QMainWindow):
         # 자식 창
         self._debug_window = DebugWindow(self)
         self._sweep_status_window = SweepArrayWindow(self)
-        from pythonization.ui.panels.timing_window import TimingWindow
-        from pythonization.ui.panels.data_window import DataWindow
         # parent를 주지 않음 → 독립 top-level 창 → Windows 작업표시줄에 개별 표시
         self._timing_window = TimingWindow(None)
         self._data_window = DataWindow(None)
@@ -576,7 +615,6 @@ class MainWindow(QMainWindow):
             le.setFont(_MONO)
             le.setMinimumWidth(280)
             le.setStyleSheet(_SWEEP_LE_STYLE)
-            from PySide6.QtGui import QDoubleValidator
             le.setValidator(QDoubleValidator(-1e18, 1e18, 10, le))
             return le
 
@@ -812,7 +850,6 @@ class MainWindow(QMainWindow):
         m_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #56d364;")
         m_title_row.addWidget(m_title)
         m_title_row.addStretch()
-        from pythonization.ui.widgets.help_button import make_help_button
         m_title_row.addWidget(make_help_button(self._meas_help_html(), "Active Measurements 도움말"))
         meas_outer.addLayout(m_title_row)
         self._meas_scroll = QScrollArea()
@@ -863,7 +900,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _open_parameter_manager(self):
-        from pythonization.ui.dialogs.parameter_manager import ParameterManagerWindow
         if self._param_manager_window is None or not self._param_manager_window.isVisible():
             self._param_manager_window = ParameterManagerWindow(
                 self._visa_lib_registry, self._param_manager_reg, self
@@ -873,7 +909,6 @@ class MainWindow(QMainWindow):
         self._param_manager_window.raise_()
 
     def _open_config(self):
-        from pythonization.ui.dialogs.app_config import ConfigWindow
         if self._config_window is None or not self._config_window.isVisible():
             self._config_window = ConfigWindow(self._app_config, self)
             self._config_window.apply_requested.connect(self._on_config_applied)
@@ -890,7 +925,6 @@ class MainWindow(QMainWindow):
             self._double_sweep_window._sweep_worker.set_parallel(cfg.parallel_measurement)
 
     def _open_graph_window(self):
-        from pythonization.ui.panels.graph_window import GraphWindow
         if self._graph_window is None:
             self._graph_window = GraphWindow()
             if self._graph_columns:
@@ -923,21 +957,18 @@ class MainWindow(QMainWindow):
         return cols
 
     def _open_meta_data_config(self):
-        from pythonization.ui.dialogs.meta_data import MetaDataConfigWindow
         if self._meta_data_window is None:
             self._meta_data_window = MetaDataConfigWindow(self)
         self._meta_data_window.show()
         self._meta_data_window.raise_()
 
     def _open_command_window(self):
-        from pythonization.ui.panels.command_window import CommandWindow
         if self._command_window is None:
             self._command_window = CommandWindow(self._session, self._visa_lib_registry, self)
         self._command_window.show()
         self._command_window.raise_()
 
     def _open_vna_window(self):
-        from pythonization.ui.modules.vna.window import VnaWindow
         if self._vna_window is None:
             # parent=None → 독립 top-level → 작업표시줄에 개별 표시
             self._vna_window = VnaWindow(
@@ -947,7 +978,6 @@ class MainWindow(QMainWindow):
         self._vna_window.raise_()
 
     def _open_mfli_window(self):
-        from pythonization.ui.modules.mfli.window import MfliWindow
         if self._mfli_window is None:
             # parent=None → 독립 top-level (VNA Control과 동일한 패턴)
             self._mfli_window = MfliWindow(
@@ -957,7 +987,6 @@ class MainWindow(QMainWindow):
         self._mfli_window.raise_()
 
     def _open_double_sweep(self):
-        from pythonization.ui.modules.double_sweep.window import DoubleSweepWindow
         if self._double_sweep_window is None:
             # 3rd arg(parent)=None → 독립 top-level → 작업표시줄에 개별 표시 (main_win은 1st arg로 전달)
             self._double_sweep_window = DoubleSweepWindow(self, self._param_manager_reg, None)
@@ -1043,7 +1072,6 @@ class MainWindow(QMainWindow):
                     idn = self._session.query_once(alias, "*IDN?")
                     results[alias] = (True, idn.strip())
                 except Exception as exc:
-                    from pythonization.instruments.errors import humanize_error
                     results[alias] = (False, humanize_error(exc))
 
         all_ok = all(ok for ok, _ in results.values())
@@ -1100,7 +1128,6 @@ class MainWindow(QMainWindow):
 
     def _build_deriv_panel(self, order: int) -> QWidget:
         """d^n A1/dA2^n 실시간 파생 채널 설정 패널 (order = 1/2/3)."""
-        from PySide6.QtWidgets import QSpinBox
 
         sup = {1: "", 2: "²", 3: "³"}
         pre = {1: "d", 2: "d²", 3: "d³"}
@@ -1118,7 +1145,6 @@ class MainWindow(QMainWindow):
         lbl.setStyleSheet("font-weight: bold; font-size: 12px;")
         title_row.addWidget(lbl)
         title_row.addStretch()
-        from pythonization.ui.widgets.help_button import make_help_button
         title_row.addWidget(make_help_button(self._deriv_help_html(), "Derivative 도움말"))
         cb_enable = QCheckBox("Enable")
         title_row.addWidget(cb_enable)
@@ -1282,12 +1308,11 @@ class MainWindow(QMainWindow):
                     return meas_map.get(idx)
             return None
 
-        import math as _math
         a1 = _get(cfg.numerator_key)
         a2 = _get(cfg.denominator_key)
         if a1 is None or a2 is None:
             return None
-        if _math.isnan(a1) or _math.isnan(a2):
+        if math.isnan(a1) or math.isnan(a2):
             return None
         return channel.push(a1, a2)
 
@@ -1372,7 +1397,6 @@ class MainWindow(QMainWindow):
         other types:
             figure_axis 에 _suffix 를 덧붙임 (기존 동작)
         """
-        from pythonization.config.models import MeasType
         suffix = ""
         if idx < len(self._meas_suffix_edits):
             suffix = self._meas_suffix_edits[idx].text().strip()
@@ -1442,7 +1466,6 @@ class MainWindow(QMainWindow):
                              prev_checked: dict = None,
                              prev_suffix: dict = None,
                              prev_type: dict = None):
-        from pythonization.config.models import MeasType
         content = QWidget()
         content.setStyleSheet("background: transparent;")
         cl = QVBoxLayout(content)
@@ -1597,14 +1620,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _open_instrument_settings(self):
-        from pythonization.ui.dialogs.instrument_settings import InstrumentSettingsUI
         if self._settings_window is None or not self._settings_window.isVisible():
             self._settings_window = InstrumentSettingsUI()
         self._settings_window.show()
         self._settings_window.raise_()
 
     def _open_visa_library(self):
-        from pythonization.ui.dialogs.visa_library import VisaLibraryWindow
         if self._visa_lib_window is None or not self._visa_lib_window.isVisible():
             self._visa_lib_window = VisaLibraryWindow(
                 self._visa_lib_registry, self._registry, self
@@ -1654,7 +1675,6 @@ class MainWindow(QMainWindow):
         if not self._run_connection_test(include_second=False, show_success=False):
             return
         self._worker.reset_stop()   # 이전 sweep의 Stop 잔류 플래그 제거 (재시작 보장)
-        from pythonization.app.logging_setup import get_logger
         get_logger().info("sweep _on_start: ch=%s to=%s rate=%s tpp=%s",
                           getattr(self._sweep_channel, "alias", "?"),
                           self._sweep_config.sweep_to, self._sweep_config.sweep_rate,
@@ -1729,7 +1749,6 @@ class MainWindow(QMainWindow):
             self._meas_label_for(idx, self._active_profile.measurements[idx])
             for idx in self._active_meas_indices
         ]
-        from pythonization.config.models import MeasType
         _meas_type_overrides = {}
         for idx in self._active_meas_indices:
             if idx < len(self._meas_type_combos):
@@ -1752,7 +1771,6 @@ class MainWindow(QMainWindow):
             color="#4ec9b0",
         )
         # 초기 상태 측정 (이동 없이 현재 위치에서 measurement만)
-        import time as _t
         active_init = [
             (row, self._active_profile.measurements[row].alias,
              self._active_profile.measurements[row].description,
@@ -1765,7 +1783,7 @@ class MainWindow(QMainWindow):
             sweep_to=self._sweep_config.sweep_to,
             sweep_rate=self._sweep_config.sweep_rate,
             time_per_point=self._sweep_config.time_per_point,
-            t_emit=_t.perf_counter(),
+            t_emit=time.perf_counter(),
             last_write_value=None,
             active_measurements=active_init,
             measure_only=True,
@@ -1893,7 +1911,6 @@ class MainWindow(QMainWindow):
         # DataWindow 갱신: next_v + 체크된 measurement 값만
         # val=None  → 실제 측정 에러 (스윕 중단)
         # val=nan   → threshold 초과 (스윕 계속, 파일에 "nan" 기록)
-        import math as _math
         meas_map = {row: val for row, val in result.meas_results}
         row_vals = [f"{result.next_v:.6g}"]
         has_err = False
@@ -1902,7 +1919,7 @@ class MainWindow(QMainWindow):
             if val is None:
                 has_err = True
                 row_vals.append("ERR")
-            elif _math.isnan(val):
+            elif math.isnan(val):
                 row_vals.append("nan")
             else:
                 row_vals.append(f"{val:.6g}")
@@ -1920,7 +1937,6 @@ class MainWindow(QMainWindow):
             )
             self._log_sweep(f"  {err_msg}", color="#f44747")
             # 측정 실패 원인이 통신 오류면 자동 재개 경로로, 그 외(파싱 등)는 즉시 중단
-            from pythonization.measurement.resume_log import is_comm_error
             comm = any(
                 is_comm_error(result.meas_errors.get(idx, ""))
                 for idx in self._active_meas_indices
@@ -1930,7 +1946,6 @@ class MainWindow(QMainWindow):
                 self._handle_comm_error("; ".join(err_descs))
             else:
                 self._on_stop()
-                from pythonization.instruments.errors import humanize_error
                 detail = "; ".join(
                     result.meas_errors.get(idx, "")
                     for idx in self._active_meas_indices if meas_map.get(idx) is None
@@ -1947,7 +1962,7 @@ class MainWindow(QMainWindow):
                 f"{self._active_profile.measurements[idx].description}="
                 f"{meas_map[idx]:.4g}"
                 for idx in self._active_meas_indices
-                if meas_map.get(idx) is not None and not _math.isnan(meas_map[idx])
+                if meas_map.get(idx) is not None and not math.isnan(meas_map[idx])
             )
             if val_summary:
                 self._log_sweep(
@@ -1983,7 +1998,6 @@ class MainWindow(QMainWindow):
         self._meta_manager.record_step(result.meas_results)
 
         # Graph update — 창 유무와 관계없이 항상 히스토리에 축적
-        from pythonization.ui.panels.graph_window import GraphDataPoint
         gvals = {"__sweep__": result.next_v}
         for idx in self._active_meas_indices:
             val = meas_map.get(idx)
@@ -2072,7 +2086,6 @@ class MainWindow(QMainWindow):
     def _on_step_error(self, msg: str):
         """Worker에서 예외 발생 시 메인 스레드에서 처리."""
         ctx = getattr(self, "_step_context", "unknown step")
-        from pythonization.instruments.errors import is_comm_error, humanize_error
         cause = humanize_error(msg)
         self._log(f"  ERROR (sweep tick): {cause}", color="#f44747")
         self._log_sweep(
@@ -2110,7 +2123,6 @@ class MainWindow(QMainWindow):
         else:
             # 2차: 중단 + 재개 지점 저장
             self._save_resume_point(reason)
-            from pythonization.instruments.errors import humanize_error
             cause = humanize_error(reason)
             self._log(
                 "  ✗ 자동 재개 후 재차 통신 오류 — 측정을 중단합니다. "
@@ -2137,8 +2149,6 @@ class MainWindow(QMainWindow):
 
     def _save_resume_point(self, reason: str):
         """현재 단일 sweep 위치를 재개 로그에 저장."""
-        from datetime import datetime
-        from pythonization.measurement.resume_log import ResumePoint
         fp = self._data_saver.get_filepath()
         pos = self._last_write_value
         label = (
@@ -2175,7 +2185,6 @@ class MainWindow(QMainWindow):
         """[Resume] 버튼: 저장된 지점 목록에서 선택 후 재개."""
         if self._running:
             return
-        from pythonization.ui.dialogs.resume import ResumePickerDialog
         points = self._resume_log.all()
         dlg = ResumePickerDialog(points, parent=self, sweep_type="single")
         if dlg.exec() and dlg.selected_point is not None:
@@ -2215,7 +2224,6 @@ class MainWindow(QMainWindow):
         try:
             _meas_labels = [self._meas_label_for(idx, self._active_profile.measurements[idx])
                             for idx in self._active_meas_indices]
-            from pythonization.config.models import MeasType
             _ov = {}
             for idx in self._active_meas_indices:
                 if idx < len(self._meas_type_combos):
@@ -2260,11 +2268,9 @@ class MainWindow(QMainWindow):
     def _copy_save_path(self):
         path = self._lbl_save_preview.text()
         if path and path != "—" and not path.startswith("("):
-            from PySide6.QtWidgets import QApplication
             QApplication.clipboard().setText(path)
 
     def _open_save_folder(self):
-        import subprocess, os
         path = self._lbl_save_preview.text()
         if not path or path == "—" or path.startswith("("):
             return
@@ -2501,6 +2507,5 @@ class MainWindow(QMainWindow):
         self._timing_window.deleteLater()
         self._data_window.deleteLater()
 
-        from PySide6.QtWidgets import QApplication
         QApplication.quit()
         super().closeEvent(event)

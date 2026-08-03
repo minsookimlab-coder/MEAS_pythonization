@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 
 import yaml
 
-from pythonization.config.models import InstrumentCmdLibrary, MeasurementParamDef, SweepValueDef
+from pythonization.config.models import InstrumentCmdLibrary
 
 from pythonization.app.paths import SETTINGS_DIR
 _DEFAULT_PATH = SETTINGS_DIR / "visa_libraries.yaml"

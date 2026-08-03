@@ -6,34 +6,70 @@ VnaWindow: VNA 제어 창 (병렬 동작).
 """
 import os
 import time as _time
-from pathlib import Path
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from pathlib import Path, Path as _P
+from typing import List, Optional, TYPE_CHECKING, Tuple
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QMessageBox, QPushButton, QScrollArea,
-    QSplitter, QVBoxLayout, QWidget,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
 )
 
 from pythonization.app.paths import SETTINGS_DIR
-from pythonization.ui.widgets.plot_panel import (
-    MONO as _MONO,
-    PlotPanel,
-    PlotPanelState,
-)
+from pythonization.ui.widgets.plot_panel import MONO as _MONO, PlotPanel, PlotPanelState
 from pythonization.ui.modules.vna.models import (
-    VnaAcquireConfig, VnaCommandEntry,
-    VnaPlotCurveConfig, VnaSectionConfig,
-    VnaDoubleSweepControl, VnaPreCmdValue, VnaFieldTimeConfig,
-    VnaResumeState, build_cmd, format_label, get_figure_axis, get_template,
-    load_vna_config, next_dat_path, next_sweep_folder,
-    parse_vna_array, save_vna_config,
-    resume_path_for, load_resume_state, save_resume_state, clear_resume_state,
+    VnaAcquireConfig,
+    VnaCommandEntry,
+    VnaDoubleSweepControl,
+    VnaFieldTimeConfig,
+    VnaPlotCurveConfig,
+    VnaPreCmdValue,
+    VnaResumeState,
+    VnaSectionConfig,
+    build_cmd,
+    clear_resume_state,
+    format_label,
+    get_figure_axis,
+    get_template,
+    load_resume_state,
+    load_vna_config,
+    next_dat_path,
+    next_sweep_folder,
+    parse_vna_array,
+    resume_path_for,
+    save_resume_state,
+    save_vna_config,
 )
+from pythonization.app.logging_setup import get_logger
+from pythonization.config.models import (
+    InstantiatedSecondSweepChannel,
+    SecondSweepAdvanceType as A,
+)
+from pythonization.measurement.second_channel_model import SecondChannelModel
+from pythonization.notify.alarm_manager import AlarmManager
+from pythonization.ui.dialogs.alarm_config import AlarmConfigWindow
+from pythonization.ui.modules.vna.config_window import (
+    VnaConfigWindow,
+    _PreAdvanceCmdDialog,
+)
+from pythonization.ui.widgets.help_button import make_help_button
 
 if TYPE_CHECKING:
     from pythonization.instruments.session import InstrumentSession
@@ -151,7 +187,6 @@ class _AcquireWorker(QObject):
 
     @Slot()
     def run(self):
-        from pythonization.app.logging_setup import get_logger
         log = get_logger()
         mode = ("double-sweep" if self._ds_plan is not None
                 else "time" if self._time_mode else "value")
@@ -503,7 +538,6 @@ class _AcquireWorker(QObject):
             # general sweep: 값 직접 쓰기
             self._exec_write_cmds([cmd_entry], f"{value:.6g}")
             return
-        from pythonization.config.models import SecondSweepAdvanceType as A
         sec = self._ensure_sec()
         ch = self._make_sec_channel(cmd_entry, adv)
         alias = cmd_entry.alias
@@ -532,7 +566,6 @@ class _AcquireWorker(QObject):
         """controlled advance에서 prev가 None(초기 이동)일 때 현재값을 읽어 반환.
         읽기 명령이 없거나 실패하면 None (호출부가 폴백). FEEDBACK은 feedback_read_cmd,
         SWEEP은 paired_read_cmd를 사용한다."""
-        from pythonization.config.models import SecondSweepAdvanceType as A
         if adv.advance_type in (A.FEEDBACK, A.THRESHOLD_TIME):
             read_cmd = (adv.feedback_read_cmd or "").strip()
         elif adv.advance_type == A.SWEEP:
@@ -554,7 +587,6 @@ class _AcquireWorker(QObject):
     def _make_sec_channel(self, cmd_entry, adv):
         """VnaCommandEntry + VnaAdvanceConfig → InstantiatedSecondSweepChannel.
         sweep 파라미터 자리를 {v}로 남겨 SecondChannelWorker가 채우게 한다."""
-        from pythonization.config.models import InstantiatedSecondSweepChannel
         lib = self._lib_reg.get_library(cmd_entry.alias)
         template = get_template(lib, cmd_entry) or "{v}"
         d = {pp.name: ("{v}" if pp.is_user_input else pp.value)
@@ -991,14 +1023,12 @@ class VnaWindow(QDialog):
         self._config_win = None
         self._resume_state: Optional[VnaResumeState] = None   # double sweep 재개 상태
         self._bg_workers: list = []   # 백그라운드 _VnaWorker(stop-cmd 등) 추적 (종료 시 wait)
-        from pythonization.measurement.second_channel_model import SecondChannelModel
         self._second_table = SecondChannelModel()   # Feature 1: second 값 테이블 (GUI 소유)
         self._second_table_win = None
         # Section role management  (start / stop / n_points)
         self._role_rows: dict = {"start": None, "stop": None, "n_points": None}
         self._linspace_data: Optional[Tuple[str, str, np.ndarray]] = None
         # 알람 (VNA sweep 전용 — 텔레그램)
-        from pythonization.notify.alarm_manager import AlarmManager
         self._alarm_manager = AlarmManager()
         self._time_mode_running: bool = False
         # Sweep 콤보에 '⏱ Time' 항목을 두고, 저장된 time_mode면 최초 1회 그 항목을 선택
@@ -1115,7 +1145,6 @@ class VnaWindow(QDialog):
         btn_open.clicked.connect(self._on_open_folder)
         lay.addWidget(btn_open)
 
-        from pythonization.ui.widgets.help_button import make_help_button
         lay.addWidget(make_help_button(self._control_help_html(), "VNA Control 도움말"))
         return frame
 
@@ -1401,7 +1430,6 @@ class VnaWindow(QDialog):
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(5)
 
-        from pythonization.ui.widgets.help_button import make_help_button
         title_row = QHBoxLayout(); title_row.setSpacing(6)
         title = QLabel("◆ Double Sweep")
         title.setStyleSheet("color:#c586c0; font-weight:bold;")
@@ -1592,7 +1620,6 @@ class VnaWindow(QDialog):
             self._ft_fwd_list.addItem(f"{c.alias}  {c.label or c.description}")
 
     def _ft_add_cmd(self):
-        from pythonization.ui.modules.vna.config_window import _PreAdvanceCmdDialog
         dlg = _PreAdvanceCmdDialog(self._lib_reg, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_cmd():
             self._ft_fwd_cmds.append(dlg.result_cmd())
@@ -1611,7 +1638,6 @@ class VnaWindow(QDialog):
             self._stop_cmd_list.addItem(f"{c.alias}  {c.label or c.description}")
 
     def _stop_add_cmd(self):
-        from pythonization.ui.modules.vna.config_window import _PreAdvanceCmdDialog
         dlg = _PreAdvanceCmdDialog(self._lib_reg, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_cmd():
             self._stop_cmds.append(dlg.result_cmd())
@@ -1673,7 +1699,6 @@ class VnaWindow(QDialog):
         """controlled advance의 최소 소요(초) 추정. feedback/wait만 산정(이동시간 제외)."""
         if adv is None:
             return 0.0
-        from pythonization.config.models import SecondSweepAdvanceType as A
         if adv.advance_type == A.FEEDBACK:
             # poll_interval × (Phase1 1회 + Phase2 std_window회)
             return adv.feedback_poll_interval * (1 + max(0, adv.feedback_std_window))
@@ -2423,14 +2448,12 @@ class VnaWindow(QDialog):
         try:
             self._update_plots(arrays, first_step=(self._step_count == 1))
         except Exception:
-            from pythonization.app.logging_setup import get_logger
             get_logger().exception("update_plots failed (step %d)", step_idx)
         if self._cb_save.isChecked():
             try:
                 is_sweep = self._current_sweep_values is not None
                 self._save_step(step_idx, arrays, is_sweep)
             except Exception:
-                from pythonization.app.logging_setup import get_logger
                 get_logger().exception("save_step failed (step %d)", step_idx)
 
     @Slot(str)
@@ -2559,11 +2582,9 @@ class VnaWindow(QDialog):
             except Exception:
                 pass
             self._save_resume()
-            from pythonization.app.logging_setup import get_logger
             get_logger().info("second %d done (resume saved)", global_si)
 
     def _on_resume_clicked(self):
-        from pathlib import Path as _P
         st = load_resume_state(self._resume_path())
         if not st.active or not st.second_values:
             self._set_status("재개할 측정이 없습니다.", color="#888")
@@ -2630,7 +2651,6 @@ class VnaWindow(QDialog):
     # ------------------------------------------------------------------
 
     def _open_alarm_config(self):
-        from pythonization.ui.dialogs.alarm_config import AlarmConfigWindow
         dlg = AlarmConfigWindow(self._cfg.alarm, self._alarm_manager, parent=self,
                                 title="VNA Sweep — Alarm Config")
         dlg.apply_requested.connect(self._on_alarm_cfg_applied)
@@ -2952,7 +2972,6 @@ class VnaWindow(QDialog):
     # ------------------------------------------------------------------
 
     def _open_config(self):
-        from pythonization.ui.modules.vna.config_window import VnaConfigWindow
         cfg_path = self._config_path()
         if self._config_win is None:
             self._config_win = VnaConfigWindow(

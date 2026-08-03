@@ -22,7 +22,8 @@ import csv
 import math
 import re
 from pathlib import Path
-from typing import Optional
+import argparse
+import sys
 
 
 def _num_key(name: str):
@@ -349,8 +350,6 @@ def merge_sweeps(labone, ours, outdir) -> dict:
 
 # ---------------------------------------------------------------- CLI
 def _main():
-    import argparse
-    import sys
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:

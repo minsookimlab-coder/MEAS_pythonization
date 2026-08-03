@@ -12,29 +12,58 @@ Second sweep channel 값을 배열로 순회하며 각 값마다 DUMMY→TRACE�
 """
 import math
 import time
-from datetime import datetime as _datetime, timedelta as _timedelta
+from datetime import (
+    date as _date,
+    datetime,
+    datetime as _datetime,
+    timedelta as _timedelta,
+)
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING, Tuple
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QDoubleValidator, QFont
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QFrame,
-    QLabel, QLineEdit, QPushButton, QSpinBox, QCheckBox,
-    QButtonGroup, QRadioButton, QMessageBox, QWidget, QComboBox,
-    QScrollArea, QSizePolicy,
+    QButtonGroup,
+    QCheckBox,
+    QDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
+    QScrollArea,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
+import os
+import subprocess
+from pathlib import Path
 
 from pythonization.config.models import (
-    DoubleSweepConfig, InstantiatedSecondSweepChannel, SecondSweepAdvanceType,
-    AlarmConfig, AlarmTrigger, AlarmOperator, InstantiatedMeasurement,
+    AlarmConfig,
+    DoubleSweepConfig,
+    InstantiatedSecondSweepChannel,
+    SecondSweepAdvanceType,
 )
 from pythonization.notify.alarm_manager import AlarmManager
 from pythonization.measurement.data_saver import DataSaver
-from pythonization.measurement.second_channel_worker import SecondChannelWorker, SecondChannelRequest
-from pythonization.measurement.sweep_worker import SweepWorker, StepRequest, StepResult
-from pythonization.ui.dialogs.alarm_config import MeasCondPanel, AlarmConfigWindow
+from pythonization.measurement.second_channel_worker import (
+    SecondChannelRequest,
+    SecondChannelWorker,
+)
+from pythonization.measurement.sweep_worker import StepRequest, StepResult, SweepWorker
+from pythonization.ui.dialogs.alarm_config import AlarmConfigWindow, MeasCondPanel
+from pythonization.instruments.errors import humanize_error, is_comm_error
+from pythonization.measurement.resume_log import ResumeLog, ResumePoint
+from pythonization.measurement.second_channel_model import SecondChannelModel
+from pythonization.ui.dialogs.resume import ResumePickerDialog
+from pythonization.ui.widgets.help_button import make_help_button
 
 if TYPE_CHECKING:
     from pythonization.ui.main_window import MainWindow
@@ -210,7 +239,6 @@ class DoubleSweepWindow(QDialog):
         self._array: List[float] = []
         self._array_idx: int = 0
         # Feature 1: second(array) 값 테이블 모델 + 편집 창 (VNA double sweep과 동일한 창 재사용)
-        from pythonization.measurement.second_channel_model import SecondChannelModel
         self._second_table_model = SecondChannelModel()
         self._second_table_win = None
         self._last_write_value: Optional[float] = None
@@ -225,7 +253,6 @@ class DoubleSweepWindow(QDialog):
         self._alarm_cfg: AlarmConfig = AlarmConfig()
 
         # 통신 오류 자동 재개 상태
-        from pythonization.measurement.resume_log import ResumeLog
         self._resume_log = ResumeLog()
         self._auto_retry_used = False        # 연속 자동 재개 1회 제한 (성공 시 리셋)
         self._last_emit = None               # ("step"|"advance", request) 자동 재개 재전송용
@@ -308,7 +335,6 @@ class DoubleSweepWindow(QDialog):
         glow_h.addWidget(left_widget, stretch=1)
 
         # 상단 제목 + 도움말
-        from pythonization.ui.widgets.help_button import make_help_button
         _ds_hdr = QHBoxLayout()
         _ds_title = QLabel("Double Sweep")
         _ds_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #f78166;")
@@ -1660,7 +1686,6 @@ class DoubleSweepWindow(QDialog):
 
     @Slot(str)
     def _on_advance_error(self, msg: str):
-        from pythonization.instruments.errors import is_comm_error, humanize_error
         self._main_win._log(
             f"  [DoubleSweep] Second channel error — {humanize_error(msg)}  [상세] {msg}",
             color="#f44747")
@@ -1704,7 +1729,6 @@ class DoubleSweepWindow(QDialog):
         else:
             self._save_resume_point(reason)
             self._check_alarm(is_comm_error=True, extra_reason=reason)
-            from pythonization.instruments.errors import humanize_error
             cause = humanize_error(reason)
             self._main_win._log(
                 "  ✗ [DoubleSweep] 자동 재개 후 재차 통신 오류 — 측정 중단. "
@@ -1734,8 +1758,6 @@ class DoubleSweepWindow(QDialog):
 
     def _save_resume_point(self, reason: str):
         """현재 array index 위치를 재개 로그에 저장 (array index 단위 재개)."""
-        from datetime import datetime
-        from pythonization.measurement.resume_log import ResumePoint
         ch = self._second_channel
         second_val = (
             self._array[self._array_idx]
@@ -1773,7 +1795,6 @@ class DoubleSweepWindow(QDialog):
         """[Resume] 버튼: 저장된 지점 목록에서 선택 후 해당 array index부터 재개."""
         if self._phase != DoubleSweepPhase.IDLE:
             return
-        from pythonization.ui.dialogs.resume import ResumePickerDialog
         dlg = ResumePickerDialog(self._resume_log.all(), parent=self, sweep_type="double")
         if dlg.exec() and dlg.selected_point is not None:
             self._resume_from_point(dlg.selected_point)
@@ -1860,7 +1881,6 @@ class DoubleSweepWindow(QDialog):
           - 저장 활성 + 성공: True
           - 저장 활성 + 실패: False (경고 후 측정 중단 — 데이터 유실 방지)
         """
-        from datetime import date as _date
         ctx = self._ctx
         base = ctx.custom_folder
         phase_subfolder = f"{base}/{phase_name}" if base else phase_name
@@ -2021,7 +2041,6 @@ class DoubleSweepWindow(QDialog):
             )
             self._main_win._log(f"  [DoubleSweep] {err_msg}", color="#f44747")
             # 통신 오류면 자동 재개 경로로, 그 외(파싱 등)는 즉시 중단
-            from pythonization.measurement.resume_log import is_comm_error
             comm = any(
                 is_comm_error(result.meas_errors.get(idx, ""))
                 for idx in self._ctx.active_meas_indices
@@ -2035,7 +2054,6 @@ class DoubleSweepWindow(QDialog):
                     extra_reason=f"측정값 ERR — {', '.join(err_descs)}",
                 )
                 self._on_stop()
-                from PySide6.QtWidgets import QMessageBox
                 QMessageBox.critical(self, "Measurement Error", err_msg)
             return
 
@@ -2125,7 +2143,6 @@ class DoubleSweepWindow(QDialog):
 
     @Slot(str)
     def _on_step_error(self, msg: str):
-        from pythonization.instruments.errors import is_comm_error, humanize_error
         self._main_win._log(
             f"  [DoubleSweep] Step error — {humanize_error(msg)}  [상세] {msg}",
             color="#f44747")
@@ -2208,7 +2225,6 @@ class DoubleSweepWindow(QDialog):
 
     def _update_ds_save_path(self):
         """Trace 폴더 기준 실제 저장 경로 프리뷰 갱신."""
-        from datetime import date as _date
         mw = self._main_win
         main_folder = mw._le_main_folder.text().strip()
         custom_folder = mw._le_custom_folder.text().strip()
@@ -2225,7 +2241,6 @@ class DoubleSweepWindow(QDialog):
         fig_ax = (ch.figure_axis or "").strip() if ch else ""
 
         # 경로 조립
-        from pathlib import Path
         d = Path(main_folder)
         subfolder = f"{custom_folder}/trace" if custom_folder else "trace"
         d = d / subfolder
@@ -2244,8 +2259,6 @@ class DoubleSweepWindow(QDialog):
         self._lbl_ds_save_path.setText(str(d / f"{stem}{id_part}.dat"))
 
     def _open_ds_folder(self):
-        import subprocess, os
-        from pathlib import Path
         path_text = self._lbl_ds_save_path.text()
         if not path_text or path_text.startswith("("):
             return

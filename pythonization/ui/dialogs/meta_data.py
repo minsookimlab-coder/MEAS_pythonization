@@ -10,9 +10,19 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
-    QPushButton, QScrollArea, QFrame, QWidget, QSizePolicy,
-    QSplitter, QTextEdit,
+    QCheckBox,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 from PySide6.QtGui import QFont
 
@@ -168,7 +178,6 @@ class MetaDataConfigWindow(QDialog):
         )
 
     def _show_help(self):
-        from PySide6.QtWidgets import QMessageBox
         box = QMessageBox(self)
         box.setWindowTitle("Meta Data — 도움말")
         box.setTextFormat(Qt.TextFormat.RichText)

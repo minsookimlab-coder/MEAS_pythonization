@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -1296,7 +1295,6 @@ class GraphPanel(QFrame):
             self._update_regression()
 
     def _save_panel_image(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getSaveFileName(
             None, "Save Panel Image", "", "PNG Image (*.png);;All Files (*)"
         )

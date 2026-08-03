@@ -20,24 +20,37 @@ from pathlib import Path
 from typing import List, Optional, TYPE_CHECKING
 
 import numpy as np
-from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QFileDialog, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QDialog,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QRadioButton,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
 )
 
 from pythonization.app.paths import SETTINGS_DIR
 from pythonization.instruments.parameter import _parse_float
-from pythonization.ui.widgets.plot_panel import (
-    MONO as _MONO,
-    PlotPanel,
-    PlotPanelState,
-)
+from pythonization.ui.widgets.plot_panel import MONO as _MONO, PlotPanel, PlotPanelState
 from pythonization.ui.modules.mfli.models import (
-    MfliAcquireConfig, MfliAuxRead, MfliConfigData, MfliPlotCurveConfig,
-    load_mfli_config, save_mfli_config,
+    MfliAcquireConfig,
+    MfliAuxRead,
+    MfliConfigData,
+    MfliPlotCurveConfig,
+    load_mfli_config,
+    save_mfli_config,
 )
-from pythonization.ui.modules.vna.models import next_dat_path, next_sweep_folder  # 재사용 (중복 정의 방지)
+from pythonization.ui.modules.vna.models import next_dat_path, next_sweep_folder
+from pythonization.app.logging_setup import get_logger
 
 if TYPE_CHECKING:
     from pythonization.instruments.session import InstrumentSession
@@ -114,7 +127,6 @@ class _MfliAcquireWorker(QObject):
 
     @Slot()
     def run(self):
-        from pythonization.app.logging_setup import get_logger
         log = get_logger()
         mode = "follow" if self._follow else "driven"
         log.info("MfliAcquireWorker start (mode=%s, %d points)", mode, len(self._freqs))
@@ -156,7 +168,6 @@ class _MfliAcquireWorker(QObject):
         (장비 소실 판단). aux(ITC/M81)는 _read_aux가 개별 실패를 NaN 처리하므로 애초에 안 죽는다.
 
         행 순서: [time(s), frequency, noise, *aux] — 창의 _extra_cols(follow)와 일치."""
-        from pythonization.app.logging_setup import get_logger
         log = get_logger()
         c = self._cfg
         freq_node = c.freq_write_cmd     # driven의 set 노드를 follow에선 read 노드로 재사용
@@ -397,7 +408,6 @@ class MfliWindow(QDialog):
         lv.setSpacing(8)
 
         # 측정 방식 (driven vs follow)
-        from PySide6.QtWidgets import QRadioButton, QButtonGroup
         gb_mode = QGroupBox("측정 방식")
         mo = QVBoxLayout(gb_mode)
         self._rb_driven = QRadioButton("이 프로그램이 주파수를 직접 sweep")
@@ -635,7 +645,6 @@ class MfliWindow(QDialog):
         except Exception:
             pass
         self._set_status("병합 중…", "#888")
-        from PySide6.QtWidgets import QApplication
         QApplication.processEvents()
         try:
             from pythonization.analysis.mfli_merge import merge_sweeps
@@ -929,7 +938,6 @@ class MfliWindow(QDialog):
                 arr = arrays[i]
                 self._acc[i].append(float(arr[0]) if len(arr) else float("nan"))
         except Exception:
-            from pythonization.app.logging_setup import get_logger
             get_logger().exception("mfli accumulate failed (step %d)", step_idx)
         try:
             for i in range(min(len(self._plot_acc), len(arrays))):
@@ -949,7 +957,6 @@ class MfliWindow(QDialog):
             # (예: 1e5~2e5 Hz)를 못 따라가 ClipToView로 곡선이 화면 밖으로 잘려 '안 보인다'.
             self._panel.push_data(data, first_step=True)
         except Exception:
-            from pythonization.app.logging_setup import get_logger
             get_logger().exception("mfli plot update failed (step %d)", step_idx)
 
     @Slot(int, float)

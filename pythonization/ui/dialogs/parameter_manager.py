@@ -9,24 +9,48 @@ import re
 from typing import Dict, List, Optional, Tuple, Union
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
-    QLabel, QLineEdit, QPushButton, QComboBox,
-    QTableWidget, QTableWidgetItem, QHeaderView,
-    QGroupBox, QScrollArea, QWidget, QCheckBox,
-    QMessageBox, QFrame, QSpinBox, QDoubleSpinBox,
-    QSplitter, QSizePolicy,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QFormLayout,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QHBoxLayout as _QHBox,
+    QHeaderView,
+    QLabel,
+    QLabel as _QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 
 from pythonization.config.models import (
-    InstantiatedMeasurement, InstantiatedSweepValue, InstantiatedWriteCmd,
-    InstantiatedSecondSweepChannel, SecondSweepAdvanceType, MainUIProfile,
-    MeasurementParamDef, SweepValueDef, WriteCmdDef,
-    MetaDataConfig, MetaDataEntry, MeasType,
+    InstantiatedMeasurement,
+    InstantiatedSecondSweepChannel,
+    InstantiatedSweepValue,
+    InstantiatedWriteCmd,
+    MainUIProfile,
+    MeasurementParamDef,
+    MetaDataConfig,
+    MetaDataEntry,
+    SecondSweepAdvanceType,
+    SweepValueDef,
+    WriteCmdDef,
 )
 from pythonization.instruments.command_library import VisaLibraryRegistry
 from pythonization.profiles.registry import ProfileRegistry
+from pythonization.ui.widgets.help_button import make_help_button
 
 _MONO = QFont("Consolas", 10)
 
@@ -276,7 +300,6 @@ class AddEntryDialog(QDialog):
 
         # Source Type(sweep value / write command)은 선택한 라이브러리 명령의 종류로
         # 자동 판별하므로 별도 선택 UI를 두지 않는다. (_current_source_type 참고)
-        from pythonization.ui.widgets.help_button import make_help_button
         self._combo_advance = QComboBox()
         for at, lbl in _ADVANCE_LABELS.items():
             self._combo_advance.addItem(lbl, at)
@@ -1315,8 +1338,6 @@ class ParameterManagerWindow(QDialog):
         outer.setSpacing(8)
 
         # ── 상단 제목 + 도움말 ──
-        from pythonization.ui.widgets.help_button import make_help_button
-        from PySide6.QtWidgets import QHBoxLayout as _QHBox, QLabel as _QLabel
         hdr = _QHBox()
         _title = _QLabel("Parameter Manager")
         _title.setStyleSheet("font-weight: bold; font-size: 13px; color: #d2a8ff;")

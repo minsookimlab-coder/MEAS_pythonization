@@ -11,10 +11,17 @@ from typing import TYPE_CHECKING, Optional
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from pythonization.config.models import InstantiatedSecondSweepChannel, SecondSweepAdvanceType
+from pythonization.config.models import (
+    InstantiatedSecondSweepChannel,
+    SecondSweepAdvanceType,
+)
 from pythonization.measurement.sweep import calculate_next_step
 from pythonization.measurement.channel import SweepChannel
-from pythonization.instruments.parameter import MeasurementParameter, _parse_float
+from pythonization.instruments.parameter import (
+    MeasurementParameter,
+    SweepParameter,
+    _parse_float,
+)
 
 if TYPE_CHECKING:
     from pythonization.instruments.session import InstrumentSession
@@ -110,8 +117,6 @@ class SecondChannelWorker(QObject):
                   next_v: float, prev_v: Optional[float],
                   time_per_point: float) -> None:
         """calculate_next_step 루프로 점진적으로 sweep (측정 없음)."""
-        from pythonization.measurement.channel import SweepChannel
-        from pythonization.instruments.parameter import MeasurementParameter, SweepParameter
 
         sweep_ch = SweepChannel(
             alias=alias,

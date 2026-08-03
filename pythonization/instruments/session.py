@@ -10,6 +10,8 @@ from typing import Dict, Optional
 from pythonization.instruments.base import BaseInstrument
 from pythonization.instruments.factory import InstrumentFactory
 from pythonization.instruments.registry import InstrumentRegistry
+from pythonization.instruments.errors import is_comm_error
+from pythonization.util.network import find_ip_for_mac
 
 
 class InstrumentSession:
@@ -148,8 +150,6 @@ class InstrumentSession:
         반환값: 재연결에 성공한 BaseInstrument, 아니면 None
                 (None이면 호출부가 원래 예외를 그대로 전파 — 기존 방식대로 처리).
         """
-        from pythonization.instruments.errors import is_comm_error
-        from pythonization.util.network import find_ip_for_mac
 
         # 통신 오류가 아니거나, IP 재감지가 의미 없는 인터페이스/설정이면 패스
         if not is_comm_error(exc):

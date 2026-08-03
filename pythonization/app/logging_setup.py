@@ -21,7 +21,6 @@ import sys
 import threading
 import traceback
 from pathlib import Path
-from typing import Optional
 
 _LOGGER_NAME = "pythonization"
 _initialized = False

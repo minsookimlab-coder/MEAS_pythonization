@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pythonization.instruments.parameter import MeasurementParameter, SweepParameter
+from pythonization.config.models import InstantiatedSweepValue
 
 if TYPE_CHECKING:
     from pythonization.instruments.session import InstrumentSession
@@ -74,7 +75,6 @@ def sweep_channel_from_instantiated(inst: "InstantiatedSweepValue") -> "SweepCha
     Main UI Profile의 InstantiatedSweepValue에서 런타임 SweepChannel을 생성합니다.
     cmd_set은 이미 {v}로 정규화되어 있습니다.
     """
-    from pythonization.config.models import InstantiatedSweepValue
     return SweepChannel(
         alias=inst.alias,
         parameter=SweepParameter(

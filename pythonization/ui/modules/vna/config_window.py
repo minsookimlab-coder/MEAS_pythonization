@@ -9,21 +9,44 @@ from pathlib import Path
 from typing import List, Optional, TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QDialog, QDialogButtonBox,
-    QFormLayout, QGroupBox, QHBoxLayout, QInputDialog,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
-    QRadioButton, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QButtonGroup,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
+    QSpinBox,
+    QSplitter,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
 
 from pythonization.app.paths import SETTINGS_DIR
 from pythonization.config.models import SecondSweepAdvanceType
 from pythonization.ui.modules.vna.models import (
-    VnaAcquireConfig, VnaCommandEntry, VnaConfigData,
-    VnaSectionConfig, VnaParamSpec, VnaAdvanceConfig, VnaPreAdvanceCmd,
-    extract_params, load_vna_config, save_vna_config,
+    VnaAdvanceConfig,
+    VnaCommandEntry,
+    VnaConfigData,
+    VnaParamSpec,
+    VnaPreAdvanceCmd,
+    VnaSectionConfig,
+    extract_params,
+    load_vna_config,
+    save_vna_config,
 )
+from pythonization.ui.widgets.help_button import make_help_button
 
 if TYPE_CHECKING:
     from pythonization.instruments.command_library import VisaLibraryRegistry
@@ -161,7 +184,6 @@ class _PreAdvanceCmdDialog(QDialog):
         wc = self._combo_cmd.currentData()
         if wc is None:
             return
-        from PySide6.QtWidgets import QMessageBox
         for name, le, rb in self._param_widgets:
             if not rb.isChecked() and not le.text().strip():
                 QMessageBox.warning(self, "확인", f"파라미터 {{{name}}} 의 고정값을 채워주세요.")
@@ -927,7 +949,6 @@ class VnaConfigWindow(QDialog):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
 
-        from pythonization.ui.widgets.help_button import make_help_button
         hdr = QHBoxLayout()
         _t = QLabel("VNA Config")
         _t.setStyleSheet("font-weight: bold; font-size: 13px; color: #79c0ff;")
