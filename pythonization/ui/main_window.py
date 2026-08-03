@@ -546,61 +546,73 @@ class MainWindow(QMainWindow):
             self._loading_profile = False
 
     def _build_sequence_panel(self) -> QWidget:
+        """메인 탭 전체 — 좌측은 측정 설정, 우측은 프로파일이 채우는 채널 목록."""
         panel = QWidget()
         outer = QVBoxLayout(panel)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(6)
+        outer.addLayout(self._build_sequence_title_row())
 
-        # --- 제목 + 창 열기 버튼 ---
-        title_row = QHBoxLayout()
-        title = QLabel("Measurement Sequence")
-        title.setStyleSheet("font-size: 15px; font-weight: bold;")
-        title_row.addWidget(title)
-        title_row.addStretch()
-        btn_debug = QPushButton("Debug")
-        btn_debug.setFixedWidth(70)
-        btn_debug.clicked.connect(lambda: self._debug_window.show())
-        btn_array = QPushButton("Status")
-        btn_array.setFixedWidth(70)
-        btn_array.clicked.connect(lambda: self._sweep_status_window.show())
-        title_row.addWidget(btn_debug)
-        title_row.addWidget(btn_array)
-        outer.addLayout(title_row)
-
-        # ── 2-column content layout ────────────────────────────────────────
         content_row = QHBoxLayout()
         content_row.setSpacing(10)
         outer.addLayout(content_row, stretch=1)
+        content_row.addWidget(self._build_left_column())
+        content_row.addWidget(self._build_right_column(), stretch=1)
+        return panel
 
-        # ── LEFT COLUMN ──────────────────────────────────────────────────
-        left_widget = QWidget()
-        left_widget.setMinimumWidth(320)
-        left_widget.setMaximumWidth(420)
-        layout = QVBoxLayout(left_widget)
+    def _build_sequence_title_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        title = QLabel("Measurement Sequence")
+        title.setStyleSheet("font-size: 15px; font-weight: bold;")
+        row.addWidget(title)
+        row.addStretch()
+
+        btn_debug = QPushButton("Debug")
+        btn_debug.setFixedWidth(70)
+        btn_debug.clicked.connect(lambda: self._debug_window.show())
+        row.addWidget(btn_debug)
+
+        btn_status = QPushButton("Status")
+        btn_status.setFixedWidth(70)
+        btn_status.clicked.connect(lambda: self._sweep_status_window.show())
+        row.addWidget(btn_status)
+        return row
+
+    # ── 좌측 열: 측정 설정 ────────────────────────────────────────────────
+
+    def _build_left_column(self) -> QWidget:
+        column = QWidget()
+        column.setMinimumWidth(320)
+        column.setMaximumWidth(420)
+        layout = QVBoxLayout(column)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        content_row.addWidget(left_widget)
 
-        # --- Sweep Parameters ---
-        sweep_box = _WhaleBgFrame(asset_path(WHALE_BACKGROUND), opacity=0.3)
-        sweep_box.setFrameShape(QFrame.Shape.StyledPanel)
-        sweep_layout = QVBoxLayout(sweep_box)
+        layout.addWidget(self._build_sweep_params_box())
+        layout.addLayout(self._build_action_row())
+        layout.addLayout(self._build_quick_access_row())
+        layout.addWidget(self._build_save_settings_box())
+        for order in (1, 2, 3):
+            layout.addWidget(self._build_deriv_panel(order))
+        layout.addStretch()
+        return column
 
-        sweep_title = QLabel("Sweep Parameters")
-        sweep_title.setStyleSheet("font-weight: bold; font-size: 13px;")
-        sweep_layout.addWidget(sweep_title)
+    def _build_sweep_params_box(self) -> QWidget:
+        """sweep 목표·속도·주기 입력. 배경에 고래 그림이 반투명하게 깔린다."""
+        box = _WhaleBgFrame(asset_path(WHALE_BACKGROUND), opacity=0.3)
+        box.setFrameShape(QFrame.Shape.StyledPanel)
+        box_layout = QVBoxLayout(box)
+
+        title = QLabel("Sweep Parameters")
+        title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        box_layout.addWidget(title)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setHorizontalSpacing(12)
-        sweep_layout.addLayout(form)
+        box_layout.addLayout(form)
 
-        _SWEEP_LE_STYLE = (
-            "QLineEdit { background-color: rgba(255, 255, 255, 179);"
-            " color: #000000; border: 1px solid #aaa; border-radius: 3px; }"
-            "QLineEdit:focus { border: 1px solid #1a73e8; }"
-        )
-
+        # 배경 그림이 비쳐 보이도록 입력칸은 반투명 흰색으로 덮는다
         self._le_source_value = QLineEdit("—")
         self._le_source_value.setReadOnly(True)
         self._le_source_value.setStyleSheet(
@@ -610,59 +622,58 @@ class MainWindow(QMainWindow):
         self._le_source_value.setFixedWidth(120)
         form.addRow("Source Value:", self._le_source_value)
 
-        def _sweep_le(placeholder: str) -> QLineEdit:
-            le = QLineEdit(placeholder)
-            le.setFont(_MONO)
-            le.setMinimumWidth(280)
-            le.setStyleSheet(_SWEEP_LE_STYLE)
-            le.setValidator(QDoubleValidator(-1e18, 1e18, 10, le))
-            return le
-
-        self._le_sweep_to = _sweep_le("0")
-        self._le_sweep_to.textChanged.connect(self._update_step_size_label)
-        self._le_sweep_to.editingFinished.connect(self._on_sweep_params_confirmed)
+        self._le_sweep_to = self._make_sweep_field("0")
         self._lbl_sweep_to_unit = QLabel("")
-        _st_row = QWidget(); _st_h = QHBoxLayout(_st_row)
-        _st_h.setContentsMargins(0, 0, 0, 0); _st_h.setSpacing(4)
-        _st_h.addWidget(self._le_sweep_to); _st_h.addWidget(self._lbl_sweep_to_unit)
-        _st_h.addStretch()
-        form.addRow("Sweep To:", _st_row)
+        form.addRow("Sweep To:",
+                    self._field_with_unit(self._le_sweep_to, self._lbl_sweep_to_unit))
 
-        self._le_sweep_rate = _sweep_le("1")
-        self._le_sweep_rate.textChanged.connect(self._update_step_size_label)
-        self._le_sweep_rate.editingFinished.connect(self._on_sweep_params_confirmed)
+        self._le_sweep_rate = self._make_sweep_field("1")
         self._lbl_sweep_rate_unit = QLabel("units/min")
-        _sr_row = QWidget(); _sr_h = QHBoxLayout(_sr_row)
-        _sr_h.setContentsMargins(0, 0, 0, 0); _sr_h.setSpacing(4)
-        _sr_h.addWidget(self._le_sweep_rate); _sr_h.addWidget(self._lbl_sweep_rate_unit)
-        _sr_h.addStretch()
-        form.addRow("Sweep Rate:", _sr_row)
+        form.addRow("Sweep Rate:",
+                    self._field_with_unit(self._le_sweep_rate, self._lbl_sweep_rate_unit))
 
-        self._le_time_per_point = _sweep_le("1")
-        self._le_time_per_point.textChanged.connect(self._update_step_size_label)
-        self._le_time_per_point.editingFinished.connect(self._on_sweep_params_confirmed)
-        _tp_row = QWidget(); _tp_h = QHBoxLayout(_tp_row)
-        _tp_h.setContentsMargins(0, 0, 0, 0); _tp_h.setSpacing(4)
-        _tp_h.addWidget(self._le_time_per_point); _tp_h.addWidget(QLabel("sec"))
-        _tp_h.addStretch()
-        form.addRow("Time / Point:", _tp_row)
+        self._le_time_per_point = self._make_sweep_field("1")
+        form.addRow("Time / Point:",
+                    self._field_with_unit(self._le_time_per_point, QLabel("sec")))
 
-        self._lbl_step_size = QLabel("—")
-        self._lbl_step_size.setStyleSheet("color: #555555;")
-        form.addRow("Step Size:", self._lbl_step_size)
+        for label, attr in (("Step Size:", "_lbl_step_size"),
+                            ("Idle:", "_lbl_idle"),
+                            ("Remaining:", "_lbl_remaining")):
+            value = QLabel("—")
+            value.setStyleSheet("color: #555555;")
+            setattr(self, attr, value)
+            form.addRow(label, value)
+        return box
 
-        self._lbl_idle = QLabel("—")
-        self._lbl_idle.setStyleSheet("color: #555555;")
-        form.addRow("Idle:", self._lbl_idle)
+    def _make_sweep_field(self, placeholder: str) -> QLineEdit:
+        """sweep 파라미터 입력칸. 값이 바뀌면 스텝 크기 표시와 sweep 설정을 갱신한다."""
+        field = QLineEdit(placeholder)
+        field.setFont(_MONO)
+        field.setMinimumWidth(280)
+        field.setStyleSheet(
+            "QLineEdit { background-color: rgba(255, 255, 255, 179);"
+            " color: #000000; border: 1px solid #aaa; border-radius: 3px; }"
+            "QLineEdit:focus { border: 1px solid #1a73e8; }"
+        )
+        field.setValidator(QDoubleValidator(-1e18, 1e18, 10, field))
+        field.textChanged.connect(self._update_step_size_label)
+        field.editingFinished.connect(self._on_sweep_params_confirmed)
+        return field
 
-        self._lbl_remaining = QLabel("—")
-        self._lbl_remaining.setStyleSheet("color: #555555;")
-        form.addRow("Remaining:", self._lbl_remaining)
+    @staticmethod
+    def _field_with_unit(field: QLineEdit, unit: QLabel) -> QWidget:
+        """입력칸 + 단위 라벨을 한 줄로 묶는다."""
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(field)
+        layout.addWidget(unit)
+        layout.addStretch()
+        return row
 
-        layout.addWidget(sweep_box)
-
-        # --- Start / Stop ---
-        btn_row = QHBoxLayout()
+    def _build_action_row(self) -> QHBoxLayout:
+        """Start / Stop / Resume."""
         self._btn_start = QPushButton("Start")
         self._btn_start.setMinimumHeight(44)
         self._btn_start.setStyleSheet(
@@ -694,68 +705,81 @@ class MainWindow(QMainWindow):
         self._btn_resume.clicked.connect(self._on_resume_clicked)
         self._update_resume_btn_enabled()
 
-        btn_row.addWidget(self._btn_start)
-        btn_row.addWidget(self._btn_stop)
-        btn_row.addWidget(self._btn_resume)
-        layout.addLayout(btn_row)
+        row = QHBoxLayout()
+        row.addWidget(self._btn_start)
+        row.addWidget(self._btn_stop)
+        row.addWidget(self._btn_resume)
+        return row
 
-        # --- Quick-access buttons: Graph / Double Sweep / Connection Test ---
-        quick_row = QHBoxLayout()
-        quick_row.setSpacing(4)
-        btn_quick_graph = QPushButton("Graph")
-        btn_quick_graph.setToolTip("Open Graph window")
-        btn_quick_graph.clicked.connect(self._open_graph_window)
-        btn_quick_ds = QPushButton("Double Sweep")
-        btn_quick_ds.setToolTip("Open Double Sweep window")
-        btn_quick_ds.clicked.connect(self._open_double_sweep)
-        btn_quick_conn = QPushButton("Connection Test")
-        btn_quick_conn.setToolTip(
+    def _build_quick_access_row(self) -> QHBoxLayout:
+        """자주 쓰는 창 바로가기."""
+        row = QHBoxLayout()
+        row.setSpacing(4)
+
+        btn_graph = QPushButton("Graph")
+        btn_graph.setToolTip("Open Graph window")
+        btn_graph.clicked.connect(self._open_graph_window)
+        row.addWidget(btn_graph)
+
+        btn_double_sweep = QPushButton("Double Sweep")
+        btn_double_sweep.setToolTip("Open Double Sweep window")
+        btn_double_sweep.clicked.connect(self._open_double_sweep)
+        row.addWidget(btn_double_sweep)
+
+        btn_conn = QPushButton("Connection Test")
+        btn_conn.setToolTip(
             "Test *IDN? on all active instruments\n"
             "(sweep channel + active measurements + second channel if DS open)"
         )
-        btn_quick_conn.clicked.connect(self._on_connection_test)
-        quick_row.addWidget(btn_quick_graph)
-        quick_row.addWidget(btn_quick_ds)
-        quick_row.addWidget(btn_quick_conn)
-        layout.addLayout(quick_row)
+        btn_conn.clicked.connect(self._on_connection_test)
+        row.addWidget(btn_conn)
+        return row
 
-        # --- Save Settings panel ---
-        save_box = QFrame()
-        self._save_settings_frame = save_box
-        save_box.setFrameShape(QFrame.Shape.StyledPanel)
-        save_layout = QVBoxLayout(save_box)
-        save_layout.setContentsMargins(8, 6, 8, 6)
-        save_layout.setSpacing(4)
+    def _build_save_settings_box(self) -> QFrame:
+        """저장 경로 구성 + 실제 저장될 경로 미리보기."""
+        box = QFrame()
+        box.setFrameShape(QFrame.Shape.StyledPanel)
+        self._save_settings_frame = box
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
 
-        save_title = QLabel("Save Settings")
-        save_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #e3b341;")
-        save_layout.addWidget(save_title)
+        title = QLabel("Save Settings")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #e3b341;")
+        layout.addWidget(title)
+        layout.addLayout(self._build_save_form())
+        layout.addLayout(self._build_save_preview_row())
 
-        save_form = QFormLayout()
-        save_form.setHorizontalSpacing(8)
-        save_form.setVerticalSpacing(3)
-        save_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self._cb_save_enable = QCheckBox("Auto-save 활성화")
+        self._cb_save_enable.setChecked(False)
+        self._cb_save_enable.stateChanged.connect(self._update_save_preview)
+        layout.addWidget(self._cb_save_enable)
+        return box
 
-        mf_row = QHBoxLayout()
+    def _build_save_form(self) -> QFormLayout:
+        form = QFormLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(3)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
         self._le_main_folder = QLineEdit()
         self._le_main_folder.setFont(_MONO)
         self._le_main_folder.setPlaceholderText("Main 폴더")
         self._le_main_folder.textChanged.connect(self._update_save_preview)
-        btn_browse = QPushButton("Browse")
-        btn_browse.setFixedWidth(60)
-        btn_browse.clicked.connect(self._browse_save_folder)
-        self._btn_save_browse = btn_browse
-        mf_row.addWidget(self._le_main_folder)
-        mf_row.addWidget(btn_browse)
-        save_form.addRow("Main Folder:", mf_row)
+        self._btn_save_browse = QPushButton("Browse")
+        self._btn_save_browse.setFixedWidth(60)
+        self._btn_save_browse.clicked.connect(self._browse_save_folder)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(self._le_main_folder)
+        folder_row.addWidget(self._btn_save_browse)
+        form.addRow("Main Folder:", folder_row)
 
         self._le_custom_folder = QLineEdit()
         self._le_custom_folder.setFont(_MONO)
         self._le_custom_folder.setPlaceholderText("하위 폴더 (선택)")
         self._le_custom_folder.textChanged.connect(self._update_save_preview)
-        save_form.addRow("Sub Folder:", self._le_custom_folder)
+        form.addRow("Sub Folder:", self._le_custom_folder)
 
-        fn_row = QHBoxLayout()
         self._le_custom_word = QLineEdit()
         self._le_custom_word.setFont(_MONO)
         self._le_custom_word.setPlaceholderText("접두어 (선택)")
@@ -763,13 +787,13 @@ class MainWindow(QMainWindow):
         self._cb_save_date = QCheckBox("날짜")
         self._cb_save_date.setChecked(True)
         self._cb_save_date.stateChanged.connect(self._update_save_preview)
-        fn_row.addWidget(self._le_custom_word)
-        fn_row.addWidget(self._cb_save_date)
-        save_form.addRow("Filename:", fn_row)
+        name_row = QHBoxLayout()
+        name_row.addWidget(self._le_custom_word)
+        name_row.addWidget(self._cb_save_date)
+        form.addRow("Filename:", name_row)
+        return form
 
-        save_layout.addLayout(save_form)
-
-        preview_row = QHBoxLayout()
+    def _build_save_preview_row(self) -> QHBoxLayout:
         self._lbl_save_preview = QLabel("—")
         self._lbl_save_preview.setFont(_MONO)
         self._lbl_save_preview.setStyleSheet("color: #555555; font-size: 9px;")
@@ -780,99 +804,108 @@ class MainWindow(QMainWindow):
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self._lbl_save_preview.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+
         self._btn_copy_path = QPushButton("Copy")
-        self._btn_copy_path.setFixedWidth(46)
-        self._btn_copy_path.setFixedHeight(20)
+        self._btn_copy_path.setFixedSize(46, 20)
         self._btn_copy_path.setFont(QFont("Consolas", 8))
         self._btn_copy_path.clicked.connect(self._copy_save_path)
-        btn_copy_path = self._btn_copy_path
+
         self._btn_open_folder = QPushButton("Open Folder")
         self._btn_open_folder.setFixedHeight(20)
         self._btn_open_folder.setFont(QFont("Consolas", 8))
         self._btn_open_folder.clicked.connect(self._open_save_folder)
-        btn_open_folder = self._btn_open_folder
-        _arrow = QLabel("→")
-        _arrow.setAlignment(Qt.AlignmentFlag.AlignTop)
-        preview_row.addWidget(_arrow)
-        preview_row.addWidget(self._lbl_save_preview, stretch=1)
-        preview_row.addWidget(btn_copy_path, alignment=Qt.AlignmentFlag.AlignTop)
-        preview_row.addWidget(btn_open_folder, alignment=Qt.AlignmentFlag.AlignTop)
-        save_layout.addLayout(preview_row)
 
-        self._cb_save_enable = QCheckBox("Auto-save 활성화")
-        self._cb_save_enable.setChecked(False)
-        self._cb_save_enable.stateChanged.connect(self._update_save_preview)
-        save_layout.addWidget(self._cb_save_enable)
+        arrow = QLabel("→")
+        arrow.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        layout.addWidget(save_box)
-        layout.addWidget(self._build_deriv_panel(1))
-        layout.addWidget(self._build_deriv_panel(2))
-        layout.addWidget(self._build_deriv_panel(3))
+        row = QHBoxLayout()
+        row.addWidget(arrow)
+        row.addWidget(self._lbl_save_preview, stretch=1)
+        row.addWidget(self._btn_copy_path, alignment=Qt.AlignmentFlag.AlignTop)
+        row.addWidget(self._btn_open_folder, alignment=Qt.AlignmentFlag.AlignTop)
+        return row
 
-        layout.addStretch()
+    # ── 우측 열: 프로파일이 채우는 채널 목록 ──────────────────────────────
 
-        # ── RIGHT COLUMN ─────────────────────────────────────────────────
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
-        content_row.addWidget(right_widget, stretch=1)
+    def _build_right_column(self) -> QWidget:
+        """세 패널 모두 프로파일 적용 전에는 비어 있어 숨긴 채로 시작한다."""
+        column = QWidget()
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._build_sweep_channel_panel(), stretch=1)
+        layout.addWidget(self._build_measurements_panel(), stretch=2)
+        layout.addWidget(self._build_write_panel())
+        return column
 
-        # --- Sweep Channel panel ---
+    @staticmethod
+    def _make_channel_scroll() -> QScrollArea:
+        """채널 목록용 투명 스크롤 영역 (가로 스크롤바 없음)."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background: transparent;")
+        return scroll
+
+    def _build_sweep_channel_panel(self) -> QFrame:
+        """sweep 대상 채널 라디오 목록 — _rebuild_sweep_channel_panel 이 채운다."""
         self._sweep_channel_panel = QFrame()
         self._sweep_channel_panel.setFrameShape(QFrame.Shape.StyledPanel)
-        sc_outer = QVBoxLayout(self._sweep_channel_panel)
-        sc_outer.setContentsMargins(8, 6, 8, 6)
-        sc_outer.setSpacing(4)
-        sc_title = QLabel("Sweep Channel")
-        sc_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #79c0ff;")
-        sc_outer.addWidget(sc_title)
-        self._sweep_ch_scroll = QScrollArea()
-        self._sweep_ch_scroll.setWidgetResizable(True)
-        self._sweep_ch_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self._sweep_ch_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._sweep_ch_scroll.setStyleSheet("background: transparent;")
-        sc_outer.addWidget(self._sweep_ch_scroll, stretch=1)
+        layout = QVBoxLayout(self._sweep_channel_panel)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        title = QLabel("Sweep Channel")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #79c0ff;")
+        layout.addWidget(title)
+
+        self._sweep_ch_scroll = self._make_channel_scroll()
+        layout.addWidget(self._sweep_ch_scroll, stretch=1)
+
         self._sweep_radio_group = QButtonGroup(self)
         self._sweep_radio_group.setExclusive(True)
         self._sweep_radio_group.idToggled.connect(self._on_sweep_radio_toggled)
-        self._sweep_channel_panel.setVisible(False)
-        right_layout.addWidget(self._sweep_channel_panel, stretch=1)
 
-        # --- Active Measurements panel ---
+        self._sweep_channel_panel.setVisible(False)
+        return self._sweep_channel_panel
+
+    def _build_measurements_panel(self) -> QFrame:
+        """측정 항목 체크박스 목록 — _rebuild_meas_panel 이 채운다."""
         self._meas_panel = QFrame()
         self._meas_panel.setFrameShape(QFrame.Shape.StyledPanel)
-        meas_outer = QVBoxLayout(self._meas_panel)
-        meas_outer.setContentsMargins(8, 6, 8, 6)
-        meas_outer.setSpacing(4)
-        m_title_row = QHBoxLayout()
-        m_title = QLabel("Active Measurements")
-        m_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #56d364;")
-        m_title_row.addWidget(m_title)
-        m_title_row.addStretch()
-        m_title_row.addWidget(make_help_button(self._meas_help_html(), "Active Measurements 도움말"))
-        meas_outer.addLayout(m_title_row)
-        self._meas_scroll = QScrollArea()
-        self._meas_scroll.setWidgetResizable(True)
-        self._meas_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self._meas_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._meas_scroll.setStyleSheet("background: transparent;")
-        meas_outer.addWidget(self._meas_scroll, stretch=1)
-        self._meas_panel.setVisible(False)
-        right_layout.addWidget(self._meas_panel, stretch=2)
+        layout = QVBoxLayout(self._meas_panel)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
 
-        # --- Write Commands panel (hidden, kept for compatibility) ---
+        title_row = QHBoxLayout()
+        title = QLabel("Active Measurements")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #56d364;")
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(make_help_button(self._meas_help_html(),
+                                             "Active Measurements 도움말"))
+        layout.addLayout(title_row)
+
+        self._meas_scroll = self._make_channel_scroll()
+        layout.addWidget(self._meas_scroll, stretch=1)
+
+        self._meas_panel.setVisible(False)
+        return self._meas_panel
+
+    def _build_write_panel(self) -> QFrame:
+        """write 명령 목록. 현재 UI 에서는 숨겨져 있고 하위호환용으로만 남아 있다."""
         self._write_panel = QFrame()
         self._write_panel.setFrameShape(QFrame.Shape.StyledPanel)
         self._write_layout = QVBoxLayout(self._write_panel)
         self._write_layout.setContentsMargins(8, 6, 8, 6)
-        w_title = QLabel("Write Commands")
-        w_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #e3b341;")
-        self._write_layout.addWidget(w_title)
-        self._write_panel.setVisible(False)
-        right_layout.addWidget(self._write_panel)
 
-        return panel
+        title = QLabel("Write Commands")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #e3b341;")
+        self._write_layout.addWidget(title)
+
+        self._write_panel.setVisible(False)
+        return self._write_panel
 
     # ------------------------------------------------------------------
     # Glow animation
@@ -1282,17 +1315,16 @@ class MainWindow(QMainWindow):
             min_delta=min_delta,
         )
 
-    def _deriv_val_for_step(self, result, meas_map: dict) -> "float | None":
-        """현재 스텝에서 1차 미분값 계산."""
-        return self._deriv_val_for_order(result, meas_map, self._deriv_channel)
+    def _deriv_channels(self) -> tuple:
+        """(채널, 그래프/저장 컬럼 키) 3쌍 — 1·2·3차 미분.
 
-    def _deriv_val_for_step2(self, result, meas_map: dict) -> "float | None":
-        """현재 스텝에서 2차 미분값 계산."""
-        return self._deriv_val_for_order(result, meas_map, self._deriv_channel2)
-
-    def _deriv_val_for_step3(self, result, meas_map: dict) -> "float | None":
-        """현재 스텝에서 3차 미분값 계산."""
-        return self._deriv_val_for_order(result, meas_map, self._deriv_channel3)
+        세 채널을 나란히 다루는 곳이 여러 군데라 순서를 여기 한 곳에서 정한다.
+        """
+        return (
+            (self._deriv_channel,  _DERIV_KEY),
+            (self._deriv_channel2, _DERIV2_KEY),
+            (self._deriv_channel3, _DERIV3_KEY),
+        )
 
     def _deriv_val_for_order(self, result, meas_map: dict, channel: DerivativeChannel) -> "float | None":
         """공통: A1/A2 값 추출 후 채널에 push."""
@@ -1883,142 +1915,158 @@ class MainWindow(QMainWindow):
         # 여기서 즉시 리턴 → Qt 이벤트 루프 반환 → UI 반응 가능
 
     def _on_step_done(self, result: StepResult):
-        """Worker 스레드 완료 후 메인 스레드에서 UI 갱신."""
-        t_recv = time.perf_counter()
+        """워커 스텝 완료 → 메인 스레드에서 기록·표시하고 다음 스텝을 예약한다.
 
+        순서가 중요하다: 파일 기록 → 메타데이터 → 그래프. 기록에 실패하면 뒤
+        단계로 넘어가지 않고 측정을 멈춘다(데이터 유실 방지).
+        """
+        t_recv = time.perf_counter()
         if not self._running:
             return
 
-        # is_done=True without measurements → already at target, no data to record
+        # is_done 인데 측정값이 없다 = 이미 목표에 있었다 → 기록할 것 없이 종료
         if result.is_done and not result.meas_results:
-            self._lbl_idle.setText("—")
-            self._lbl_remaining.setText("—")
-            self._log(f"Sweep complete. ({self._sweep_step_count} steps)", color="#4ec9b0")
-            self._log_sweep(
-                f"★ Sweep complete — {self._sweep_step_count} steps",
-                color="#4ec9b0",
-            )
-            self._meta_manager.save(
-                self._param_manager_reg.meta_data_config,
-                self._data_saver.get_filepath(),
-            )
-            self._on_stop()
+            self._finish_sweep()
             return
 
         self.set_source_value(result.current)
         self._sweep_step_count += 1
 
-        # DataWindow 갱신: next_v + 체크된 measurement 값만
-        # val=None  → 실제 측정 에러 (스윕 중단)
-        # val=nan   → threshold 초과 (스윕 계속, 파일에 "nan" 기록)
         meas_map = {row: val for row, val in result.meas_results}
+        row_vals, failed = self._format_measurement_row(result, meas_map)
+        if failed:
+            self._handle_measurement_failure(result, failed)
+            return
+
+        self._auto_retry_used = False        # 정상 스텝 — 자동 재개 예산 리셋
+        self._log_step_summary(result, meas_map)
+
+        deriv_vals = self._push_derivatives(result, meas_map)
+        row_vals += self._derivative_row_cells(deriv_vals)
+
+        self._data_window.update_values(row_vals)
+        if not self._record_row(row_vals):
+            return
+
+        self._meta_manager.record_step(result.meas_results)   # T/B 메타 버퍼 누적
+        self._push_graph_point(result, meas_map, deriv_vals)
+        self._update_step_status(result)
+        self._last_write_value = result.next_v
+        self._update_remaining_time(result)
+
+        self._timing_window.update_timing(result.timing, t_recv, time.perf_counter())
+        self._schedule_next_step(result)
+
+    # ── _on_step_done 의 단계별 처리 ───────────────────────────────────────
+
+    def _finish_sweep(self):
+        """sweep 정상 종료 — 표시 초기화, 메타데이터 저장, 정지."""
+        self._lbl_idle.setText("—")
+        self._lbl_remaining.setText("—")
+        self._log(f"Sweep complete. ({self._sweep_step_count} steps)", color="#4ec9b0")
+        self._log_sweep(f"★ Sweep complete — {self._sweep_step_count} steps",
+                        color="#4ec9b0")
+        # 워커가 끝난 뒤라 VISA 접근이 안전한 시점
+        self._meta_manager.save(
+            self._param_manager_reg.meta_data_config,
+            self._data_saver.get_filepath(),
+        )
+        self._on_stop()
+
+    def _format_measurement_row(self, result, meas_map: dict) -> tuple:
+        """저장/표시용 한 행을 만든다. 반환: (셀 목록, 실패한 measurement 인덱스 목록)
+
+        val=None → 측정 에러(스윕 중단 대상)
+        val=nan  → threshold 초과(스윕은 계속하고 파일에 'nan' 기록)
+        """
         row_vals = [f"{result.next_v:.6g}"]
-        has_err = False
+        failed = []
         for idx in self._active_meas_indices:
             val = meas_map.get(idx)
             if val is None:
-                has_err = True
+                failed.append(idx)
                 row_vals.append("ERR")
             elif math.isnan(val):
                 row_vals.append("nan")
             else:
                 row_vals.append(f"{val:.6g}")
+        return row_vals, failed
 
-        if has_err:
-            err_descs = [
-                self._active_profile.measurements[idx].description
-                + (f": {result.meas_errors[idx]}" if idx in result.meas_errors else "")
-                for idx in self._active_meas_indices
-                if meas_map.get(idx) is None
-            ]
-            err_msg = (
-                f"✗ ERR @ {self._step_context}\n"
-                f"실패 채널: {', '.join(err_descs)}"
-            )
-            self._log_sweep(f"  {err_msg}", color="#f44747")
-            # 측정 실패 원인이 통신 오류면 자동 재개 경로로, 그 외(파싱 등)는 즉시 중단
-            comm = any(
-                is_comm_error(result.meas_errors.get(idx, ""))
-                for idx in self._active_meas_indices
-                if meas_map.get(idx) is None
-            )
-            if comm:
-                self._handle_comm_error("; ".join(err_descs))
-            else:
-                self._on_stop()
-                detail = "; ".join(
-                    result.meas_errors.get(idx, "")
-                    for idx in self._active_meas_indices if meas_map.get(idx) is None
-                )
-                QMessageBox.critical(
-                    self, "Measurement Error",
-                    f"{err_msg}\n\n원인: {humanize_error(detail)}")
-            return
-        else:
-            # 정상 스텝 — 자동 재개 예산 리셋
-            self._auto_retry_used = False
-            # verbose: 측정값 요약 (None/nan 제외)
-            val_summary = "  ".join(
-                f"{self._active_profile.measurements[idx].description}="
-                f"{meas_map[idx]:.4g}"
-                for idx in self._active_meas_indices
-                if meas_map.get(idx) is not None and not math.isnan(meas_map[idx])
-            )
-            if val_summary:
-                self._log_sweep(
-                    f"  ✓ v={result.next_v:.4g}  {val_summary}",
-                    color="#888888", verbose=True,
-                )
+    def _handle_measurement_failure(self, result, failed: list):
+        """측정 실패 처리 — 통신 오류면 자동 재개 경로로, 그 외(파싱 등)는 즉시 중단."""
+        descs = [
+            self._active_profile.measurements[idx].description
+            + (f": {result.meas_errors[idx]}" if idx in result.meas_errors else "")
+            for idx in failed
+        ]
+        err_msg = f"✗ ERR @ {self._step_context}\n실패 채널: {', '.join(descs)}"
+        self._log_sweep(f"  {err_msg}", color="#f44747")
 
-        # Derivative channel computation (numpy on ≤50 points — GUI thread safe)
-        deriv_val  = self._deriv_val_for_step(result, meas_map)
-        deriv_val2 = self._deriv_val_for_step2(result, meas_map)
-        deriv_val3 = self._deriv_val_for_step3(result, meas_map)
-        for ch, val in [
-            (self._deriv_channel,  deriv_val),
-            (self._deriv_channel2, deriv_val2),
-            (self._deriv_channel3, deriv_val3),
-        ]:
-            if ch._cfg.enabled:
-                row_vals.append(f"{val:.6g}" if val is not None else "—")
-
-        self._data_window.update_values(row_vals)
-        # 데이터 한 줄 기록 — 저장 활성인데 실패하면 측정 중단 (유실 방지)
-        if not self._data_saver.append_row(row_vals) and self._data_saver.is_enabled():
-            self._log("  ✗ 데이터 기록 실패 — 측정 중단 (디스크/권한 확인).", color="#f44747")
-            self._on_stop()
-            QMessageBox.critical(
-                self, "데이터 기록 실패 — 측정 중단",
-                "측정값을 파일에 기록하지 못해 측정을 중단했습니다.\n"
-                "디스크 공간·파일 권한을 확인한 뒤 다시 시작하세요.",
-            )
+        if any(is_comm_error(result.meas_errors.get(idx, "")) for idx in failed):
+            self._handle_comm_error("; ".join(descs))
             return
 
-        # MetaDataManager: T/B 버퍼에 이번 스텝 값 누적
-        self._meta_manager.record_step(result.meas_results)
+        self._on_stop()
+        detail = "; ".join(result.meas_errors.get(idx, "") for idx in failed)
+        QMessageBox.critical(self, "Measurement Error",
+                             f"{err_msg}\n\n원인: {humanize_error(detail)}")
 
-        # Graph update — 창 유무와 관계없이 항상 히스토리에 축적
-        gvals = {"__sweep__": result.next_v}
+    def _log_step_summary(self, result, meas_map: dict):
+        """verbose 로그에 이번 스텝 측정값 요약 (실패·threshold 초과 값은 제외)."""
+        summary = "  ".join(
+            f"{self._active_profile.measurements[idx].description}={meas_map[idx]:.4g}"
+            for idx in self._active_meas_indices
+            if meas_map.get(idx) is not None and not math.isnan(meas_map[idx])
+        )
+        if summary:
+            self._log_sweep(f"  ✓ v={result.next_v:.4g}  {summary}",
+                            color="#888888", verbose=True)
+
+    def _push_derivatives(self, result, meas_map: dict) -> list:
+        """1·2·3차 미분값 계산. ≤50점 numpy 연산이라 GUI 스레드에서 해도 부하가 없다."""
+        return [self._deriv_val_for_order(result, meas_map, ch)
+                for ch, _key in self._deriv_channels()]
+
+    def _derivative_row_cells(self, deriv_vals: list) -> list:
+        """활성화된 미분 채널만 저장 행에 덧붙인다."""
+        return [f"{val:.6g}" if val is not None else "—"
+                for (ch, _key), val in zip(self._deriv_channels(), deriv_vals)
+                if ch._cfg.enabled]
+
+    def _record_row(self, row_vals: list) -> bool:
+        """.dat 에 한 줄 기록. 저장이 켜져 있는데 실패하면 측정을 멈추고 False."""
+        if self._data_saver.append_row(row_vals) or not self._data_saver.is_enabled():
+            return True
+        self._log("  ✗ 데이터 기록 실패 — 측정 중단 (디스크/권한 확인).", color="#f44747")
+        self._on_stop()
+        QMessageBox.critical(
+            self, "데이터 기록 실패 — 측정 중단",
+            "측정값을 파일에 기록하지 못해 측정을 중단했습니다.\n"
+            "디스크 공간·파일 권한을 확인한 뒤 다시 시작하세요.",
+        )
+        return False
+
+    def _push_graph_point(self, result, meas_map: dict, deriv_vals: list):
+        """그래프 히스토리에 한 점 추가. 창이 떠 있지 않아도 계속 쌓아 둔다."""
+        values = {"__sweep__": result.next_v}
         for idx in self._active_meas_indices:
             val = meas_map.get(idx)
-            # None (측정 실패 또는 threshold 초과) → nan으로 그래프에 공백 표시
-            gvals[self._active_profile.measurements[idx].description] = (
-                val if val is not None else float("nan")
-            )
-        for ch, key, val in [
-            (self._deriv_channel,  _DERIV_KEY,  deriv_val),
-            (self._deriv_channel2, _DERIV2_KEY, deriv_val2),
-            (self._deriv_channel3, _DERIV3_KEY, deriv_val3),
-        ]:
+            # 측정 실패·threshold 초과는 nan → 그래프에서 선이 끊긴다
+            desc = self._active_profile.measurements[idx].description
+            values[desc] = val if val is not None else float("nan")
+        for (ch, key), val in zip(self._deriv_channels(), deriv_vals):
             if ch._cfg.enabled:
-                gvals[key] = val if val is not None else float("nan")
-        gpoint = GraphDataPoint(values=gvals, phase="")
-        self._graph_history.append(gpoint)
-        if self._graph_window is not None:
-            self._graph_window.append_point(gpoint)
+                values[key] = val if val is not None else float("nan")
 
-        # 표시용 다음값 계산. rate/tpp가 0이면 calculate_next_step이 ValueError를 던지는데
-        # (안전장치), 이 슬롯엔 try/except가 없어 그대로 두면 sweep이 조용히 멈춘다 → 흡수.
+        point = GraphDataPoint(values=values, phase="")
+        self._graph_history.append(point)
+        if self._graph_window is not None:
+            self._graph_window.append_point(point)
+
+    def _update_step_status(self, result):
+        """Sweep Status 창의 스텝 번호와 '다음 예정값' 갱신."""
+        # rate/tpp 가 0이면 calculate_next_step 이 ValueError 를 던진다(안전장치).
+        # 이 슬롯을 감싸는 try 가 없어 그대로 두면 sweep 이 조용히 멈추므로 흡수한다.
         try:
             next_display = None if result.is_done else calculate_next_step(
                 result.next_v,
@@ -2029,59 +2077,44 @@ class MainWindow(QMainWindow):
         except ValueError:
             next_display = None
         self._sweep_status_window.update_step(
-            self._sweep_step_count, result.current, next_display
-        )
+            self._sweep_step_count, result.current, next_display)
 
-        self._last_write_value = result.next_v
-
-        # Remaining time 예측
+    def _update_remaining_time(self, result):
+        """목표까지 남은 시간 예측 표시."""
         tpp = self._sweep_config.time_per_point
         step_size = self._sweep_config.sweep_rate * tpp / 60.0
-        if step_size > 0 and not result.is_done:
-            distance = abs(self._sweep_config.sweep_to - result.next_v)
-            remaining_steps = math.ceil(distance / step_size) if distance > 1e-12 else 0
-            remaining_s = remaining_steps * tpp
-            if remaining_s < 60:
-                self._lbl_remaining.setText(f"{remaining_s:.1f} s")
-            else:
-                m, s = divmod(int(remaining_s), 60)
-                self._lbl_remaining.setText(f"{m} min {s} s")
-        else:
+        if step_size <= 0 or result.is_done:
             self._lbl_remaining.setText("—")
+            return
+        distance = abs(self._sweep_config.sweep_to - result.next_v)
+        steps = math.ceil(distance / step_size) if distance > 1e-12 else 0
+        remaining_s = steps * tpp
+        if remaining_s < 60:
+            self._lbl_remaining.setText(f"{remaining_s:.1f} s")
+        else:
+            minutes, seconds = divmod(int(remaining_s), 60)
+            self._lbl_remaining.setText(f"{minutes} min {seconds} s")
 
-        t_ui_done = time.perf_counter()
-        self._timing_window.update_timing(result.timing, t_recv, t_ui_done)
-
+    def _schedule_next_step(self, result):
+        """다음 스텝 예약 — 완료면 종료, 초기 측정이면 즉시, 아니면 남은 간격만큼 대기."""
         if result.is_done:
-            self._lbl_idle.setText("—")
-            self._lbl_remaining.setText("—")
-            self._log(f"Sweep complete. ({self._sweep_step_count} steps)", color="#4ec9b0")
-            self._log_sweep(
-                f"★ Sweep complete — {self._sweep_step_count} steps",
-                color="#4ec9b0",
-            )
-            # MetaData 저장 (sweep worker 완료 후이므로 VISA 안전)
-            self._meta_manager.save(
-                self._param_manager_reg.meta_data_config,
-                self._data_saver.get_filepath(),
-            )
-            self._on_stop()
-        elif result.measure_only:
-            # 초기 상태 측정 완료 → 즉시 sweep 타이머 시작
-            self._sweep_step_timer.start(0)
-        else:
-            # t_ui_done을 타이머 직전에 다시 찍어 모든 처리 시간 반영
-            t_before_timer = time.perf_counter()
-            elapsed_ms = int((t_before_timer - result.timing.t_emit) * 1000)
-            interval_ms = max(0, int(tpp * 1000) - elapsed_ms)
-            self._lbl_idle.setText(
-                f"{interval_ms} ms" if interval_ms >= 0
-                else f"overrun {-interval_ms} ms"
-            )
-            self._lbl_idle.setStyleSheet(
-                "color: #f44747;" if interval_ms <= 0 else "color: #555555;"
-            )
-            self._sweep_step_timer.start(interval_ms)
+            self._finish_sweep()
+            return
+        if result.measure_only:
+            self._sweep_step_timer.start(0)   # 초기 상태 측정 완료 → 바로 sweep 시작
+            return
+
+        # 이번 스텝 처리에 쓴 시간을 빼서 time_per_point 주기를 맞춘다
+        tpp = self._sweep_config.time_per_point
+        elapsed_ms = int((time.perf_counter() - result.timing.t_emit) * 1000)
+        interval_ms = max(0, int(tpp * 1000) - elapsed_ms)
+        # NOTE: max(0, ...) 로 클램프되므로 아래 'overrun' 표시는 실제로는 나오지 않는다.
+        # 표시 동작을 바꾸지 않으려고 원래 코드를 그대로 둔다.
+        self._lbl_idle.setText(
+            f"{interval_ms} ms" if interval_ms >= 0 else f"overrun {-interval_ms} ms")
+        self._lbl_idle.setStyleSheet(
+            "color: #f44747;" if interval_ms <= 0 else "color: #555555;")
+        self._sweep_step_timer.start(interval_ms)
 
     def _on_step_error(self, msg: str):
         """Worker에서 예외 발생 시 메인 스레드에서 처리."""

@@ -70,6 +70,44 @@ if TYPE_CHECKING:
 
 _MONO = QFont("Consolas", 10)
 
+# FEEDBACK 구획의 '?' 배지 툴팁. 판정이 2단계(근접 → 안정화)라 설명이 길어
+# 빌더 안에 두면 코드가 파묻힌다.
+_FEEDBACK_HELP_HTML = (
+    "<html><head/><body style='white-space:normal;'>"
+    "<b>FEEDBACK Channel Settings 도움말</b><hr>"
+    "<table cellspacing='4' cellpadding='2'>"
+    "<tr valign='top'><td><b>Read&nbsp;Cmd</b></td>"
+    "<td>안정화 감지용 VISA 쿼리 명령어.<br>"
+    "예&nbsp;①&nbsp;<code>print(smua.measure.v())</code>&nbsp;(Keithley TSP)<br>"
+    "예&nbsp;②&nbsp;<code>READ:DEV:GRPZ:PSU:SIG:FLD</code>&nbsp;(Mercury iPS)<br>"
+    "응답에 단위 접미사(T, A…)가 붙어도 자동 파싱됩니다.<br>"
+    "Profile에 이미 설정돼 있으면 자동 비활성화.</td></tr>"
+    "<tr valign='top'><td><b>Poll&nbsp;Interval</b></td>"
+    "<td>Read Cmd를 반복 실행하는 간격 (초).<br>"
+    "짧을수록 빠른 감지, 길수록 장비 부하 감소.<br>"
+    "권장: 0.5 ~ 5 s</td></tr>"
+    "<tr valign='top'><td><b>Tolerance</b></td>"
+    "<td><b>Phase 1</b> 조건 — 목표 근접도 판정.<br>"
+    "ratio = |읽은값 − 이전값| / |목표값 − 이전값|<br>"
+    "ratio ≥ tolerance/100 이면 안정화 체크(Phase 2) 시작.<br>"
+    "기본값: 95 %  ·  <b>자기장 권장: 98 %</b></td></tr>"
+    "<tr valign='top'><td><b>Std&nbsp;Window</b></td>"
+    "<td><b>Phase 2</b> 안정화 판정에 쓸 샘플 수.<br>"
+    "0 → 비활성화: Tolerance 통과만으로 다음 단계 진행.<br>"
+    "N&gt;0 → 최근 N개 샘플의 표준편차로 안정성 평가.</td></tr>"
+    "<tr valign='top'><td><b>Noise&nbsp;Floor</b></td>"
+    "<td>정규화 분모 하한 (측정값과 동일한 단위).<br>"
+    "<b>목표값이 0 근처이면 반드시 설정해야 합니다.</b><br>"
+    "<b>자기장 권장: 0.001 T</b>  ·  전류 → 1e-9 A</td></tr>"
+    "<tr valign='top'><td><b>Std&nbsp;Threshold</b></td>"
+    "<td>안정화 판정 임계값 (무차원).<br>"
+    "metric = std / (|목표값| + Noise Floor)<br>"
+    "metric &lt; Std Threshold 이면 안정화 완료 → 다음 단계 진행.<br>"
+    "기본값: 0.01 (목표값 대비 1 %)  ·  <b>자기장 권장: 0.0003</b><br>"
+    "옆의 <i>now</i> 숫자가 실시간으로 현재 metric을 표시합니다.</td></tr>"
+    "</table></body></html>"
+)
+
 
 @dataclass
 class DoubleSweepContext:
@@ -313,6 +351,12 @@ class DoubleSweepWindow(QDialog):
     # ------------------------------------------------------------------
 
     def _build_ui(self):
+        """창 전체 조립. 각 구획은 아래 _build_*_box() 가 만들어 돌려준다.
+
+        좌측 = 측정 제어(위에서 아래로 진행 순서대로), 우측 = 알람 조건 패널.
+        second channel 의 advance type 에 따라 SWEEP/FEEDBACK/WAIT 구획 중 하나만
+        보이므로, 셋 다 만들어 두고 숨긴 채 시작한다.
+        """
         dialog_layout = QVBoxLayout(self)
         dialog_layout.setContentsMargins(0, 0, 0, 0)
         self._glow_frame = QFrame()
@@ -322,146 +366,201 @@ class DoubleSweepWindow(QDialog):
         )
         dialog_layout.addWidget(self._glow_frame)
 
-        # 좌/우 2-패널 레이아웃
         glow_h = QHBoxLayout(self._glow_frame)
         glow_h.setContentsMargins(0, 0, 0, 0)
         glow_h.setSpacing(0)
 
-        # 좌측 패널 (기존 컨트롤)
         left_widget = QWidget()
         outer = QVBoxLayout(left_widget)
         outer.setContentsMargins(10, 10, 6, 10)
         outer.setSpacing(8)
         glow_h.addWidget(left_widget, stretch=1)
 
-        # 상단 제목 + 도움말
-        _ds_hdr = QHBoxLayout()
-        _ds_title = QLabel("Double Sweep")
-        _ds_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #f78166;")
-        _ds_hdr.addWidget(_ds_title)
-        _ds_hdr.addStretch()
-        _ds_hdr.addWidget(make_help_button(self._ds_help_html(), "Double Sweep 도움말"))
-        outer.addLayout(_ds_hdr)
+        self._right_alarm_scroll = self._build_alarm_panel()
+        glow_h.addWidget(self._right_alarm_scroll)
 
-        # 우측 패널 — 측정값 조건(여기 유지) + Alarm Config 버튼(전달·텔레그램은 별도 창)
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        right_scroll.setMinimumWidth(260)
-        right_scroll.setMaximumWidth(320)
-        right_panel = QWidget()
-        right_v = QVBoxLayout(right_panel)
-        right_v.setContentsMargins(0, 0, 0, 0)
-        right_v.setSpacing(6)
-        btn_alarm_cfg = QPushButton("⚙ Alarm Config…")
-        btn_alarm_cfg.setToolTip("알람 활성화 / 사운드·이메일·텔레그램 / 고정 트리거 설정")
-        btn_alarm_cfg.clicked.connect(self._open_alarm_config)
-        right_v.addWidget(btn_alarm_cfg)
+        outer.addLayout(self._build_title_row())
+        outer.addWidget(self._build_second_channel_box())
+        outer.addWidget(self._build_sweep_params_box())
+        outer.addWidget(self._build_sweep_advance_box())
+        outer.addWidget(self._build_feedback_box())
+        outer.addWidget(self._build_wait_time_box())
+        outer.addWidget(self._build_array_box())
+        outer.addLayout(self._build_array_table_row())
+        outer.addLayout(self._build_estimate_row())
+        self._connect_estimate_inputs()
+        outer.addWidget(self._build_status_box())
+        outer.addLayout(self._build_action_row())
+        outer.addLayout(self._build_save_path_row())
+        outer.addStretch()
+
+    # ── _build_ui 가 쓰는 공용 입력 위젯 ──────────────────────────────────
+
+    def _make_value_field(self, width: int = 160):
+        """QLineEdit + 단위 QLabel + 둘을 담은 컨테이너. 반환 (입력, 단위라벨, 컨테이너)."""
+        le = QLineEdit()
+        le.setFont(_MONO)
+        le.setFixedWidth(width)
+        validator = QDoubleValidator()
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        le.setValidator(validator)
+
+        unit = QLabel("")
+        unit.setFont(_MONO)
+        unit.setStyleSheet("color: #888888;")
+        unit.setMinimumWidth(60)
+
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(le)
+        row.addWidget(unit)
+        row.addStretch()
+        return le, unit, container
+
+    def _make_inline_field(self, width: int = 90):
+        """QLineEdit + 단위 QLabel만 (컨테이너 없음 — parent-child GC 문제 회피)."""
+        le = QLineEdit()
+        le.setFont(_MONO)
+        le.setFixedWidth(width)
+        validator = QDoubleValidator()
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        le.setValidator(validator)
+
+        unit = QLabel("")
+        unit.setFont(_MONO)
+        unit.setStyleSheet("color: #888888;")
+        unit.setMinimumWidth(50)
+        return le, unit
+
+    # ── 구획별 빌더 ───────────────────────────────────────────────────────
+
+    def _build_title_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        title = QLabel("Double Sweep")
+        title.setStyleSheet("font-weight: bold; font-size: 13px; color: #f78166;")
+        row.addWidget(title)
+        row.addStretch()
+        row.addWidget(make_help_button(self._ds_help_html(), "Double Sweep 도움말"))
+        return row
+
+    def _build_alarm_panel(self) -> QScrollArea:
+        """우측 패널 — 측정값 조건 + Alarm Config 버튼.
+
+        전달 수단(사운드·이메일·텔레그램) 설정은 별도 창에 있다.
+        """
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMinimumWidth(260)
+        scroll.setMaximumWidth(320)
+
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        btn = QPushButton("⚙ Alarm Config…")
+        btn.setToolTip("알람 활성화 / 사운드·이메일·텔레그램 / 고정 트리거 설정")
+        btn.clicked.connect(self._open_alarm_config)
+        layout.addWidget(btn)
+
         self._meascond_panel = MeasCondPanel()
-        right_v.addWidget(self._meascond_panel)
-        right_v.addStretch()
-        right_scroll.setWidget(right_panel)
-        self._right_alarm_scroll = right_scroll
-        glow_h.addWidget(right_scroll)
+        layout.addWidget(self._meascond_panel)
+        layout.addStretch()
 
-        # Second Channel selector
-        ch_frame = QFrame()
-        ch_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        ch_layout = QVBoxLayout(ch_frame)
-        ch_layout.setContentsMargins(8, 6, 8, 6)
-        ch_title = QLabel("Second Channel")
-        ch_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #f78166;")
-        ch_layout.addWidget(ch_title)
+        scroll.setWidget(panel)
+        return scroll
+
+    def _build_second_channel_box(self) -> QFrame:
+        """second channel 선택 라디오 목록. 항목은 프로파일 로드 후 채워진다."""
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(8, 6, 8, 6)
+
+        title = QLabel("Second Channel")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #f78166;")
+        layout.addWidget(title)
+
         self._second_ch_layout = QVBoxLayout()
-        ch_layout.addLayout(self._second_ch_layout)
+        layout.addLayout(self._second_ch_layout)
         self._second_radio_group = QButtonGroup(self)
         self._second_radio_group.setExclusive(True)
         self._second_radio_group.idToggled.connect(self._on_second_radio_toggled)
-        self._ch_frame = ch_frame
-        outer.addWidget(ch_frame)
 
-        # Sweep Parameters
-        sp_frame = QFrame()
-        sp_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        sp_layout = QVBoxLayout(sp_frame)
-        sp_layout.setContentsMargins(8, 6, 8, 6)
-        sp_title = QLabel("Sweep Parameters")
-        sp_title.setStyleSheet("font-weight: bold; font-size: 12px;")
-        sp_layout.addWidget(sp_title)
+        self._ch_frame = frame
+        return frame
+
+    def _build_sweep_params_box(self) -> QFrame:
+        """주 sweep 파라미터 — 시작/끝, phase별 rate, 포인트당 시간."""
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(8, 6, 8, 6)
+
+        title = QLabel("Sweep Parameters")
+        title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        layout.addWidget(title)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setHorizontalSpacing(12)
-        sp_layout.addLayout(form)
+        layout.addLayout(form)
 
-        def _lefield(w=160):
-            """QLineEdit + unit QLabel + container widget."""
-            le = QLineEdit()
-            le.setFont(_MONO)
-            le.setFixedWidth(w)
-            vd = QDoubleValidator()
-            vd.setNotation(QDoubleValidator.Notation.StandardNotation)
-            le.setValidator(vd)
-            lbl_u = QLabel("")
-            lbl_u.setFont(_MONO)
-            lbl_u.setStyleSheet("color: #888888;")
-            lbl_u.setMinimumWidth(60)
-            cnt = QWidget()
-            h = QHBoxLayout(cnt)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(4)
-            h.addWidget(le)
-            h.addWidget(lbl_u)
-            h.addStretch()
-            return le, lbl_u, cnt
-
-        self._le_start,  self._lbl_start_unit,  cnt_start  = _lefield()
-        self._le_stop,   self._lbl_stop_unit,   cnt_stop   = _lefield()
-        self._le_rate_t, self._lbl_rate_t_unit, cnt_rate_t = _lefield()
-        self._le_rate_r, self._lbl_rate_r_unit, cnt_rate_r = _lefield()
-        self._le_rate_d, self._lbl_rate_d_unit, cnt_rate_d = _lefield()
-        self._le_tpp,    _lbl_tpp_unit,         cnt_tpp    = _lefield()
-        _lbl_tpp_unit.setText("sec")
+        self._le_start,  self._lbl_start_unit,  cnt_start  = self._make_value_field()
+        self._le_stop,   self._lbl_stop_unit,   cnt_stop   = self._make_value_field()
+        self._le_rate_t, self._lbl_rate_t_unit, cnt_rate_t = self._make_value_field()
+        self._le_rate_r, self._lbl_rate_r_unit, cnt_rate_r = self._make_value_field()
+        self._le_rate_d, self._lbl_rate_d_unit, cnt_rate_d = self._make_value_field()
+        self._le_tpp,    lbl_tpp_unit,          cnt_tpp    = self._make_value_field()
+        lbl_tpp_unit.setText("sec")
 
         self._cb_retrace_to_zero = QCheckBox("Retrace to 0")
         self._cb_retrace_to_zero.setFont(_MONO)
-        self._cb_retrace_to_zero.setToolTip("When checked, RETRACE sweeps to 0 instead of Start Point")
+        self._cb_retrace_to_zero.setToolTip(
+            "When checked, RETRACE sweeps to 0 instead of Start Point")
 
-        form.addRow("Start Point:", cnt_start)
-        form.addRow("Stop Point:",  cnt_stop)
-        form.addRow("Rate (trace):",    cnt_rate_t)
-        form.addRow("Rate (retrace):",  cnt_rate_r)
-        form.addRow("",                 self._cb_retrace_to_zero)
-        form.addRow("Rate (dummy):",    cnt_rate_d)
-        form.addRow("Time / Point:",    cnt_tpp)
-        self._sp_frame = sp_frame
-        outer.addWidget(sp_frame)
+        form.addRow("Start Point:",    cnt_start)
+        form.addRow("Stop Point:",     cnt_stop)
+        form.addRow("Rate (trace):",   cnt_rate_t)
+        form.addRow("Rate (retrace):", cnt_rate_r)
+        form.addRow("",                self._cb_retrace_to_zero)
+        form.addRow("Rate (dummy):",   cnt_rate_d)
+        form.addRow("Time / Point:",   cnt_tpp)
 
-        # SWEEP Channel Settings (only visible when second channel advance_type == SWEEP)
+        self._sp_frame = frame
+        return frame
+
+    def _build_sweep_advance_box(self) -> QFrame:
+        """advance_type == SWEEP 일 때만 보이는 구획 (safety ramp 포함)."""
         self._sweep_ch_frame = QFrame()
         self._sweep_ch_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        sc_layout = QVBoxLayout(self._sweep_ch_frame)
-        sc_layout.setContentsMargins(8, 6, 8, 6)
-        sc_hdr = QHBoxLayout()
-        sc_hdr.setSpacing(6)
-        sc_title = QLabel("SWEEP Channel Settings")
-        sc_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #c586c0;")
-        sc_hdr.addWidget(sc_title)
-        sc_hdr.addWidget(make_help_button(self._safety_ramp_help_html(), "Safety Ramp 도움말"))
-        sc_hdr.addStretch()
-        sc_layout.addLayout(sc_hdr)
+        layout = QVBoxLayout(self._sweep_ch_frame)
+        layout.setContentsMargins(8, 6, 8, 6)
 
-        sc_form = QFormLayout()
-        sc_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        sc_form.setHorizontalSpacing(12)
-        sc_layout.addLayout(sc_form)
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        title = QLabel("SWEEP Channel Settings")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #c586c0;")
+        header.addWidget(title)
+        header.addWidget(make_help_button(self._safety_ramp_help_html(),
+                                          "Safety Ramp 도움말"))
+        header.addStretch()
+        layout.addLayout(header)
 
-        self._le_second_rate, self._lbl_second_rate_unit, cnt_sr = _lefield()
-        sc_form.addRow("Sweep Rate:", cnt_sr)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(12)
+        layout.addLayout(form)
+
+        self._le_second_rate, self._lbl_second_rate_unit, cnt_rate = self._make_value_field()
+        form.addRow("Sweep Rate:", cnt_rate)
 
         self._cb_second_safety = QCheckBox("Use Safety Ramp")
         self._cb_second_safety.setFont(_MONO)
-        sc_form.addRow("", self._cb_second_safety)
+        form.addRow("", self._cb_second_safety)
 
         self._sb_second_steps = QSpinBox()
         self._sb_second_steps.setRange(0, 100000)
@@ -469,201 +568,167 @@ class DoubleSweepWindow(QDialog):
         self._sb_second_steps.setFont(_MONO)
         self._sb_second_steps.setFixedWidth(100)
         self._sb_second_steps.setEnabled(False)
-        sc_form.addRow("Safety Steps:", self._sb_second_steps)
+        form.addRow("Safety Steps:", self._sb_second_steps)
 
-        self._le_second_interval, _lbl_si_unit, cnt_si = _lefield()
-        _lbl_si_unit.setText("ms")
+        self._le_second_interval, lbl_interval_unit, cnt_interval = self._make_value_field()
+        lbl_interval_unit.setText("ms")
         self._le_second_interval.setEnabled(False)
-        sc_form.addRow("Safety Interval:", cnt_si)
+        form.addRow("Safety Interval:", cnt_interval)
 
+        # safety ramp 를 켤 때만 스텝/간격 입력을 연다
         self._cb_second_safety.toggled.connect(self._sb_second_steps.setEnabled)
         self._cb_second_safety.toggled.connect(self._le_second_interval.setEnabled)
 
         self._sweep_ch_frame.setVisible(False)
-        outer.addWidget(self._sweep_ch_frame)
+        return self._sweep_ch_frame
 
-        # FEEDBACK Channel Settings (only visible when advance_type == FEEDBACK)
+    def _build_feedback_box(self) -> QFrame:
+        """advance_type == FEEDBACK 일 때만 보이는 구획.
+
+        2단계 판정이다: Tolerance(목표 근접) 통과 후 Std Window/Threshold(안정화).
+        자세한 의미는 _FEEDBACK_HELP_HTML 참고.
+        """
         self._feedback_frame = QFrame()
         self._feedback_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        fb_layout = QVBoxLayout(self._feedback_frame)
-        fb_layout.setContentsMargins(8, 6, 8, 6)
+        layout = QVBoxLayout(self._feedback_frame)
+        layout.setContentsMargins(8, 6, 8, 6)
 
-        _FB_HELP = (
-            "<html><head/><body style='white-space:normal;'>"
-            "<b>FEEDBACK Channel Settings 도움말</b><hr>"
-            "<table cellspacing='4' cellpadding='2'>"
-            "<tr valign='top'><td><b>Read&nbsp;Cmd</b></td>"
-            "<td>안정화 감지용 VISA 쿼리 명령어.<br>"
-            "예&nbsp;①&nbsp;<code>print(smua.measure.v())</code>&nbsp;(Keithley TSP)<br>"
-            "예&nbsp;②&nbsp;<code>READ:DEV:GRPZ:PSU:SIG:FLD</code>&nbsp;(Mercury iPS)<br>"
-            "응답에 단위 접미사(T, A…)가 붙어도 자동 파싱됩니다.<br>"
-            "Profile에 이미 설정돼 있으면 자동 비활성화.</td></tr>"
-            "<tr valign='top'><td><b>Poll&nbsp;Interval</b></td>"
-            "<td>Read Cmd를 반복 실행하는 간격 (초).<br>"
-            "짧을수록 빠른 감지, 길수록 장비 부하 감소.<br>"
-            "권장: 0.5 ~ 5 s</td></tr>"
-            "<tr valign='top'><td><b>Tolerance</b></td>"
-            "<td><b>Phase 1</b> 조건 — 목표 근접도 판정.<br>"
-            "ratio = |읽은값 − 이전값| / |목표값 − 이전값|<br>"
-            "ratio ≥ tolerance/100 이면 안정화 체크(Phase 2) 시작.<br>"
-            "기본값: 95 %  ·  <b>자기장 권장: 98 %</b></td></tr>"
-            "<tr valign='top'><td><b>Std&nbsp;Window</b></td>"
-            "<td><b>Phase 2</b> 안정화 판정에 쓸 샘플 수.<br>"
-            "0 → 비활성화: Tolerance 통과만으로 다음 단계 진행.<br>"
-            "N&gt;0 → 최근 N개 샘플의 표준편차로 안정성 평가.</td></tr>"
-            "<tr valign='top'><td><b>Noise&nbsp;Floor</b></td>"
-            "<td>정규화 분모 하한 (측정값과 동일한 단위).<br>"
-            "<b>목표값이 0 근처이면 반드시 설정해야 합니다.</b><br>"
-            "<b>자기장 권장: 0.001 T</b>  ·  전류 → 1e-9 A</td></tr>"
-            "<tr valign='top'><td><b>Std&nbsp;Threshold</b></td>"
-            "<td>안정화 판정 임계값 (무차원).<br>"
-            "metric = std / (|목표값| + Noise Floor)<br>"
-            "metric &lt; Std Threshold 이면 안정화 완료 → 다음 단계 진행.<br>"
-            "기본값: 0.01 (목표값 대비 1 %)  ·  <b>자기장 권장: 0.0003</b><br>"
-            "옆의 <i>now</i> 숫자가 실시간으로 현재 metric을 표시합니다.</td></tr>"
-            "</table></body></html>"
-        )
-
-        fb_hdr = QHBoxLayout()
-        fb_hdr.setSpacing(6)
-        fb_title = QLabel("FEEDBACK Channel Settings")
-        fb_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #4ec9b0;")
-        fb_hdr.addWidget(fb_title)
-        fb_help_btn = QLabel("?")
-        fb_help_btn.setFixedSize(16, 16)
-        fb_help_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        fb_help_btn.setStyleSheet(
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        title = QLabel("FEEDBACK Channel Settings")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #4ec9b0;")
+        header.addWidget(title)
+        help_badge = QLabel("?")
+        help_badge.setFixedSize(16, 16)
+        help_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        help_badge.setStyleSheet(
             "background-color: #4ec9b0; color: #1e1e1e; border-radius: 8px;"
             "font-weight: bold; font-size: 10px;"
         )
-        fb_help_btn.setToolTip(_FB_HELP)
-        fb_hdr.addWidget(fb_help_btn)
-        fb_hdr.addStretch()
-        fb_layout.addLayout(fb_hdr)
+        help_badge.setToolTip(_FEEDBACK_HELP_HTML)
+        header.addWidget(help_badge)
+        header.addStretch()
+        layout.addLayout(header)
 
-        fb_form = QFormLayout()
-        fb_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        fb_form.setHorizontalSpacing(12)
-        fb_layout.addLayout(fb_form)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(12)
+        layout.addLayout(form)
 
-        # Read Cmd: profile에 이미 설정된 경우 비활성화
-        fb_read_row = QWidget()
-        fb_read_lay = QHBoxLayout(fb_read_row)
-        fb_read_lay.setContentsMargins(0, 0, 0, 0)
-        fb_read_lay.setSpacing(6)
+        # Read Cmd — 프로파일에 이미 설정돼 있으면 _update_feedback_read_cmd_state 가 잠근다
+        read_row = QWidget()
+        read_lay = QHBoxLayout(read_row)
+        read_lay.setContentsMargins(0, 0, 0, 0)
+        read_lay.setSpacing(6)
         self._le_fb_read_cmd = QLineEdit()
         self._le_fb_read_cmd.setFont(_MONO)
         self._le_fb_read_cmd.setPlaceholderText("예: print(smua.measure.v())")
-        fb_read_lay.addWidget(self._le_fb_read_cmd)
+        read_lay.addWidget(self._le_fb_read_cmd)
         self._lbl_fb_read_hint = QLabel("")
         self._lbl_fb_read_hint.setFont(_MONO)
         self._lbl_fb_read_hint.setStyleSheet("color: #888888; font-size: 9px;")
-        fb_read_lay.addWidget(self._lbl_fb_read_hint)
-        fb_form.addRow("Read Cmd:", fb_read_row)
+        read_lay.addWidget(self._lbl_fb_read_hint)
+        form.addRow("Read Cmd:", read_row)
 
-        self._le_fb_poll, _lbl_fb_poll_u, cnt_fb_poll = _lefield(100)
-        _lbl_fb_poll_u.setText("s")
-        fb_form.addRow("Poll Interval:", cnt_fb_poll)
+        self._le_fb_poll, lbl_poll_unit, cnt_poll = self._make_value_field(100)
+        lbl_poll_unit.setText("s")
+        form.addRow("Poll Interval:", cnt_poll)
 
-        self._le_fb_tol, _lbl_fb_tol_u, cnt_fb_tol = _lefield(100)
-        _lbl_fb_tol_u.setText("%")
-        fb_form.addRow("Tolerance:", cnt_fb_tol)
+        self._le_fb_tol, lbl_tol_unit, cnt_tol = self._make_value_field(100)
+        lbl_tol_unit.setText("%")
+        form.addRow("Tolerance:", cnt_tol)
 
         self._sb_fb_std_window = QSpinBox()
         self._sb_fb_std_window.setRange(0, 10000)
         self._sb_fb_std_window.setValue(0)
         self._sb_fb_std_window.setFont(_MONO)
         self._sb_fb_std_window.setFixedWidth(100)
-        self._sb_fb_std_window.setToolTip("0 = stability check 비활성화; N>0 = 최근 N개 샘플의 std 검사")
-        fb_form.addRow("Std Window:", self._sb_fb_std_window)
+        self._sb_fb_std_window.setToolTip(
+            "0 = stability check 비활성화; N>0 = 최근 N개 샘플의 std 검사")
+        form.addRow("Std Window:", self._sb_fb_std_window)
 
         self._le_fb_noisefloor = QLineEdit()
         self._le_fb_noisefloor.setFont(_MONO)
         self._le_fb_noisefloor.setFixedWidth(100)
         self._le_fb_noisefloor.setToolTip("next_v ≈ 0 일 때 반드시 설정. 예: 1e-6")
-        fb_form.addRow("Noise Floor:", self._le_fb_noisefloor)
+        form.addRow("Noise Floor:", self._le_fb_noisefloor)
 
-        self._le_fb_std_thresh, _lbl_fb_st_u, cnt_fb_st = _lefield(100)
-        _lbl_fb_st_u.setText("(dimensionless)")
-        # Std Threshold 행: 목표값 + 실시간 현재 metric 나란히 표시
-        fb_thresh_row = QWidget()
-        fb_thresh_lay = QHBoxLayout(fb_thresh_row)
-        fb_thresh_lay.setContentsMargins(0, 0, 0, 0)
-        fb_thresh_lay.setSpacing(8)
-        fb_thresh_lay.addWidget(cnt_fb_st)
-        fb_thresh_lay.addWidget(QLabel("now:"))
+        form.addRow("Std Threshold:", self._build_std_threshold_row())
+
+        self._feedback_frame.setVisible(False)
+        return self._feedback_frame
+
+    def _build_std_threshold_row(self) -> QWidget:
+        """목표 임계값 입력 옆에 실시간 현재 metric 을 나란히 보여 준다."""
+        self._le_fb_std_thresh, lbl_unit, cnt_thresh = self._make_value_field(100)
+        lbl_unit.setText("(dimensionless)")
+
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(cnt_thresh)
+        lay.addWidget(QLabel("now:"))
         self._lbl_fb_metric = QLabel("—")
         self._lbl_fb_metric.setFont(_MONO)
         self._lbl_fb_metric.setMinimumWidth(70)
         self._lbl_fb_metric.setStyleSheet("color: #888888;")
-        fb_thresh_lay.addWidget(self._lbl_fb_metric)
-        fb_thresh_lay.addStretch()
-        fb_form.addRow("Std Threshold:", fb_thresh_row)
+        lay.addWidget(self._lbl_fb_metric)
+        lay.addStretch()
+        return row
 
-        self._feedback_frame.setVisible(False)
-        outer.addWidget(self._feedback_frame)
-
-        # WAIT_FOR_TIME Channel Settings (only visible when advance_type == WAIT_FOR_TIME)
+    def _build_wait_time_box(self) -> QFrame:
+        """advance_type == WAIT_FOR_TIME 일 때만 보이는 구획."""
         self._wait_frame = QFrame()
         self._wait_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        wt_layout = QVBoxLayout(self._wait_frame)
-        wt_layout.setContentsMargins(8, 6, 8, 6)
-        wt_title = QLabel("WAIT_FOR_TIME Channel Settings")
-        wt_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #dcdcaa;")
-        wt_layout.addWidget(wt_title)
+        layout = QVBoxLayout(self._wait_frame)
+        layout.setContentsMargins(8, 6, 8, 6)
 
-        wt_form = QFormLayout()
-        wt_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        wt_form.setHorizontalSpacing(12)
-        wt_layout.addLayout(wt_form)
+        title = QLabel("WAIT_FOR_TIME Channel Settings")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #dcdcaa;")
+        layout.addWidget(title)
 
-        self._le_wait_time, _lbl_wt_u, cnt_wt = _lefield(100)
-        _lbl_wt_u.setText("s")
-        wt_form.addRow("Wait Time:", cnt_wt)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(12)
+        layout.addLayout(form)
+
+        self._le_wait_time, lbl_unit, cnt_wait = self._make_value_field(100)
+        lbl_unit.setText("s")
+        form.addRow("Wait Time:", cnt_wait)
 
         self._wait_frame.setVisible(False)
-        outer.addWidget(self._wait_frame)
+        return self._wait_frame
 
-        # Second Channel Array
-        arr_frame = QFrame()
-        arr_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        arr_layout = QVBoxLayout(arr_frame)
-        arr_layout.setContentsMargins(8, 6, 8, 6)
-        arr_title = QLabel("Second Channel Array")
-        arr_title.setStyleSheet("font-weight: bold; font-size: 12px;")
-        arr_layout.addWidget(arr_title)
+    def _build_array_box(self) -> QFrame:
+        """second channel 이 훑을 값 목록 — From/To/Step."""
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(8, 6, 8, 6)
 
-        def _le_inline(w=90):
-            """QLineEdit + unit QLabel without a container (avoids parent-child GC issue)."""
-            le = QLineEdit()
-            le.setFont(_MONO)
-            le.setFixedWidth(w)
-            vd = QDoubleValidator()
-            vd.setNotation(QDoubleValidator.Notation.StandardNotation)
-            le.setValidator(vd)
-            lbl = QLabel("")
-            lbl.setFont(_MONO)
-            lbl.setStyleSheet("color: #888888;")
-            lbl.setMinimumWidth(50)
-            return le, lbl
+        title = QLabel("Second Channel Array")
+        title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        layout.addWidget(title)
 
-        arr_row = QHBoxLayout()
-        arr_row.addWidget(QLabel("From:"))
-        self._le_arr_from,  self._lbl_arr_from_unit  = _le_inline()
-        self._le_arr_to,    self._lbl_arr_to_unit    = _le_inline()
-        self._le_arr_step,  self._lbl_arr_step_unit  = _le_inline()
-        arr_row.addWidget(self._le_arr_from)
-        arr_row.addWidget(self._lbl_arr_from_unit)
-        arr_row.addWidget(QLabel("To:"))
-        arr_row.addWidget(self._le_arr_to)
-        arr_row.addWidget(self._lbl_arr_to_unit)
-        arr_row.addWidget(QLabel("Step:"))
-        arr_row.addWidget(self._le_arr_step)
-        arr_row.addWidget(self._lbl_arr_step_unit)
+        self._le_arr_from, self._lbl_arr_from_unit = self._make_inline_field()
+        self._le_arr_to,   self._lbl_arr_to_unit   = self._make_inline_field()
+        self._le_arr_step, self._lbl_arr_step_unit = self._make_inline_field()
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("From:"))
+        row.addWidget(self._le_arr_from)
+        row.addWidget(self._lbl_arr_from_unit)
+        row.addWidget(QLabel("To:"))
+        row.addWidget(self._le_arr_to)
+        row.addWidget(self._lbl_arr_to_unit)
+        row.addWidget(QLabel("Step:"))
+        row.addWidget(self._le_arr_step)
+        row.addWidget(self._lbl_arr_step_unit)
         self._lbl_n_points = QLabel("→ — pts")
         self._lbl_n_points.setStyleSheet("color: #888888;")
-        arr_row.addWidget(self._lbl_n_points)
-        arr_layout.addLayout(arr_row)
+        row.addWidget(self._lbl_n_points)
+        layout.addLayout(row)
 
         self._cb_to_zero_at_last = QCheckBox("to 0 at last step")
         self._cb_to_zero_at_last.setFont(_MONO)
@@ -672,99 +737,110 @@ class DoubleSweepWindow(QDialog):
             "SWEEP type: advance type 그대로 0까지 sweep\n"
             "기타 type: VISA write 명령어로 즉시 0 전송"
         )
-        arr_layout.addWidget(self._cb_to_zero_at_last)
-        self._arr_frame = arr_frame
-        outer.addWidget(arr_frame)
+        layout.addWidget(self._cb_to_zero_at_last)
 
-        # Feature 1: array 값 테이블 편집 창 (측정 중에도 미래 행 편집·추가 가능) — _arr_frame
-        #            밖에 두어 측정 중에도 버튼을 누를 수 있게 한다.
-        ds_tbl_row = QHBoxLayout()
+        for field in (self._le_arr_from, self._le_arr_to, self._le_arr_step):
+            field.textChanged.connect(self._update_n_points)
+
+        self._arr_frame = frame
+        return frame
+
+    def _build_array_table_row(self) -> QHBoxLayout:
+        """array 값 테이블 편집 창 버튼.
+
+        _arr_frame 바깥에 둔다 — 측정 중에는 _arr_frame 이 잠기지만, 아직 측정하지
+        않은 행은 계속 편집할 수 있어야 하기 때문이다.
+        """
+        row = QHBoxLayout()
         self._btn_ds_second_table = QPushButton("Array 값 테이블…")
         self._btn_ds_second_table.setToolTip(
             "Second channel array 값을 표로 편집하는 창을 엽니다.\n"
             "측정 중에도 아직 측정 안 한(대기) 행은 값 수정·추가·삭제할 수 있습니다.")
         self._btn_ds_second_table.clicked.connect(self._open_second_table)
-        ds_tbl_row.addWidget(self._btn_ds_second_table)
+        row.addWidget(self._btn_ds_second_table)
+
         self._cb_ds_keep_table = QCheckBox("테이블 초기화 안 함")
         self._cb_ds_keep_table.setFont(_MONO)
         self._cb_ds_keep_table.setToolTip(
             "체크 시 시작할 때 From/To/Step으로 테이블을 새로 만들지 않고,\n"
             "테이블 창에서 직접 넣은 값 목록 그대로 측정합니다.")
-        ds_tbl_row.addWidget(self._cb_ds_keep_table)
-        ds_tbl_row.addStretch()
-        outer.addLayout(ds_tbl_row)
+        row.addWidget(self._cb_ds_keep_table)
+        row.addStretch()
+        return row
 
-        # Connect array inputs to point count update
-        for le in (self._le_arr_from, self._le_arr_to, self._le_arr_step):
-            le.textChanged.connect(self._update_n_points)
-
-        # Estimated time + ETA row
-        est_row = QHBoxLayout()
-        est_row.addWidget(QLabel("Estimated:"))
+    def _build_estimate_row(self) -> QHBoxLayout:
+        """예상 소요 시간 + 종료 예상 시각."""
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Estimated:"))
         self._lbl_est_time = QLabel("—")
         self._lbl_est_time.setFont(_MONO)
         self._lbl_est_time.setStyleSheet("color: #79c0ff; font-weight: bold;")
-        est_row.addWidget(self._lbl_est_time)
-        est_row.addSpacing(10)
-        eta_lbl = QLabel("종료 예상:")
-        eta_lbl.setStyleSheet("color: #888888;")
-        est_row.addWidget(eta_lbl)
+        row.addWidget(self._lbl_est_time)
+
+        row.addSpacing(10)
+        eta_label = QLabel("종료 예상:")
+        eta_label.setStyleSheet("color: #888888;")
+        row.addWidget(eta_label)
         self._lbl_eta = QLabel("—")
         self._lbl_eta.setFont(_MONO)
         self._lbl_eta.setStyleSheet("color: #56d364; font-weight: bold;")
-        est_row.addWidget(self._lbl_eta)
-        est_row.addStretch()
-        outer.addLayout(est_row)
+        row.addWidget(self._lbl_eta)
+        row.addStretch()
+        return row
 
-        # Connect all params that affect the estimate
-        for le in (self._le_start, self._le_stop,
-                   self._le_rate_t, self._le_rate_r, self._le_rate_d,
-                   self._le_tpp,
-                   self._le_arr_from, self._le_arr_to, self._le_arr_step,
-                   self._le_second_rate):
-            le.textChanged.connect(self._update_est_time)
+    def _connect_estimate_inputs(self):
+        """예상 시간에 영향을 주는 입력이 바뀌면 다시 계산한다.
+
+        앞선 구획들이 위젯을 다 만든 뒤에 불러야 한다.
+        """
+        for field in (self._le_start, self._le_stop,
+                      self._le_rate_t, self._le_rate_r, self._le_rate_d,
+                      self._le_tpp,
+                      self._le_arr_from, self._le_arr_to, self._le_arr_step,
+                      self._le_second_rate):
+            field.textChanged.connect(self._update_est_time)
         self._cb_retrace_to_zero.stateChanged.connect(self._update_est_time)
         self._cb_to_zero_at_last.stateChanged.connect(self._update_est_time)
 
-        # Status row
-        status_frame = QFrame()
-        status_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        status_layout = QHBoxLayout(status_frame)
-        status_layout.setContentsMargins(8, 4, 8, 4)
+    def _build_status_box(self) -> QFrame:
+        """진행 상태 한 줄 — phase / second 값 / array 진척 / 마지막 알람."""
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(8, 4, 8, 4)
 
         self._lbl_phase = QLabel("IDLE")
         self._lbl_phase.setFont(_MONO)
         self._lbl_phase.setStyleSheet("color: #888888;")
-        status_layout.addWidget(QLabel("Phase:"))
-        status_layout.addWidget(self._lbl_phase)
+        layout.addWidget(QLabel("Phase:"))
+        layout.addWidget(self._lbl_phase)
 
-        status_layout.addSpacing(12)
-        status_layout.addWidget(QLabel("Second:"))
+        layout.addSpacing(12)
+        layout.addWidget(QLabel("Second:"))
         self._lbl_second_val = QLabel("—")
         self._lbl_second_val.setFont(_MONO)
         self._lbl_second_val.setStyleSheet("color: #f78166;")
-        status_layout.addWidget(self._lbl_second_val)
+        layout.addWidget(self._lbl_second_val)
 
-        status_layout.addSpacing(12)
-        status_layout.addWidget(QLabel("Array:"))
+        layout.addSpacing(12)
+        layout.addWidget(QLabel("Array:"))
         self._lbl_array_progress = QLabel("—/—")
         self._lbl_array_progress.setFont(_MONO)
         self._lbl_array_progress.setStyleSheet("color: #79c0ff;")
-        status_layout.addWidget(self._lbl_array_progress)
-        status_layout.addStretch()
+        layout.addWidget(self._lbl_array_progress)
+        layout.addStretch()
 
-        status_layout.addSpacing(12)
-        status_layout.addWidget(QLabel("Alarm:"))
+        layout.addSpacing(12)
+        layout.addWidget(QLabel("Alarm:"))
         self._lbl_last_alarm = QLabel("(없음)")
         self._lbl_last_alarm.setFont(_MONO)
         self._lbl_last_alarm.setStyleSheet("color: #888888; font-size: 10px;")
         self._lbl_last_alarm.setMaximumWidth(200)
-        status_layout.addWidget(self._lbl_last_alarm)
+        layout.addWidget(self._lbl_last_alarm)
+        return frame
 
-        outer.addWidget(status_frame)
-
-        # Start / Stop
-        btn_row = QHBoxLayout()
+    def _build_action_row(self) -> QHBoxLayout:
+        """Start / Stop / Resume."""
         self._btn_start = QPushButton("Start Double Sweep")
         self._btn_start.setMinimumHeight(40)
         self._btn_start.setStyleSheet(
@@ -784,10 +860,11 @@ class DoubleSweepWindow(QDialog):
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._on_stop_clicked)
 
-        # 통신 오류로 중단된 Double Sweep을 저장된 array 지점부터 재개
+        # 통신 오류로 중단된 Double Sweep 을 저장된 array 지점부터 재개
         self._btn_resume = QPushButton("Resume")
         self._btn_resume.setMinimumHeight(40)
-        self._btn_resume.setToolTip("통신 오류로 중단된 Double Sweep을 저장된 array 지점부터 재개")
+        self._btn_resume.setToolTip(
+            "통신 오류로 중단된 Double Sweep을 저장된 array 지점부터 재개")
         self._btn_resume.setStyleSheet(
             "QPushButton { font-weight: bold; font-size: 13px;"
             "background-color: #b8860b; color: white; border-radius: 4px; }"
@@ -795,18 +872,21 @@ class DoubleSweepWindow(QDialog):
         )
         self._btn_resume.clicked.connect(self._on_resume_clicked)
 
-        btn_row.addWidget(self._btn_start)
-        btn_row.addWidget(self._btn_stop)
-        btn_row.addWidget(self._btn_resume)
-        outer.addLayout(btn_row)
+        row = QHBoxLayout()
+        row.addWidget(self._btn_start)
+        row.addWidget(self._btn_stop)
+        row.addWidget(self._btn_resume)
         self._update_resume_btn_enabled()
+        return row
 
-        # Save path preview (trace 폴더 기준)
-        save_path_row = QHBoxLayout()
-        save_path_lbl = QLabel("Trace →")
-        save_path_lbl.setFont(_MONO)
-        save_path_lbl.setStyleSheet("color: #888888;")
-        save_path_row.addWidget(save_path_lbl)
+    def _build_save_path_row(self) -> QHBoxLayout:
+        """trace 폴더 기준 저장 경로 미리보기 + 폴더 열기 버튼."""
+        row = QHBoxLayout()
+        label = QLabel("Trace →")
+        label.setFont(_MONO)
+        label.setStyleSheet("color: #888888;")
+        row.addWidget(label)
+
         self._lbl_ds_save_path = QLabel("—")
         self._lbl_ds_save_path.setFont(QFont("Consolas", 8))
         self._lbl_ds_save_path.setStyleSheet("color: #555555;")
@@ -815,16 +895,15 @@ class DoubleSweepWindow(QDialog):
         self._lbl_ds_save_path.setMinimumHeight(28)
         self._lbl_ds_save_path.setAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        save_path_row.addWidget(self._lbl_ds_save_path, stretch=1)
-        btn_open_ds = QPushButton("📂")
-        btn_open_ds.setFixedWidth(28)
-        btn_open_ds.setFixedHeight(20)
-        btn_open_ds.setFont(_MONO)
-        btn_open_ds.setToolTip("저장 폴더 열기")
-        btn_open_ds.clicked.connect(self._open_ds_folder)
-        save_path_row.addWidget(btn_open_ds, alignment=Qt.AlignmentFlag.AlignTop)
-        outer.addLayout(save_path_row)
-        outer.addStretch()
+        row.addWidget(self._lbl_ds_save_path, stretch=1)
+
+        btn_open = QPushButton("📂")
+        btn_open.setFixedSize(28, 20)
+        btn_open.setFont(_MONO)
+        btn_open.setToolTip("저장 폴더 열기")
+        btn_open.clicked.connect(self._open_ds_folder)
+        row.addWidget(btn_open, alignment=Qt.AlignmentFlag.AlignTop)
+        return row
 
     # ------------------------------------------------------------------
     # Second channel radio buttons
