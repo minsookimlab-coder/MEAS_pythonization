@@ -63,6 +63,7 @@ from pythonization.instruments.errors import humanize_error, is_comm_error
 from pythonization.measurement.resume_log import ResumeLog, ResumePoint
 from pythonization.measurement.second_channel_model import SecondChannelModel
 from pythonization.ui.dialogs.resume import ResumePickerDialog
+from pythonization.ui.panels.graph_window import GraphDataPoint
 from pythonization.ui.widgets.help_button import make_help_button
 
 if TYPE_CHECKING:
@@ -143,6 +144,14 @@ class DoubleSweepPhase(Enum):
     DUMMY            = auto()
     TRACE            = auto()
     RETRACE          = auto()
+
+
+#: 그래프에서 곡선을 구분하는 phase 이름. 여기 없는 phase 는 데이터를 남기지 않는다.
+_GRAPH_PHASE = {
+    DoubleSweepPhase.DUMMY:   "dummy",
+    DoubleSweepPhase.TRACE:   "trace",
+    DoubleSweepPhase.RETRACE: "retrace",
+}
 
 
 def _generate_array(cfg: DoubleSweepConfig) -> List[float]:
@@ -2070,155 +2079,174 @@ class DoubleSweepWindow(QDialog):
 
     @Slot(object)
     def _on_step_done(self, result: StepResult):
-        if self._phase == DoubleSweepPhase.PRE_INIT:
-            self._last_write_value = result.next_v
-            if result.is_done:
-                self._main_win._log("  First channel at start_point. Advancing second channel.", color="#4ec9b0")
-                self._begin_array_index(0)
-            else:
-                # dummy phase와 동일한 time_per_point 간격으로 진행
-                t_before_timer = time.perf_counter()
-                elapsed_ms = int((t_before_timer - result.timing.t_emit) * 1000)
-                interval_ms = max(0, int(self._cfg.time_per_point * 1000) - elapsed_ms)
-                self._sweep_timer.start(interval_ms)
-            return
+        """워커 스텝 완료 → 기록·표시 후 다음 스텝 또는 다음 phase 로 넘어간다.
 
+        MainWindow._on_step_done 과 같은 순서를 따른다: 파일 기록 → 메타데이터 →
+        그래프. 기록에 실패하면 뒤 단계로 가지 않고 측정을 멈춘다.
+        """
+        if self._phase == DoubleSweepPhase.PRE_INIT:
+            self._handle_pre_init_step(result)
+            return
         if self._phase not in (DoubleSweepPhase.DUMMY,
                                DoubleSweepPhase.TRACE,
                                DoubleSweepPhase.RETRACE):
             return
-
-        # is_done=True without measurements → already at target, advance phase
+        # is_done 인데 측정값이 없다 = 이미 목표에 있었다 → 기록 없이 다음 phase
         if result.is_done and not result.meas_results:
             self._advance_phase()
             return
 
         t_recv = time.perf_counter()
-
-        # Append to data saver
         meas_map = {row: val for row, val in result.meas_results}
+        row_vals, failed = self._format_measurement_row(result, meas_map)
+        if failed:
+            self._handle_measurement_failure(result, failed)
+            return
+
+        self._auto_retry_used = False      # 정상 스텝 — 자동 재개 예산 리셋
+
+        # 미분은 한 번만 계산한다. 채널에 값을 push 하므로 두 번 부르면 같은 점이
+        # 슬라이딩 윈도우에 두 번 들어가 미분값이 틀어진다.
+        deriv_vals = self._push_derivatives(result, meas_map)
+        row_vals += self._derivative_row_cells(deriv_vals)
+
+        if not self._record_row(row_vals):
+            return
+
+        main_win = self._main_win
+        main_win._meta_manager.record_step(result.meas_results)
+        main_win._data_window.update_values(row_vals)
+        self._push_graph_point(result, meas_map, deriv_vals)
+
+        self._last_write_value = result.next_v
+        self._cache_measured_values(meas_map)
+
+        main_win._timing_window.update_timing(result.timing, t_recv,
+                                              time.perf_counter())
+        self._schedule_next_step(result)
+
+    # ── _on_step_done 의 단계별 처리 ───────────────────────────────────────
+
+    def _handle_pre_init_step(self, result: StepResult):
+        """First 채널을 시작점으로 옮기는 구간 — 데이터는 기록하지 않는다."""
+        self._last_write_value = result.next_v
+        if result.is_done:
+            self._main_win._log(
+                "  First channel at start_point. Advancing second channel.",
+                color="#4ec9b0")
+            self._begin_array_index(0)
+        else:
+            # dummy phase 와 같은 time_per_point 간격으로 진행
+            self._sweep_timer.start(self._next_interval_ms(result))
+
+    def _next_interval_ms(self, result: StepResult) -> int:
+        """이번 스텝 처리에 쓴 시간을 빼서 time_per_point 주기를 맞춘다."""
+        elapsed_ms = int((time.perf_counter() - result.timing.t_emit) * 1000)
+        return max(0, int(self._cfg.time_per_point * 1000) - elapsed_ms)
+
+    def _measurement_description(self, row: int) -> str:
+        """측정 row 인덱스 → 사람이 읽을 이름."""
+        for _row, _alias, desc, _cmd in self._ctx.active_measurements:
+            if _row == row:
+                return desc
+        return ""
+
+    def _format_measurement_row(self, result: StepResult, meas_map: dict) -> tuple:
+        """저장용 한 행을 만든다. 반환: (셀 목록, 실패한 measurement 인덱스 목록)"""
         row_vals = [f"{result.next_v:.6g}"]
-        has_err = False
-        err_descs = []
+        failed = []
         for idx in self._ctx.active_meas_indices:
             val = meas_map.get(idx)
             if val is None:
-                has_err = True
-                desc = ""
-                for _row, _alias, _desc, _cmd in self._ctx.active_measurements:
-                    if _row == idx:
-                        desc = _desc
-                        break
-                detail = result.meas_errors.get(idx, "")
-                err_descs.append(f"{desc}: {detail}" if detail else desc)
+                failed.append(idx)
             row_vals.append(f"{val:.6g}" if val is not None else "ERR")
+        return row_vals, failed
 
-        if has_err:
-            err_msg = (
-                f"✗ ERR @ phase={self._phase.name}\n"
-                f"실패 채널: {', '.join(err_descs)}"
-            )
-            self._main_win._log(f"  [DoubleSweep] {err_msg}", color="#f44747")
-            # 통신 오류면 자동 재개 경로로, 그 외(파싱 등)는 즉시 중단
-            comm = any(
-                is_comm_error(result.meas_errors.get(idx, ""))
-                for idx in self._ctx.active_meas_indices
-                if meas_map.get(idx) is None
-            )
-            if comm:
-                self._handle_comm_error("; ".join(err_descs))
-            else:
-                self._check_alarm(
-                    is_meas_error=True,
-                    extra_reason=f"측정값 ERR — {', '.join(err_descs)}",
-                )
-                self._on_stop()
-                QMessageBox.critical(self, "Measurement Error", err_msg)
+    def _handle_measurement_failure(self, result: StepResult, failed: list):
+        """통신 오류면 자동 재개 경로로, 그 외(파싱 등)는 알람 후 즉시 중단."""
+        descs = []
+        for idx in failed:
+            desc = self._measurement_description(idx)
+            detail = result.meas_errors.get(idx, "")
+            descs.append(f"{desc}: {detail}" if detail else desc)
+
+        err_msg = (f"✗ ERR @ phase={self._phase.name}\n"
+                   f"실패 채널: {', '.join(descs)}")
+        self._main_win._log(f"  [DoubleSweep] {err_msg}", color="#f44747")
+
+        if any(is_comm_error(result.meas_errors.get(idx, "")) for idx in failed):
+            self._handle_comm_error("; ".join(descs))
             return
 
-        # 정상 스텝 — 자동 재개 예산 리셋
-        self._auto_retry_used = False
-        mw = self._main_win
-        for ch, fn in [
-            (mw._deriv_channel,  mw._deriv_val_for_step),
-            (mw._deriv_channel2, mw._deriv_val_for_step2),
-            (mw._deriv_channel3, mw._deriv_val_for_step3),
-        ]:
-            if ch._cfg.enabled:
-                dv = fn(result, meas_map)
-                row_vals.append(f"{dv:.6g}" if dv is not None else "—")
-        # 데이터 한 줄 기록 — 저장 활성인데 실패하면 측정 중단 (유실 방지)
-        if not self._data_saver.append_row(row_vals) and self._data_saver.is_enabled():
-            self._main_win._log(
-                "  ✗ [DoubleSweep] 데이터 기록 실패 — 측정 중단 (디스크/권한 확인).",
-                color="#f44747",
-            )
-            self._on_stop()
-            QMessageBox.critical(
-                self, "데이터 기록 실패 — 측정 중단",
-                "측정값을 파일에 기록하지 못해 측정을 중단했습니다.\n"
-                "디스크 공간·파일 권한을 확인한 뒤 다시 시작하세요.",
-            )
-            return
+        self._check_alarm(is_meas_error=True,
+                          extra_reason=f"측정값 ERR — {', '.join(descs)}")
+        self._on_stop()
+        QMessageBox.critical(self, "Measurement Error", err_msg)
 
-        # MetaDataManager: T/B 버퍼 누적
-        self._main_win._meta_manager.record_step(result.meas_results)
+    def _push_derivatives(self, result: StepResult, meas_map: dict) -> list:
+        """1·2·3차 미분값 계산. 미분 채널은 MainWindow 가 들고 있다."""
+        main_win = self._main_win
+        return [main_win._deriv_val_for_order(result, meas_map, ch)
+                for ch, _key in main_win._deriv_channels()]
 
-        # DataWindow 갱신 (main_window의 데이터창에 현재 측정값 표시)
-        self._main_win._data_window.update_values(row_vals)
+    def _derivative_row_cells(self, deriv_vals: list) -> list:
+        """활성화된 미분 채널만 저장 행에 덧붙인다."""
+        return [f"{val:.6g}" if val is not None else "—"
+                for (ch, _key), val in zip(self._main_win._deriv_channels(), deriv_vals)
+                if ch._cfg.enabled]
 
-        # Graph update — 창 유무 관계없이 항상 history에 축적
+    def _record_row(self, row_vals: list) -> bool:
+        """.dat 에 한 줄 기록. 저장이 켜져 있는데 실패하면 측정을 멈추고 False."""
+        if self._data_saver.append_row(row_vals) or not self._data_saver.is_enabled():
+            return True
+        self._main_win._log(
+            "  ✗ [DoubleSweep] 데이터 기록 실패 — 측정 중단 (디스크/권한 확인).",
+            color="#f44747")
+        self._on_stop()
+        QMessageBox.critical(
+            self, "데이터 기록 실패 — 측정 중단",
+            "측정값을 파일에 기록하지 못해 측정을 중단했습니다.\n"
+            "디스크 공간·파일 권한을 확인한 뒤 다시 시작하세요.",
+        )
+        return False
+
+    def _push_graph_point(self, result: StepResult, meas_map: dict, deriv_vals: list):
+        """그래프 히스토리에 한 점 추가. 창이 떠 있지 않아도 계속 쌓아 둔다.
+
+        그래프 갱신 실패가 측정을 멈추면 안 되므로 통째로 감싼다.
+        """
         try:
-            from pythonization.ui.panels.graph_window import GraphDataPoint
-            from pythonization.measurement.derivative import OUTPUT_KEY as _DERIV_KEY, OUTPUT_KEY_2 as _DERIV2_KEY, OUTPUT_KEY_3 as _DERIV3_KEY
-            _phase_str = {
-                DoubleSweepPhase.DUMMY:   "dummy",
-                DoubleSweepPhase.TRACE:   "trace",
-                DoubleSweepPhase.RETRACE: "retrace",
-            }.get(self._phase, "")
-            gvals = {"__sweep__": result.next_v}
-            for row, alias, desc, cmd in self._ctx.active_measurements:
+            main_win = self._main_win
+            values = {"__sweep__": result.next_v}
+            for row, _alias, desc, _cmd in self._ctx.active_measurements:
                 val = meas_map.get(row)
                 if val is not None:
-                    gvals[desc] = val
-            mw = self._main_win
-            for ch, key, fn in [
-                (mw._deriv_channel,  _DERIV_KEY,  mw._deriv_val_for_step),
-                (mw._deriv_channel2, _DERIV2_KEY, mw._deriv_val_for_step2),
-                (mw._deriv_channel3, _DERIV3_KEY, mw._deriv_val_for_step3),
-            ]:
+                    values[desc] = val
+            for (ch, key), val in zip(main_win._deriv_channels(), deriv_vals):
                 if ch._cfg.enabled:
-                    dv = fn(result, meas_map)
-                    gvals[key] = dv if dv is not None else float("nan")
-            gpoint = GraphDataPoint(values=gvals, phase=_phase_str)
-            mw._graph_history.append(gpoint)
-            if mw._graph_window is not None:
-                mw._graph_window.append_point(gpoint)
-        except Exception as _e:
-            self._main_win._log(f"  [Graph] append_point failed: {_e}", color="#f44747")
+                    values[key] = val if val is not None else float("nan")
 
-        self._last_write_value = result.next_v
+            point = GraphDataPoint(values=values, phase=_GRAPH_PHASE.get(self._phase, ""))
+            main_win._graph_history.append(point)
+            if main_win._graph_window is not None:
+                main_win._graph_window.append_point(point)
+        except Exception as exc:
+            self._main_win._log(f"  [Graph] append_point failed: {exc}", color="#f44747")
 
-        # 최신 측정값 캐시 갱신 (알람 트리거 평가용) — meas_map은 위에서 이미 계산됨
-        for row, alias, desc, cmd in self._ctx.active_measurements:
+    def _cache_measured_values(self, meas_map: dict):
+        """알람 트리거 평가에 쓰는 최신 측정값 캐시."""
+        for row, _alias, desc, _cmd in self._ctx.active_measurements:
             val = meas_map.get(row)
             if val is not None:
                 self._last_meas_values[desc] = val
 
-        # TimingWindow 갱신
-        t_ui_done = time.perf_counter()
-        self._main_win._timing_window.update_timing(result.timing, t_recv, t_ui_done)
-
+    def _schedule_next_step(self, result: StepResult):
         if result.is_done:
             self._advance_phase()
         elif result.measure_only:
-            # 초기 상태 측정 완료 → 즉시 sweep 타이머 시작
-            self._sweep_timer.start(0)
+            self._sweep_timer.start(0)   # 초기 상태 측정 완료 → 바로 sweep 시작
         else:
-            t_before_timer = time.perf_counter()
-            elapsed_ms = int((t_before_timer - result.timing.t_emit) * 1000)
-            interval_ms = max(0, int(self._cfg.time_per_point * 1000) - elapsed_ms)
-            self._sweep_timer.start(interval_ms)
+            self._sweep_timer.start(self._next_interval_ms(result))
 
     @Slot(str)
     def _on_step_error(self, msg: str):
