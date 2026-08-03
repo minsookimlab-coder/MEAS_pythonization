@@ -22,6 +22,55 @@ if TYPE_CHECKING:
 from pythonization.app.paths import SETTINGS_DIR as _SETTINGS_DIR
 
 
+_PLACEHOLDER_RE = _re.compile(r"\{(\w+)\}")
+
+
+def _find_entry(entries, description: str):
+    """라이브러리 목록에서 같은 description 을 가진 항목. 없으면 None."""
+    return next((e for e in entries if e.description == description), None)
+
+
+def _resolve_template(template: str, fill_params: dict) -> str:
+    """사용자가 채워 둔 값을 새 템플릿에 다시 적용한다.
+
+    라이브러리 쪽에 새 placeholder 가 생겨 채울 수 없으면 예외를 내지 않고
+    템플릿 그대로 둔다 — 여기서 죽으면 라이브러리 저장 자체가 실패한다.
+    """
+    if not fill_params:
+        return template
+    try:
+        return template.format(**fill_params)
+    except (KeyError, ValueError):
+        return template
+
+
+def _sweep_cmd_set(entry_cmd: str, current_cmd: str) -> str:
+    """sweep 명령의 cmd_set 갱신 — sweep 축 placeholder 를 {v} 로 정규화.
+
+    placeholder 가 정확히 하나면 그것이 sweep 축이다. 둘 이상이면 어느 것이 축인지
+    알 수 없으므로 사용자가 Parameter Manager 에서 정한 기존 명령을 유지한다.
+    """
+    placeholders = _PLACEHOLDER_RE.findall(entry_cmd)
+    if len(placeholders) == 1:
+        return entry_cmd.replace(f"{{{placeholders[0]}}}", "{v}")
+    return current_cmd
+
+
+def _write_cmd_set(entry_cmd: str, current_cmd: str) -> str:
+    """write 명령의 cmd_set 갱신.
+
+    write 는 'OUTP ON' 처럼 placeholder 없는 고정 명령이 많다. 그런 경우 라이브러리
+    명령을 그대로 쓰고, 기존 항목이 {v} 를 쓰고 있을 때만 sweep 축으로 보아
+    정규화한다.
+    """
+    placeholders = _PLACEHOLDER_RE.findall(entry_cmd)
+    if not placeholders:
+        return entry_cmd
+    if len(placeholders) == 1 and "{v}" in current_cmd:
+        return entry_cmd.replace(f"{{{placeholders[0]}}}", "{v}")
+    return current_cmd
+
+
 class ProfileRegistry:
     """
     Named profiles management.
@@ -310,292 +359,123 @@ class ProfileRegistry:
     def rebuild_main_ui_from_library(
         self,
         lib_registry: "VisaLibraryRegistry",
-        drop_orphans: bool = True,
     ) -> MainUIProfile:
-        """
-        라이브러리 변경 시 MainUIProfile을 재인스턴스화합니다.
+        """라이브러리가 저장될 때 MainUIProfile 을 라이브러리 기준으로 갱신한다.
 
-        drop_orphans=False (라이브러리 저장 트리거):
-            기존 main_ui 항목을 기준으로 이터레이션합니다.
-            라이브러리에서 찾으면 cmd/figure_axis/unit 등 라이브러리 유래 필드만 갱신하고,
-            사용자 설정(fill_params, safety, checked 등)은 보존합니다.
-            라이브러리에서 찾지 못한 항목도 그대로 유지합니다 (절대 삭제 없음).
+        갱신하는 것 — 명령 문자열, figure_axis, unit (라이브러리에서 온 필드)
+        보존하는 것 — fill_params, safety, checked, advance 설정 (사용자가 정한 값)
 
-        drop_orphans=True (명시적 정리 — 현재 미사용):
-            selection 포인터를 기준으로 이터레이션하며 라이브러리에 없는 항목을
-            결과와 selection에서 모두 제거합니다.
+        **라이브러리에서 사라진 항목도 지우지 않는다.** 여기서 지우면 명령 하나를
+        고치려고 라이브러리를 저장했을 뿐인데 공들여 구성한 측정 항목이 통째로
+        날아간다. 정리는 Parameter Manager 에서 사용자가 직접 한다.
         """
         active = self.get_active_profile()
-        old_mui = active.main_ui
-
-        # ── drop_orphans=False: 기존 main_ui 기준, 라이브러리 필드만 갱신 ──────
-        if not drop_orphans:
-            # Measurements
-            new_measurements: list[InstantiatedMeasurement] = []
-            for m in old_mui.measurements:
-                lib = lib_registry.get_library(m.alias)
-                entry = next((e for e in lib.measurements if e.description == m.description), None)
-                if entry:
-                    try:
-                        resolved = entry.cmd_query.format(**m.fill_params) if m.fill_params else entry.cmd_query
-                    except (KeyError, ValueError):
-                        resolved = entry.cmd_query
-                    new_measurements.append(m.model_copy(update={
-                        "resolved_cmd": resolved,
-                        "figure_axis":  entry.figure_axis,
-                        "unit":         entry.unit,
-                    }))
-                else:
-                    new_measurements.append(m)
-
-            # Sweep Values
-            new_sweep_values: list[InstantiatedSweepValue] = []
-            for sv in old_mui.sweep_values:
-                lib = lib_registry.get_library(sv.alias)
-                entry = next((e for e in lib.sweep_values if e.description == sv.description), None)
-                if entry:
-                    lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
-                    new_cmd_set = (
-                        entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}") if len(lib_phs) == 1
-                        else sv.cmd_set
-                    )
-                    new_sweep_values.append(sv.model_copy(update={
-                        "cmd_set":         new_cmd_set,
-                        "paired_read_cmd": entry.paired_read_cmd,
-                        "figure_axis":     entry.figure_axis,
-                        "unit":            entry.unit,
-                    }))
-                else:
-                    new_sweep_values.append(sv)
-
-            # Write Commands
-            new_write_cmds: list[InstantiatedWriteCmd] = []
-            for wc in old_mui.write_cmds:
-                lib = lib_registry.get_library(wc.alias)
-                entry = next((e for e in lib.write_cmds if e.description == wc.description), None)
-                if entry:
-                    lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
-                    if not lib_phs:
-                        new_cmd_set = entry.cmd_set
-                    elif len(lib_phs) == 1 and "{v}" in wc.cmd_set:
-                        new_cmd_set = entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}")
-                    else:
-                        new_cmd_set = wc.cmd_set
-                    new_write_cmds.append(wc.model_copy(update={
-                        "cmd_set":     new_cmd_set,
-                        "figure_axis": entry.figure_axis,
-                        "unit":        entry.unit,
-                    }))
-                else:
-                    new_write_cmds.append(wc)
-
-            # Second Sweep Channels
-            new_second: list[InstantiatedSecondSweepChannel] = []
-            for sc in old_mui.second_sweep_channels:
-                lib = lib_registry.get_library(sc.alias)
-                if sc.source_type == "sweep_value":
-                    entry = next((e for e in lib.sweep_values if e.description == sc.description), None)
-                    if entry:
-                        lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
-                        new_cmd_set = (
-                            entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}") if len(lib_phs) == 1
-                            else sc.cmd_set
-                        )
-                        new_second.append(sc.model_copy(update={
-                            "cmd_set":         new_cmd_set,
-                            "paired_read_cmd": entry.paired_read_cmd,
-                            "figure_axis":     entry.figure_axis,
-                            "unit":            entry.unit,
-                        }))
-                    else:
-                        new_second.append(sc)
-                elif sc.source_type == "write_cmd":
-                    entry = next((e for e in lib.write_cmds if e.description == sc.description), None)
-                    if entry:
-                        lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
-                        new_cmd_set = (
-                            entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}")
-                            if lib_phs and "{v}" in sc.cmd_set
-                            else (entry.cmd_set if not lib_phs else sc.cmd_set)
-                        )
-                        new_second.append(sc.model_copy(update={
-                            "cmd_set":     new_cmd_set,
-                            "figure_axis": entry.figure_axis,
-                            "unit":        entry.unit,
-                        }))
-                    else:
-                        new_second.append(sc)
-                else:
-                    new_second.append(sc)
-
-            new_mui = MainUIProfile(
-                measurements=new_measurements,
-                sweep_values=new_sweep_values,
-                write_cmds=new_write_cmds,
-                second_sweep_channels=new_second,
-                alarm_measurements=old_mui.alarm_measurements,
-                meta_data_measurements=old_mui.meta_data_measurements,
-            )
-            active.main_ui = new_mui
-            self.save_active_profile(active)
-            return new_mui
-
-        # ── drop_orphans=True: selection 기준, 유령 항목 정리 ─────────────────
-        sel = active.parameter_manager
-
-        old_meas   = {(m.alias, m.description): m for m in old_mui.measurements}
-        old_sweep  = {(s.alias, s.description): s for s in old_mui.sweep_values}
-        old_write  = {(w.alias, w.description): w for w in old_mui.write_cmds}
-        old_second = {(s.alias, s.description): s for s in old_mui.second_sweep_channels}
-
-        found_meas:   set = set()
-        found_sweep:  set = set()
-        found_write:  set = set()
-        found_second: set = set()
-
-        # Measurements
-        new_measurements = []
-        for s in sel.measurements:
-            lib = lib_registry.get_library(s.alias)
-            entry = next((e for e in lib.measurements if e.description == s.description), None)
-            old = old_meas.get((s.alias, s.description))
-            if entry:
-                found_meas.add((s.alias, s.description))
-                fill = old.fill_params if old else {}
-                try:
-                    resolved = entry.cmd_query.format(**fill) if fill else entry.cmd_query
-                except (KeyError, ValueError):
-                    resolved = entry.cmd_query
-                new_measurements.append(InstantiatedMeasurement(
-                    alias=s.alias,
-                    description=entry.description,
-                    resolved_cmd=resolved,
-                    figure_axis=entry.figure_axis,
-                    unit=entry.unit,
-                    fill_params=fill,
-                ))
-
-        # Sweep Values
-        new_sweep_values = []
-        for s in sel.sweep_values:
-            lib = lib_registry.get_library(s.alias)
-            entry = next((e for e in lib.sweep_values if e.description == s.description), None)
-            old = old_sweep.get((s.alias, s.description))
-            if entry:
-                found_sweep.add((s.alias, s.description))
-                lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
-                new_cmd_set = (
-                    entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}") if len(lib_phs) == 1
-                    else (old.cmd_set if old else entry.cmd_set)
-                )
-                new_sweep_values.append(InstantiatedSweepValue(
-                    alias=s.alias,
-                    description=entry.description,
-                    cmd_set=new_cmd_set,
-                    paired_read_cmd=entry.paired_read_cmd,
-                    figure_axis=entry.figure_axis,
-                    unit=entry.unit,
-                    safety_steps=old.safety_steps if old else 0,
-                    safety_interval_ms=old.safety_interval_ms if old else 0.0,
-                    fill_params=old.fill_params if old else {},
-                ))
-
-        # Write Commands
-        new_write_cmds = []
-        for s in sel.write_cmds:
-            lib = lib_registry.get_library(s.alias)
-            entry = next((e for e in lib.write_cmds if e.description == s.description), None)
-            old = old_write.get((s.alias, s.description))
-            if entry:
-                found_write.add((s.alias, s.description))
-                lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
-                if not lib_phs:
-                    new_cmd_set = entry.cmd_set
-                elif len(lib_phs) == 1 and old and "{v}" in old.cmd_set:
-                    new_cmd_set = entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}")
-                elif old:
-                    new_cmd_set = old.cmd_set
-                else:
-                    new_cmd_set = entry.cmd_set
-                new_write_cmds.append(InstantiatedWriteCmd(
-                    alias=s.alias,
-                    description=entry.description,
-                    cmd_set=new_cmd_set,
-                    figure_axis=entry.figure_axis,
-                    unit=entry.unit,
-                    fill_params=old.fill_params if old else {},
-                ))
-
-        # Second Sweep Channels
-        new_second = []
-        for s in sel.second_sweep_channels:
-            lib = lib_registry.get_library(s.alias)
-            old = old_second.get((s.alias, s.description))
-            sv_entry = next((e for e in lib.sweep_values if e.description == s.description), None)
-            wc_entry = next((e for e in lib.write_cmds  if e.description == s.description), None)
-            if sv_entry:
-                found_second.add((s.alias, s.description))
-                lib_phs = _re.findall(r"\{(\w+)\}", sv_entry.cmd_set)
-                new_cmd_set = (
-                    sv_entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}") if len(lib_phs) == 1
-                    else (old.cmd_set if old else sv_entry.cmd_set)
-                )
-                if old and old.source_type == "sweep_value":
-                    new_second.append(old.model_copy(update={
-                        "cmd_set": new_cmd_set, "paired_read_cmd": sv_entry.paired_read_cmd,
-                        "figure_axis": sv_entry.figure_axis, "unit": sv_entry.unit,
-                    }))
-                else:
-                    new_second.append(InstantiatedSecondSweepChannel(
-                        alias=s.alias, description=sv_entry.description,
-                        source_type="sweep_value", cmd_set=new_cmd_set,
-                        paired_read_cmd=sv_entry.paired_read_cmd,
-                        figure_axis=sv_entry.figure_axis, unit=sv_entry.unit,
-                    ))
-            elif wc_entry:
-                found_second.add((s.alias, s.description))
-                lib_phs = _re.findall(r"\{(\w+)\}", wc_entry.cmd_set)
-                if not lib_phs:
-                    new_cmd_set = wc_entry.cmd_set
-                elif len(lib_phs) == 1 and old and "{v}" in old.cmd_set:
-                    new_cmd_set = wc_entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}")
-                elif old:
-                    new_cmd_set = old.cmd_set
-                else:
-                    new_cmd_set = wc_entry.cmd_set
-                if old and old.source_type == "write_cmd":
-                    new_second.append(old.model_copy(update={
-                        "cmd_set": new_cmd_set,
-                        "figure_axis": wc_entry.figure_axis, "unit": wc_entry.unit,
-                    }))
-                else:
-                    new_second.append(InstantiatedSecondSweepChannel(
-                        alias=s.alias, description=wc_entry.description,
-                        source_type="write_cmd", cmd_set=new_cmd_set,
-                        figure_axis=wc_entry.figure_axis, unit=wc_entry.unit,
-                    ))
+        old = active.main_ui
 
         new_mui = MainUIProfile(
-            measurements=new_measurements,
-            sweep_values=new_sweep_values,
-            write_cmds=new_write_cmds,
-            second_sweep_channels=new_second,
-            alarm_measurements=old_mui.alarm_measurements,
-            meta_data_measurements=old_mui.meta_data_measurements,
+            measurements=self._refresh_measurements(old.measurements, lib_registry),
+            sweep_values=self._refresh_sweep_values(old.sweep_values, lib_registry),
+            write_cmds=self._refresh_write_cmds(old.write_cmds, lib_registry),
+            second_sweep_channels=self._refresh_second_channels(
+                old.second_sweep_channels, lib_registry),
+            alarm_measurements=old.alarm_measurements,
+            meta_data_measurements=old.meta_data_measurements,
         )
-
-        # 유령 selection 포인터 제거
-        cleaned_sel = sel.model_copy(update={
-            "measurements":          [s for s in sel.measurements
-                                      if (s.alias, s.description) in found_meas],
-            "sweep_values":          [s for s in sel.sweep_values
-                                      if (s.alias, s.description) in found_sweep],
-            "write_cmds":            [s for s in sel.write_cmds
-                                      if (s.alias, s.description) in found_write],
-            "second_sweep_channels": [s for s in sel.second_sweep_channels
-                                      if (s.alias, s.description) in found_second],
-        })
-        active.parameter_manager = cleaned_sel
         active.main_ui = new_mui
         self.save_active_profile(active)
         return new_mui
+
+    # ── 항목 종류별 갱신 ─────────────────────────────────────────────────
+    # 넷 다 같은 모양이다: 라이브러리에서 같은 description 을 찾아 라이브러리 유래
+    # 필드만 덮어쓰고, 못 찾으면 원래 항목을 그대로 통과시킨다.
+
+    def _refresh_measurements(
+        self, items, lib_registry: "VisaLibraryRegistry",
+    ) -> List[InstantiatedMeasurement]:
+        out = []
+        for item in items:
+            entry = _find_entry(lib_registry.get_library(item.alias).measurements,
+                                item.description)
+            if entry is None:
+                out.append(item)
+                continue
+            out.append(item.model_copy(update={
+                "resolved_cmd": _resolve_template(entry.cmd_query, item.fill_params),
+                "figure_axis":  entry.figure_axis,
+                "unit":         entry.unit,
+            }))
+        return out
+
+    def _refresh_sweep_values(
+        self, items, lib_registry: "VisaLibraryRegistry",
+    ) -> List[InstantiatedSweepValue]:
+        out = []
+        for item in items:
+            entry = _find_entry(lib_registry.get_library(item.alias).sweep_values,
+                                item.description)
+            if entry is None:
+                out.append(item)
+                continue
+            out.append(item.model_copy(update={
+                "cmd_set":         _sweep_cmd_set(entry.cmd_set, item.cmd_set),
+                "paired_read_cmd": entry.paired_read_cmd,
+                "figure_axis":     entry.figure_axis,
+                "unit":            entry.unit,
+            }))
+        return out
+
+    def _refresh_write_cmds(
+        self, items, lib_registry: "VisaLibraryRegistry",
+    ) -> List[InstantiatedWriteCmd]:
+        out = []
+        for item in items:
+            entry = _find_entry(lib_registry.get_library(item.alias).write_cmds,
+                                item.description)
+            if entry is None:
+                out.append(item)
+                continue
+            out.append(item.model_copy(update={
+                "cmd_set":     _write_cmd_set(entry.cmd_set, item.cmd_set),
+                "figure_axis": entry.figure_axis,
+                "unit":        entry.unit,
+            }))
+        return out
+
+    def _refresh_second_channels(
+        self, items, lib_registry: "VisaLibraryRegistry",
+    ) -> List[InstantiatedSecondSweepChannel]:
+        """second 채널은 sweep value 로도, write command 로도 만들 수 있다.
+
+        source_type 이 어느 쪽인지에 따라 찾아볼 라이브러리 목록과 명령 갱신 규칙이
+        달라진다. 알 수 없는 source_type 은 손대지 않는다.
+        """
+        out = []
+        for item in items:
+            library = lib_registry.get_library(item.alias)
+
+            if item.source_type == "sweep_value":
+                entry = _find_entry(library.sweep_values, item.description)
+                if entry is None:
+                    out.append(item)
+                    continue
+                out.append(item.model_copy(update={
+                    "cmd_set":         _sweep_cmd_set(entry.cmd_set, item.cmd_set),
+                    "paired_read_cmd": entry.paired_read_cmd,
+                    "figure_axis":     entry.figure_axis,
+                    "unit":            entry.unit,
+                }))
+
+            elif item.source_type == "write_cmd":
+                entry = _find_entry(library.write_cmds, item.description)
+                if entry is None:
+                    out.append(item)
+                    continue
+                out.append(item.model_copy(update={
+                    "cmd_set":     _write_cmd_set(entry.cmd_set, item.cmd_set),
+                    "figure_axis": entry.figure_axis,
+                    "unit":        entry.unit,
+                }))
+
+            else:
+                out.append(item)
+        return out

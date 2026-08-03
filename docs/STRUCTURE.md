@@ -79,7 +79,6 @@ pythonization/                      (저장소 루트)
 | 경로 | 역할 |
 |---|---|
 | `profiles/registry.py` | 명명된 프로파일 관리 |
-| `profiles/legacy_parameter_manager.py` | (레거시) 구 파라미터 매니저 |
 | `analysis/mfli_merge.py` | LabOne CSV + MFLI `.dat` sweep별 병합. **Qt·numpy 비의존 → CLI 겸용** |
 | `notify/alarm_manager.py` | 사운드·이메일·텔레그램 알람 (데몬 오프로드) |
 | `util/network.py` | LAN·MAC 유틸 (DHCP 대응 IP 추적) |
