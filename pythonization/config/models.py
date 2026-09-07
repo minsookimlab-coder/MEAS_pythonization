@@ -335,6 +335,83 @@ class DoubleSweepConfig(BaseModel):
     second_wait_time: float = 1.0
     # Alarm
     alarm: AlarmConfig = Field(default_factory=AlarmConfig)
+    # Cycle sweep (Double Sweep 확장용)
+    cycle_enabled: bool = False
+    cycle_targets_str: str = ""  # comma-separated targets, e.g. "30,-30,30,0"
+    cycle_repeats: int = 1
+
+
+class CycleSweepConfig(BaseModel):
+    """Cycle Sweep 창의 파라미터 설정 (프로파일 YAML 안에 저장).
+
+    측정을 시작하면 먼저 현재값에서 initial_value 로 이동한 뒤(데이터 없음),
+    거기서부터 targets 를 순서대로 훑는 것이 한 cycle 이다.
+    예) initial_value=0, targets=[30, -30, 0] → 0→30→-30→0 이 한 cycle.
+    rate 와 time_per_point 는 cycle 전체에 공통으로 적용된다.
+    """
+    initial_value: float = 0.0     # cycle 시작 전에 먼저 이동할 값
+    targets: List[float] = Field(default_factory=list)
+    sweep_rate: float = 1.0        # units / min — cycle 전체 공통
+    time_per_point: float = 1.0    # sec
+    cycles: int = 1                # cycle 반복 횟수
+    selected_channel_idx: int = 0  # main_ui.sweep_values 의 원본 인덱스
+    return_to_zero: bool = False   # 모든 cycle 종료 후 0 으로 복귀 (데이터 기록 없음)
+    # 저장 설정 — 이 모듈이 직접 갖는다 (메인 창 설정과 독립).
+    # main_folder 가 비어 있으면 '아직 설정 안 함'으로 보고 창을 열 때 메인 창 값을 채운다.
+    main_folder: str = ""
+    sub_folder: str = "cycle"
+    file_name: str = ""            # 파일명 앞부분. 뒤에 _cycleNNN.dat 가 붙는다
+    include_date: bool = True      # 날짜 폴더 + 파일명에 날짜 포함
+    save_enabled: bool = False
+
+
+class CycleDoubleSweepConfig(BaseModel):
+    """Double Sweep+ (Cycle) 창의 설정 — second 축 한 점마다 cycle sweep 을 돌린다.
+
+    바깥 축(second)은 ITC 온도나 IPS 자기장처럼 목표를 주고 기다려야 하는 값이고,
+    안쪽 축(first)은 Cycle Sweep 과 같은 방식으로 targets 를 순서대로 훑는다.
+    한 second 값의 진행 순서는 항상 다음과 같다:
+      first → initial_value 이동(데이터 없음) → second 설정 → settle_wait_s 대기
+      → cycle 1..cycles → 다음 second 값
+    """
+    # ── 바깥 축 (second channel) ──
+    device_kind: str = "all"            # "itc" | "ips" | "all" — 목록 필터
+    selected_channel_idx: int = 0       # main_ui.second_sweep_channels 의 원본 인덱스
+    array_from: float = 300.0
+    array_to: float = 100.0
+    array_step: float = -20.0
+    keep_table: bool = False            # 시작 시 From/To/Step 으로 테이블을 다시 만들지 않음
+    settle_wait_s: float = 3600.0       # second 설정 후 cycle 시작까지 대기 (초)
+    skip_first_wait: bool = False       # 첫 second 값에서는 대기를 건너뜀
+    to_zero_at_last: bool = False       # 모든 second 값 종료 후 second 를 0 으로
+    # SWEEP-type second channel params
+    second_sweep_rate: float = 1.0
+    second_use_safety: bool = False
+    second_safety_steps: int = 0
+    second_safety_interval_ms: float = 0.0
+    # FEEDBACK / THRESHOLD_TIME-type second channel params
+    second_feedback_read_cmd: str = ""
+    second_feedback_poll_interval: float = 1.0
+    second_feedback_tolerance_pct: float = 95.0
+    second_feedback_std_window: int = 0
+    second_feedback_noisefloor: float = 0.0
+    second_feedback_std_threshold: float = 0.01
+    # WAIT_FOR_TIME-type second channel param
+    second_wait_time: float = 1.0
+    # ── 안쪽 축 (first channel = cycle sweep) ──
+    first_channel_idx: int = 0          # main_ui.sweep_values 의 원본 인덱스
+    initial_value: float = 0.0
+    targets: List[float] = Field(default_factory=list)
+    sweep_rate: float = 1.0             # units / min — cycle 전체 공통
+    time_per_point: float = 1.0         # sec
+    cycles: int = 1                     # second 값 하나당 cycle 반복 횟수
+    return_to_zero: bool = False        # 전체 종료 후 first 를 0 으로 (데이터 없음)
+    # ── 저장 설정 (이 모듈이 직접 갖는다 — 메인 창과 독립) ──
+    main_folder: str = ""
+    sub_folder: str = "cycle2d"
+    file_name: str = ""
+    include_date: bool = True
+    save_enabled: bool = False
 
 
 class MainUIProfile(BaseModel):
@@ -378,6 +455,11 @@ class FullProfile(BaseModel):
     save_enabled: bool = False
     # Double sweep
     double_sweep: DoubleSweepConfig = Field(default_factory=DoubleSweepConfig)
+    # Cycle sweep
+    cycle_sweep: CycleSweepConfig = Field(default_factory=CycleSweepConfig)
+    # Double Sweep+ (second 축 × cycle sweep)
+    cycle_double_sweep: CycleDoubleSweepConfig = Field(
+        default_factory=CycleDoubleSweepConfig)
     # Meta data
     meta_data: MetaDataConfig = Field(default_factory=MetaDataConfig)
     # Derivative channels

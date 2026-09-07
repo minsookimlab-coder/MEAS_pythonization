@@ -4,6 +4,206 @@
 
 ---
 
+## v1.10.0 — 2026-08-27 (기능 추가)
+
+### ■ Double Sweep+ (Cycle) 모듈 추가
+
+메뉴 **View → Double Sweep+ (Cycle)…** (`Ctrl+Shift+B`). 다른 모듈처럼 독립 창으로
+뜬다. **Second 축(온도·자기장) 한 점마다 Cycle Sweep 한 세트**를 돈다.
+
+예: targets `30 / -30 / 30 / 0`, array `300 → 260 K` (step −20), Settle Wait 1시간
+→ 300 K 설정 → 1시간 대기 → 300 K 에서 cycle → 280 K 설정 → 1시간 대기 →
+280 K 에서 cycle → 260 K … 순으로 진행한다.
+
+- **Second Channel 에 ITC / IPS 필터** — 장비 라디오(`ITC (온도)` / `IPS (자기장)` /
+  `전체`)로 목록을 거른다. 드라이버 클래스(`OxfordITC` / `OxfordIPS`)로 판정하므로
+  구 레이아웃 경로도 인식한다. advance type(simple_hop / sweep / feedback /
+  wait_for_time / threshold_time)은 Parameter Manager 에서 정하고, 세부 값
+  (rate·safety·feedback·wait)은 이 창에서 고친다.
+- **Settle Wait** — second 를 설정한 뒤 cycle 시작까지 기다리는 시간. 시/분으로
+  입력하고 진행 중에는 남은 시간이 상태줄에 초 단위로 표시된다. advance type 자체의
+  대기(feedback 도달 판정, wait_for_time)와 **별개로 항상 추가 적용**된다.
+  `첫 값은 대기 건너뛰기` 를 켜면 첫 array 값에서만 대기를 생략한다
+  (이미 그 온도/자기장에 도달해 있을 때).
+- **Array** — From/To/Step (내려가는 방향은 Step 음수). `Array 값 테이블…` 로 임의
+  목록을 직접 넣을 수 있고, 측정 중에도 아직 측정 안 한 행은 고칠 수 있다
+  (Double Sweep / VNA 와 같은 `SecondChannelModel` 재사용).
+- **Cycle 부분은 Cycle Sweep 과 동일** — Initial Value 에서 targets 를 순서대로 훑는
+  것이 한 cycle, 2회차부터는 직전 cycle 의 마지막 target 에서 이어진다.
+  Sweep Rate·Time/Point 는 공통, `Cycles / point` 로 second 값 하나당 반복 횟수를 정한다.
+- **진행 순서는 모든 array 값에서 동일**: `first → Initial Value` → `second 설정` →
+  `Settle Wait` → `cycle 1..N`. first 를 **먼저** 되돌리므로, 온도/자기장이 변하는
+  동안 시료에 직전 cycle 의 마지막 target 이 걸려 있지 않다.
+- **저장** — 폴더·파일명을 이 창이 직접 갖는다 (메인 창과 별개).
+  **second 값 × cycle 마다 `.dat` 하나**:
+  `{Main}/{Sub}/[YYYY-MM-DD]/{File Name}{YYYYMMDD}_{axis}_{2nd값}_cycleNNN.dat`.
+  메타데이터 JSON 에 second 채널 정보(값·advance type·Settle Wait)와 cycle 정보를
+  함께 남긴다. 그래프는 second 값이 바뀔 때마다 새 세션으로 열고, 같은 값의 cycle 은
+  겹쳐 그려 hysteresis 를 바로 본다.
+- 통신 오류 시 10초 뒤 1회 자동 재개, 재차 실패하면 중단 + 재개 지점 저장 →
+  **Resume**. second advance 워치독 타임아웃은 재시도 없이 즉시 중단한다.
+  **재개 단위는 array 값**이다 — 그 값의 advance·Settle Wait·cycle 을 처음부터 다시
+  하고 cycle 파일도 새로 쓴다 (중단 시점의 물리 상태를 알 수 없어 cycle 중간부터
+  이어붙이면 데이터가 어긋난다).
+
+### ■ VNA Control — Power Sweep 모드
+
+Double Sweep 구획에 **`Power Sweep 모드 (First 축을 power 로 대체)`** 체크박스 추가.
+
+특정 자기장 값에 **자기장을 고정한 채 power 를 처음~끝까지 N 점**(양 끝 포함)
+바꾸며 매 점에서 acquire 하고, 끝나면 다음 자기장 점으로 넘어가 power 를 처음부터
+다시 훑는다. Second(바깥) 축은 기존대로 자기장이다.
+
+자기장 한 점의 진행 순서를 다섯 단계로 고정했다:
+
+```
+① 변화 속도 전송 → ② 목표값 전송 → ③ ramp 시작 트리거 → ④ 도달까지 폴링
+→ ⑤ 도달 후 대기 → [power 이동 → 대기 → 측정 → 대기] × N
+```
+
+②를 advance 방식(feedback 등)에 맡기지 않고 단순 write 로 하는 이유: Mercury iPS
+처럼 '목표 설정 → RTOS 트리거'가 따로인 장비는 write 와 폴링 **사이에** ③이 들어가야
+하는데, advance 안에서는 그 자리를 만들 수 없다. ④는 값을 다시 쓰지 않는 도달 판정
+전용 경로(`_await_feedback_target`)를 쓴다.
+
+- power ch(Config 의 sweep 명령 목록에서 선택) + Start / Stop / N.
+  콤보 아래에 **첫 점에서 실제로 나갈 VISA 문자열**을 그대로 보여 준다. 이 목록에는
+  등록된 sweep 명령이 전부 나오므로 주파수·게이팅 명령을 잘못 골라도 측정은 그대로
+  돌고 파일도 쌓인다 — power 만 안 바뀐다. 그걸 눈으로 잡으라고 붙였다.
+  (프로그램은 power 명령을 내장하지 않는다. VISA 라이브러리에 등록해야 한다.)
+- **측정 타이밍** — `이동 후 측정까지`(기본 5초), `측정 후 다음 점까지`(기본 5초).
+  이동 직후 값이 안정되기 전에 읽는 것을 막는다.
+- **자기장 변화 속도** — T/min 입력. 0.3 초과 시 옆에 경고가 뜬다(막지는 않는다).
+  값을 보낼 `속도 명령` 은 **비워 두면 Second 채널의 `Advance 전 명령`(pre_cmds)을
+  그대로 쓴다** — 자기장 속도 명령은 보통 거기에 이미 등록돼 있어서, 같은 것을 또
+  등록하게 하지 않는다. 무엇이 쓰이는지 UI 에 표시한다.
+- **ramp 시작 명령** — 목표 전송 후 실행할 트리거(iPS 의 RTOS 등). 목표 설정만으로
+  움직이는 장비면 비워 둔다.
+- **도달 후 대기** — 기본 60초. 도달 판정은 Second 채널의 Controlled advance 설정
+  (Read Cmd·Tolerance·Noise Floor·Poll)을 그대로 쓴다.
+- 모든 대기는 `_sleep_progress` 로 처리해 **남은 시간이 초 단위로 표시되고 Stop 을
+  누르면 즉시 빠져나온다** (60초 대기 중에 붙잡히지 않는다).
+- **시작 전 점검** — 도달 확인용 Read Cmd 없음 / 속도 명령 없음 / 속도 0.3 초과를
+  묶어 보여 주고 계속할지 묻는다. 전부 '측정은 돌지만 결과가 조용히 틀어지는' 종류라
+  막지 않고 확인만 받는다.
+- power 는 **항상 Start→Stop** 으로만 훑는다 (방향 콤보 무시). `pre_cmds` 는 이
+  모드에서 전송하지 않는다 — first 축이 자기장일 때를 위한 것이라 power 모드에서는
+  엉뚱한 축에 나가기 때문.
+- 켜면 **First sweep ch 콤보의 Start/Stop/N 은 쓰이지 않는다**(입력칸이 잠긴다).
+  콤보 자체는 `⏱ Time` 전환 통로라 잠그지 않는다.
+- `Double Sweep with Time` 과 **배타** — 둘 다 First 축을 대체하므로 하나만 켜진다.
+- 저장은 기존 규칙 그대로: **자기장 값이 하위폴더, power 값이 파일명**
+  (`<field>_0.5/<power>_-20.dat`). 예상 시간은 측정 대기·안정화 대기·자기장 ramp
+  시간까지 더해 계산한다.
+- 설정은 `VnaPowerSweepConfig` 로 프로파일에 저장/복원된다.
+
+### ■ VNA Control — 측정 완료 후 축 복귀 (`⏎ 측정 완료 후 복귀`)
+
+기존 double sweep 은 **정상 완료 시 아무 복귀도 하지 않아** first 는 Stop 값, second 는
+마지막 array 값에 그대로 남았다. `⏹ Stop 시 실행 명령` 은 Stop·오류 때만 나가므로
+정상 완료 뒤 자기장이 최대값에 방치되는 상황이 있었다.
+
+- 축별 체크박스 + 값 입력 — 체크한 축만 정상 완료 후 그 값으로 되돌린다.
+  끄면(기본) 지금까지와 동일하게 마지막 값에 멈춘다 (기존 동작 보존).
+- **First 를 먼저 내리고 그다음 Second** 를 옮긴다 — 시료에 신호를 걸어 둔 채
+  마그넷을 움직이지 않기 위해서. Second 는 그 채널의 advance 방식을 그대로 쓰므로
+  `feedback` 이면 실제 도달까지 기다린다.
+- **Stop·오류로 끊긴 경우에는 적용하지 않는다** (그때는 Stop 명령이 나가야 하는데,
+  복귀까지 겹치면 멈추라고 해 놓고 다시 움직이게 된다). 복귀 도중 Stop 을 눌러도
+  남은 축은 건드리지 않는다.
+- 복귀만 실패한 경우를 위해 `_AcquireWorker.warn` 시그널을 새로 뒀다. `error` 로
+  올리면 정상 완료가 '중단됨' 이 되어 resume 상태가 남으므로, 데이터는 그대로 두고
+  경고창만 띄운다.
+- 설정은 `VnaFinishReturnConfig` 로 프로파일에 저장/복원된다.
+
+### ■ 버그 수정 — sweep 값이 없을 때 sweep 명령을 빈 값으로 장비에 쓰던 문제
+
+**Single Acquire 와 Time 모드가 등록된 sweep 명령을 전부 빈 값으로 write** 하고 있었다.
+두 경로 모두 `_exec_write_cmds(self._acq.sweep_cmds, "")` 로 목록 전체를 부르는데,
+`build_cmd` 가 user_input 자리를 빈 문자열로 채워 인자가 빠진 명령이 그대로 나갔다.
+
+```
+:CALC1:PAR1:SEL; :CALC1:FILT:TIME:STAR      ← ch1 tr1 게이팅 시작점
+:CALC1:PAR1:SEL; :CALC1:FILT:TIME:STOP
+SET:DEV:GRPZ:PSU:SIG:FSET:;…:ACTN:RTOS      ← 빈 목표 + ramp-to-set
+SET:DEV:MB1.T1:TEMP:LOOP:TSET:
+```
+
+측정과 무관하게 **장비 상태가 조용히 바뀐다.** Time 모드는 매 스텝 반복하므로
+2000 스텝이면 2000번 나간다. 실제로 게이팅 시작점이 바뀐 사례가 확인됐다.
+
+값을 받아야 하는 명령(user_input 파라미터가 있는 명령)에 넘길 값이 없으면
+**보내지 않는다.** 고정 명령(`:INIT1` 등 user_input 없는 명령)은 그대로 실행한다.
+건너뛴 명령은 실행당 한 번만 상태줄에 알린다(매 스텝 반복하지 않는다).
+
+### ■ 그 밖
+
+- `FullProfile` 에 `cycle_double_sweep: CycleDoubleSweepConfig` 추가. 기존 프로파일
+  YAML 은 기본값으로 채워져 그대로 열린다.
+- `MainWindow.collect_active_aliases()` / `_run_connection_test()` 에 `include_cycle2d`
+  인자 추가 — Double Sweep+ 가 메인 UI 와 다른 first/second 채널을 고를 수 있으므로,
+  그 alias 가 시작 전 연결 테스트에서 빠지지 않게 한다.
+- 재개 지점 목록에 `더블+` 태그 추가 (`ui/dialogs/resume.py`).
+- 테스트 `test_cycle_double_sweep` 추가 (38개), `test_vna_double_sweep` 에 Power Sweep
+  모드·측정 순서·시작 전 점검·완료 후 복귀·자기장 안정화·빈 값 방지 47개 추가,
+  `test_windows` 대상 창 11 → 12개. 전체 239 → 324개.
+
+---
+
+## v1.9.0 — 2026-08-10 (기능 추가)
+
+### ■ Cycle Sweep 모듈 추가
+
+메뉴 **View → Cycle Sweep…** (`Ctrl+Shift+C`). VNA Control / MFLI Noise Sweep 처럼
+독립 창으로 뜬다.
+
+메인 sweep 은 목표값이 하나뿐이라 0 V → 30 V 로 끝나지만, Cycle Sweep 은 목표값을
+여러 개 두고 그 묶음을 반복한다.
+
+- **Cycle Targets** — 한 칸에 목표값 하나씩, 위에서 아래 순서로. `[+ target 추가]`
+  로 칸을 늘리고 `−` 로 지운다 (번호는 자동으로 다시 매겨진다). 빈 칸은 무시한다.
+- **Initial Value** — 시작하면 2636A 의 현재값에서 이 값까지 **먼저 이동**한 뒤
+  cycle 을 시작한다. 이 이동 구간(PRE_INIT)은 기록하지 않는다.
+  초기값 0, targets `30 / -30 / 0` 이면 0→30 V, 30→-30 V, -30→0 V 가 한 cycle.
+  2회차부터는 직전 cycle 의 마지막 target 에서 이어지므로 값이 끊기지 않는다.
+- **Sweep Rate / Time per Point** — cycle 전체에 공통 적용.
+- **Cycles** — 반복 횟수. **cycle 하나당 `.dat` 파일 하나**가 생긴다.
+  메타데이터 JSON 과 T/B 평균·표준편차도 cycle 단위로 끊긴다.
+- **Save Settings** — 저장 폴더(Main Folder + 찾아보기 / Sub Folder)와 파일명
+  (File Name), 날짜 포함 여부, 저장 on/off 를 **이 창에서 직접** 정한다.
+  메인 창 설정과 별개라 메인 sweep 과 다른 폴더에 따로 모을 수 있다.
+  결과: `{Main}/{Sub}/[YYYY-MM-DD]/{File Name}{YYYYMMDD}_cycleNNN.dat`, 미리보기 실시간 표시.
+  `Main 창 설정 가져오기` 버튼으로 메인 창 값을 한 번에 복사할 수 있고, 프로파일에서
+  처음 창을 열 때는 이 값이 자동으로 채워진다.
+- **Return to zero** — 체크하면 모든 cycle 종료 후 같은 rate 로 0 까지 되돌린다
+  (이 구간은 기록하지 않는다). 해제하면 마지막 target 값에 그대로 둔다.
+- **Sweep Channel 은 Keithley 2636A 로 등록된 항목만** 나온다. 드라이버 클래스로
+  판정하므로 구 레이아웃 경로(`driver.keithley_2636a.…`)도 인식한다.
+- 측정 항목과 미분 채널은 **메인 창 설정을 시작 시점에 스냅샷**해서 쓴다
+  (Double Sweep 과 같은 방식). 그래프는 cycle 을 겹쳐 그려 hysteresis 를 바로 본다
+  (상승 구간 trace, 하강 구간 retrace 색).
+- 통신 오류 시 10초 뒤 1회 자동 재개, 재차 실패하면 중단하고 그 cycle 을 재개 로그에
+  저장 → **Resume** 로 그 cycle 부터 다시 시작. 재개할 때도 그 cycle 이 원래 출발했을
+  위치(cycle 1 은 초기값, 2회차부터는 직전 cycle 의 마지막 target)로 먼저 이동한 뒤
+  이어가며, 해당 cycle 파일은 새로 쓴다.
+
+구간 전환은 별도 판정 없이 `calculate_next_step` 의 계약을 그대로 쓴다 — 목표를
+넘어서는 스텝은 목표값으로 clamp 되어 **기록되고**, 그 다음 요청이
+`is_done=True` + 측정값 없음으로 돌아올 때 다음 구간으로 넘어간다. 덕분에 코너
+값이 정확히 한 번만 기록된다.
+
+### ■ 그 밖
+
+- `FullProfile` 에 `cycle_sweep: CycleSweepConfig` 추가. 기존 프로파일 YAML 은
+  기본값으로 채워져 그대로 열린다.
+- `MainWindow.collect_active_aliases()` / `_run_connection_test()` 에 `include_cycle`
+  인자 추가 — Cycle Sweep 이 메인 UI 와 다른 채널을 고를 수 있으므로, 그 alias 가
+  시작 전 연결 테스트에서 빠지지 않게 한다.
+- 재개 지점 목록에 `사이클` 태그 추가 (`ui/dialogs/resume.py`).
+- 테스트 `test_cycle_sweep` 추가 (21개), `test_windows` 대상 창 10 → 11개.
+
+---
+
 ## v1.8.0 — 2026-08-03 (구조 개편)
 
 기능 변경은 없습니다. 디렉토리 구조·코드 정리와 그 과정에서 드러난 버그 수정입니다.

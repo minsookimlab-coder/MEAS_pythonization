@@ -24,6 +24,8 @@ OPENERS = [
     "_open_vna_window",
     "_open_mfli_window",
     "_open_double_sweep",
+    "_open_cycle_sweep",
+    "_open_cycle_double_sweep",
     "_open_graph_window",
     "_open_command_window",
     "_open_parameter_manager",

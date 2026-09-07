@@ -17,6 +17,9 @@
 11. [Debug 창 — 로그 및 콘솔](#11-debug-창--로그-및-콘솔)
 12. [데이터 파일 형식](#12-데이터-파일-형식)
 13. [알람 및 Telegram 알림](#13-알람-및-telegram-알림)
+14. [Cycle Sweep](#14-cycle-sweep)
+15. [Double Sweep+ (Cycle) — 온도·자기장마다 cycle 반복](#15-double-sweep-cycle--온도자기장마다-cycle-반복)
+16. [VNA Control — Power Sweep 모드](#16-vna-control--power-sweep-모드)
 
 ---
 
@@ -590,6 +593,418 @@ RETRACE 완료 후 측정값이 조건을 충족하면 알람을 발생시킵니
 
 ---
 
+## 14. Cycle Sweep
+
+**메뉴 → View → Cycle Sweep…** (`Ctrl+Shift+C`)
+
+메인 창의 단일 sweep 은 목표값이 하나뿐이라 `0 V → 30 V` 로 끝납니다. Cycle Sweep 은
+목표값을 여러 개 두고 그 묶음(cycle)을 정해진 횟수만큼 반복합니다.
+
+**Sweep channel 은 Keithley 2636A 로 등록된 항목만** 선택할 수 있습니다.
+목록이 비어 있으면 Instrument Settings 에서 그 장비의 드라이버가 `Keithley2636A`
+인지, Parameter Manager 에 Paired Command 가 등록돼 있는지 확인하세요.
+
+### 14.1 한 cycle 이란
+
+측정을 시작하면 2636A 의 **현재값에서 Initial Value 까지 먼저 이동**한 뒤(이 구간은
+기록하지 않습니다), 거기서부터 목표값을 순서대로 훑습니다. 이 한 바퀴가 cycle 입니다.
+
+초기값 `0`, 목표값 `30 / -30 / 0` 이면
+
+```
+(현재값) → 0 V   ← 초기값 이동, 데이터 없음
+① 0 V → 30 V      ② 30 V → -30 V      ③ -30 V → 0 V      = cycle 1회
+```
+
+2회차부터는 직전 cycle 의 마지막 target(위 예에서 0 V)에서 이어지므로 값이 끊기지
+않습니다.
+
+### 14.2 목표값 입력 — Cycle Targets
+
+**한 칸에 값 하나씩** 넣고, 위에서 아래 순서로 sweep 합니다.
+
+```
+Cycle Targets
+  1.  [   30   ] V   [−]
+  2.  [  -30   ] V   [−]
+  3.  [    0   ] V   [−]
+  [ +  target 추가 ]
+```
+
+- **`+ target 추가`** — 맨 아래에 빈 칸을 하나 더 만듭니다.
+- **`−`** — 그 줄을 지웁니다. 번호는 자동으로 다시 매겨집니다.
+- **빈 칸은 무시**합니다. 칸만 만들어 두고 값을 안 넣으면 그 줄은 없는 것으로 칩니다.
+- 목록 아래 미리보기 줄에 `(현재값) → 0V(초기값) → 30V → -30V → 0V  [3 구간 / cycle]`
+  처럼 실제로 돌아갈 순서가 표시됩니다. 숫자로 읽을 수 없는 값이 있으면 빨간 글씨로
+  알려 줍니다.
+
+### 14.3 그 밖의 입력 항목
+
+| 항목 | 설명 |
+|------|------|
+| **Initial Value** | cycle 을 시작하기 전에 먼저 이동할 값. 이 구간은 저장하지 않습니다 |
+| **Sweep Rate** | 이동 속도 (units/min). **초기값 이동·cycle·0 복귀 전부 이 속도** |
+| **Time / Point** | 스텝당 시간 (초). 한 스텝 이동량 = rate/60 × Time/Point |
+| **Cycles** | 같은 cycle 을 반복할 횟수 |
+| **Return to zero** | 체크: 모든 cycle 종료 후 0 까지 복귀 (이 구간도 **저장하지 않음**). 해제: 마지막 target 값에 그대로 정지 |
+
+**Estimated / 종료 예상** — cycle 1 은 초기값에서, 2회차부터는 직전 cycle 의 마지막
+target 에서 출발한다고 보고 거리를 더해 계산합니다. 맨 처음 '현재값 → 초기값' 구간은
+현재값을 미리 알 수 없어 빠져 있습니다.
+
+### 14.4 측정 항목
+
+측정 항목(Active Measurements)과 미분 채널은 **메인 창 설정을 시작 시점에 그대로
+가져다 씁니다.** 그래서 시작 전에 메인 창에서 원하는 measurement 를 체크해
+두어야 합니다. (저장 위치와 파일명은 아래 14.5 처럼 이 창에서 직접 정합니다.)
+
+### 14.5 Save Settings — 저장 위치와 파일명
+
+저장 폴더와 파일명은 **이 창에서 직접** 정합니다. 메인 창 설정과 별개이므로,
+메인 창 sweep 과 다른 폴더에 따로 모아 둘 수 있습니다.
+
+| 항목 | 설명 |
+|------|------|
+| **Main Folder** | 저장 루트. `찾아보기…` 버튼으로 고를 수 있습니다 |
+| **Sub Folder** | 그 아래 하위 폴더. 비우면 Main Folder 바로 아래에 저장 |
+| **File Name** | 파일명 앞부분. 뒤에 cycle 번호가 자동으로 붙습니다 |
+| **날짜 포함** | 체크 시 `YYYY-MM-DD` 폴더가 하나 더 생기고 파일명에도 `YYYYMMDD` 가 들어갑니다 |
+| **파일로 저장** | 끄면 측정은 하되 파일을 만들지 않습니다 (그래프·Data 창에만 표시) |
+
+**`Main 창 설정 가져오기`** 버튼을 누르면 메인 창의 저장 설정을 한 번에 복사해
+옵니다 (Sub Folder 에는 `/cycle` 이 붙습니다). 처음 이 창을 여는 프로파일에서는
+이 값이 자동으로 채워집니다.
+
+결과 경로 (아래 미리보기 줄에 실시간으로 표시됩니다):
+
+```
+{Main Folder}/{Sub Folder}/[YYYY-MM-DD]/{File Name}{YYYYMMDD}_cycleNNN.dat
+
+예) D:/data/sampleA/cycle/2026-08-10/run1_20260810_cycle001.dat
+    D:/data/sampleA/cycle/2026-08-10/run1_20260810_cycle002.dat
+```
+
+- **cycle 하나당 파일 하나**입니다. 번호는 뺄 수 없습니다.
+- 각 파일의 첫 행은 그 cycle 의 **시작점**(이동 없이 현재 위치에서 한 번 측정)입니다.
+- 메타데이터 JSON(`…_cycleNNN.json`)도 cycle 단위로 저장되며, 온도·자기장의
+  평균·표준편차도 그 cycle 구간에 대해서만 계산됩니다.
+- 같은 File Name 으로 같은 날 다시 돌리면 **같은 이름의 파일을 덮어씁니다.**
+  이전 결과를 남기려면 File Name 을 바꾸세요.
+
+그래프는 cycle 을 지우지 않고 겹쳐 그립니다 — hysteresis 를 바로 볼 수 있습니다
+(값이 올라가는 구간은 trace 색, 내려가는 구간은 retrace 색).
+
+### 14.6 상태 표시줄
+
+| 레이블 | 표시 내용 |
+|--------|-----------|
+| **Phase** | `IDLE` / `PRE_INIT`(초기값 이동) / `SWEEPING` / `RETURNING 0` |
+| **Cycle** | 진행 상황 (예: `3/10`) |
+| **Segment** | 현재 cycle 안의 구간 (예: `2/3`) |
+| **Target** | 현재 구간의 목표값 |
+
+### 14.7 중단과 재개
+
+- 통신 오류가 나면 10초 뒤 자동으로 1회 재시도합니다.
+- 다시 실패하면 측정을 멈추고 그 시점의 cycle 을 재개 로그에 저장합니다.
+- **Resume** 버튼으로 저장된 cycle 부터 다시 시작할 수 있습니다.
+  재개 단위는 **cycle** 이며, 그 cycle 의 `.dat` 파일은 새로 씁니다.
+  재개할 때도 그 cycle 이 원래 출발했을 위치(cycle 1 은 초기값, 2회차부터는 직전
+  cycle 의 마지막 target)로 먼저 이동한 뒤 이어갑니다.
+- Stop 으로 직접 멈춰도 같은 방식으로 재개 지점이 남습니다.
+
+메인 창에서 단일 sweep 이 돌고 있으면 Cycle Sweep 은 시작할 수 없고, 반대도
+마찬가지입니다 (같은 장비를 두 곳에서 구동하는 사고 방지).
+
+---
+
+## 15. Double Sweep+ (Cycle) — 온도·자기장마다 cycle 반복
+
+**메뉴 → View → Double Sweep+ (Cycle)…** (`Ctrl+Shift+B`)
+
+Cycle Sweep 은 한 온도에서만 돌지만, 실제 실험은 보통 **온도(또는 자기장)를 한 칸씩
+바꿔 가며 같은 cycle 을 다시 도는 것**입니다. 이 창이 그 바깥 루프를 대신 돌려 줍니다.
+
+예를 들어 300 K 부터 20 K 씩 내리면서 매 온도에서 `0 → 30 → -30 → 30 → 0 V` cycle 을
+돌리고 싶다면, 온도가 실제로 따라올 시간(예: 1시간)을 주도록 설정하면 이렇게 진행됩니다.
+
+```
+300 K 설정 → 1시간 대기 → 300 K 에서 cycle
+280 K 설정 → 1시간 대기 → 280 K 에서 cycle
+260 K 설정 → 1시간 대기 → 260 K 에서 cycle   …
+```
+
+### 15.1 진행 순서 (모든 온도/자기장 값에서 동일)
+
+| 단계 | Phase | 하는 일 |
+|------|-------|---------|
+| ① | `PRE_INIT` | First 채널을 **Initial Value** 로 이동 (기록 안 함) |
+| ② | `ADVANCING_SECOND` | Second 채널(온도/자기장)을 다음 값으로 설정 |
+| ③ | `SETTLING` | **Settle Wait** 만큼 대기 (남은 시간이 실시간 표시) |
+| ④ | `CYCLING` | cycle 1 … N 진행 (cycle 마다 파일 하나) |
+
+①이 ②보다 **먼저**인 이유: 온도·자기장이 변하는 동안 시료에 직전 cycle 의 마지막
+전압이 계속 걸려 있으면 안 되기 때문입니다. Initial Value 를 0 V 로 두면 온도가
+움직이는 내내 0 V 에 머뭅니다.
+
+### 15.2 ① Second Channel — ITC / IPS 고르기
+
+맨 위 **장비 라디오**로 `ITC (온도)` / `IPS (자기장)` / `전체` 를 고르면 그 장비로
+등록된 Second Sweep Channel 만 목록에 남습니다.
+
+목록이 비어 있으면
+- Instrument Settings 에서 그 장비의 드라이버가 `OxfordITC` / `OxfordIPS` 인지,
+- Parameter Manager 에 **Second Sweep Channel** 로 등록돼 있는지
+
+확인하세요. (`전체` 를 고르면 드라이버와 무관하게 전부 나옵니다.)
+
+**Advance Type**(값을 어떻게 옮길지)은 Parameter Manager 에서 그 채널을 등록할 때
+정합니다. 고른 타입에 따라 아래 설정 구획이 나타납니다.
+
+| Advance Type | 동작 | 이 창에서 고치는 값 |
+|---|---|---|
+| `simple_hop` | 값만 보내고 바로 다음 | — |
+| `sweep` | 정해진 속도로 천천히 이동 | Sweep Rate, Safety Ramp |
+| `feedback` | 실제 값이 도달·안정될 때까지 폴링 | Read Cmd, Poll, Tolerance, Std Window/Threshold, Noise Floor |
+| `wait_for_time` | 값을 보내고 정해진 시간 대기 | Wait Time |
+| `threshold_time` | 도달 판정 후 고정 시간 대기 | 위 둘 다 |
+
+### 15.3 ② Array 와 Settle Wait
+
+**From / To / Step** 으로 훑을 값 목록을 만듭니다.
+**내려가는 방향이면 Step 을 음수로** 넣으세요 (예: `300 → 100`, Step `-20`).
+부호가 반대면 값이 하나만 만들어집니다 — 오른쪽 `→ N pts` 표시로 바로 확인됩니다.
+
+`Array 값 테이블…` 을 누르면 값 목록을 표로 직접 편집할 수 있습니다. **측정 중에도
+아직 측정하지 않은(대기) 행은 고치거나 추가·삭제할 수 있습니다.** 직접 만든 목록을
+그대로 쓰려면 `테이블 초기화 안 함` 을 켜세요.
+
+| 항목 | 설명 |
+|------|------|
+| **Settle Wait** | second 를 설정한 뒤 cycle 을 시작하기까지 기다리는 시간 (시/분 입력) |
+| **첫 값은 대기 건너뛰기** | 첫 값에서만 대기를 생략합니다. **이미 그 온도/자기장에 도달해 있을 때만** 켜세요 |
+| **마지막에 second 를 0 으로** | 모든 값이 끝난 뒤 second 채널을 0 으로 보냅니다 |
+
+> **Settle Wait 는 Advance Type 의 대기와 별개입니다.** `feedback` 으로 도달을 확인한
+> 뒤에도 Settle Wait 만큼 **추가로** 기다립니다. 온도계가 가리키는 값과 시료 온도가
+> 같아지는 데 걸리는 시간을 따로 주려는 것이므로, 둘 다 쓰는 것이 정상입니다.
+
+측정 중에는 상태 표시줄에 `대기 1h 23m 45s 남음` 처럼 남은 시간이 초 단위로 갱신됩니다.
+
+### 15.4 ③④⑤ First Channel / Targets / Cycle
+
+Cycle Sweep 창과 같은 방식입니다 ([14장](#14-cycle-sweep) 참고).
+다만 여기서는 **Sweep Value 로 등록된 항목이면 무엇이든** 고를 수 있습니다.
+
+| 항목 | 설명 |
+|------|------|
+| **Initial Value** | 매 second 값마다 cycle 시작 전에 먼저 이동할 값 (기록 안 함) |
+| **Cycle Targets** | 한 칸에 하나씩, 위에서 아래 순서로. 빈 칸은 무시 |
+| **Sweep Rate / Time per Point** | cycle 전체 공통 |
+| **Cycles / point** | second 값 **하나당** cycle 반복 횟수 |
+| **마지막에 first 를 0 으로** | 모든 측정이 끝난 뒤 first 채널을 0 으로 복귀 (기록 안 함) |
+
+**Estimated / 종료 예상** 은 이동 거리와 Settle Wait 를 더해 계산합니다. second 채널이
+실제로 온도·자기장에 도달하는 데 걸리는 시간은 장비에 달려 있어 **빠져 있습니다** —
+실제 소요는 이보다 깁니다.
+
+### 15.5 ⑥ 저장
+
+저장 폴더·파일명은 **이 창에서 직접** 정합니다 (메인 창 설정과 별개).
+`Main 창 설정 가져오기` 로 한 번에 복사할 수 있습니다.
+
+**second 값 하나 × cycle 하나마다 `.dat` 파일이 하나**씩 생깁니다.
+
+```
+{Main Folder}/{Sub Folder}/[YYYY-MM-DD]/{File Name}{YYYYMMDD}_{axis}_{2nd값}_cycleNNN.dat
+예: D:\data\sampleA\cycle2d\2026-08-27\sampleA20260827_T_280_cycle002.dat
+```
+
+창 아래 미리보기 줄이 실제로 만들어질 경로입니다. 같은 이름·같은 날짜로 다시 돌리면
+**기존 파일을 덮어씁니다** — File Name 을 바꾸세요.
+
+메타데이터 JSON 에는 second 채널 정보(값·advance type·Settle Wait)와 cycle 정보가
+함께 들어갑니다. 그래프는 second 값이 바뀔 때마다 새로 시작하고, 같은 값의 cycle 들은
+겹쳐 그려 hysteresis 를 바로 볼 수 있습니다.
+
+### 15.6 상태 표시줄
+
+| 레이블 | 표시 내용 |
+|--------|-----------|
+| **Phase** | `IDLE` / `PRE_INIT` / `ADVANCING_SECOND` / `SETTLING` / `CYCLING` / `RETURNING_…` |
+| **Second** | 현재 온도/자기장 목표값 |
+| **Array** | 몇 번째 값인지 (예: `3/11`) |
+| **Cycle** | 그 값에서의 cycle 진행 (예: `2/5`) |
+| **Seg** | 현재 cycle 안의 구간 (예: `2/4`) |
+| (맨 오른쪽) | 대기 중이면 남은 시간 |
+
+### 15.7 중단과 재개
+
+- 통신 오류가 나면 10초 뒤 자동으로 1회 재시도합니다. 다시 실패하면 멈추고 그 시점의
+  **array 값**을 재개 로그에 저장합니다.
+- second 채널이 목표에 도달하지 못하는 워치독 타임아웃은 **재시도 없이 즉시 중단**합니다
+  (장비가 명령을 놓쳤을 가능성이 커서, 계속 기다리면 시간만 버립니다).
+- **Resume** 로 저장된 지점부터 다시 시작합니다. **재개 단위는 array 값**이라,
+  그 값의 second 설정·Settle Wait·cycle 전부를 처음부터 다시 하고 cycle 파일도 새로
+  씁니다. (중단 시점의 실제 온도·전압을 알 수 없어 cycle 중간부터 이어붙이면 데이터가
+  어긋나기 때문입니다.)
+- Stop 으로 직접 멈춰도 같은 방식으로 재개 지점이 남습니다.
+
+메인 창에서 단일 sweep 이 돌고 있으면 이 창은 시작할 수 없고, 반대도 마찬가지입니다.
+
+---
+
+## 16. VNA Control — Power Sweep 모드
+
+**VNA Control 창 → ◆ Double Sweep 구획 → `Power Sweep 모드 (First 축을 power 로 대체)`**
+
+특정 자기장 값에 **자기장을 고정한 채 VNA power 를 한 점씩 바꾸며 매 점마다 측정**하고,
+끝나면 다음 자기장 값으로 넘어가 power 를 처음부터 다시 훑습니다.
+
+> ### ⚠️ 먼저 할 일 — power 명령 등록
+>
+> **프로그램은 power 명령을 내장하고 있지 않습니다.** `power ch` 에서 고른 명령을
+> 그대로 보낼 뿐이고, 그 목록은 ⚙ Config 의 Sweep 명령 = VISA 라이브러리에서 옵니다.
+>
+> `power ch` 콤보에는 **등록된 sweep 명령이 전부** 나옵니다. 주파수나 게이팅 명령을
+> 잘못 골라도 측정은 그대로 돌고 파일도 정상적으로 쌓입니다 — power 만 안 바뀔 뿐입니다.
+> 그래서 콤보 아래에 **첫 점에서 실제로 나갈 VISA 문자열**을 그대로 보여 줍니다.
+> 시작 전에 반드시 확인하세요.
+>
+> ```
+> ↳ 첫 점에 보낼 명령:  [VNA] :SOUR1:POW -20        ← 이런 게 나와야 정상
+> ↳ 첫 점에 보낼 명령:  [VNA] :CALC1:FILT:TIME:STAR -20   ← 게이팅 명령. power 안 바뀜
+> ```
+>
+> **등록 방법** — Settings → VISA Library → VNA 에 Write Command 추가:
+>
+> | 필드 | 값 (Keysight ENA 계열 예시) |
+> |---|---|
+> | Description | `VNA_set_power` |
+> | VISA Command | `:SOUR{ch}:POW {p}` |
+> | Figure Axis | `power` · Unit `dBm` |
+>
+> 그다음 VNA Control 의 ⚙ Config 에서 이 명령을 Sweep 명령에 추가하고, `ch` 는 고정값
+> (보통 1), `p` 는 `[parameter]`(user input)로 지정하면 `power ch` 콤보에 나타납니다.
+>
+> 명령 문법은 **장비 모델마다 다릅니다.** 반드시 쓰시는 VNA 의 프로그래밍 매뉴얼로
+> 확인하세요.
+
+### 16.1 실제 진행 순서
+
+```
+[자기장 점마다 반복]
+  ① 자기장 변화 속도 전송            (입력한 T/min)
+  ② 자기장 목표값 전송
+  ③ ramp 시작 트리거                 (등록했을 때만 — 예: iPS 의 RTOS)
+  ④ 실제로 도달할 때까지 폴링         (Second 채널의 Read Cmd 로 확인)
+  ⑤ 도달 후 대기                      (기본 60초)
+      [power 점마다 반복]
+        power 이동 → 대기(기본 5초) → 측정 → 대기(기본 5초)
+```
+
+예: power `-20 → 0` N=11, 자기장 `0 → 1 T` N=5, 속도 0.3 T/min 이면
+
+```
+자기장 0 T 도달 → 60초 대기 → power -20 → 5초 → 측정 → 5초 → -18 → 5초 → 측정 …  (11점)
+자기장 0.25 T 도달 → 60초 대기 → power -20 부터 다시 11점  …
+… 1 T 까지 끝나면 측정 완료 (총 55점)
+```
+
+### 16.2 입력 항목
+
+| 항목 | 설명 |
+|------|------|
+| **power ch** | power 를 설정하는 sweep 명령 (⚙ Config 의 Sweep 명령 목록에서 선택) |
+| **Start / Stop / N** | power 범위와 **처음·끝을 포함한** 점 개수 (`N=2` 면 처음·끝 두 점) |
+| **이동 후 측정까지** | power 를 옮긴 뒤 측정을 시작하기까지 (기본 5초) |
+| **측정 후 다음 점까지** | 측정이 끝난 뒤 다음 power 로 넘어가기까지 (기본 5초) |
+| **변화 속도** | 다음 자기장 점으로 넘어갈 때의 속도. **Mercury iPS 는 최대 0.3 T/min** — 넘으면 옆에 경고가 뜹니다 |
+| **속도 명령** | 위 속도 값을 장비로 보내는 명령. **비워 두면 Second 채널의 `Advance 전 명령`을 그대로 씁니다** (보통 여기 이미 등록돼 있습니다) |
+| **ramp 시작 명령** | 목표를 보낸 뒤 실제 ramp 를 시작시키는 트리거. 목표 설정만으로 움직이는 장비면 비워 두세요 |
+| **도달 후 대기** | 자기장이 목표에 도달한 뒤 power sweep 을 시작하기까지 (기본 60초) |
+| **Second sweep channel** | 바깥 축 — 자기장. 기존대로 ch·Start·Stop·N 을 정합니다 |
+
+**자기장 도달 판정**은 Second 채널의 **Controlled Sweep** 설정(Read Cmd·Tolerance·
+Noise Floor·Poll Interval)을 그대로 씁니다. ⚙ Config 에서 그 명령을 Controlled Sweep
+(`feedback`)으로 등록하고 Read Cmd(예: `READ:DEV:GRPZ:PSU:SIG:FLD`)를 넣어 두세요.
+
+시작 버튼을 누를 때 아래 항목을 자동으로 점검하고, 걸리는 게 있으면 목록으로 보여 준 뒤
+계속할지 물어봅니다.
+
+- 자기장 채널에 도달 확인용 Read Cmd 가 있는지 (없으면 **ramp 중에 측정이 시작됩니다**)
+- 속도 명령이 있는지 (없으면 입력한 속도가 장비로 전송되지 않습니다)
+- 변화 속도가 0.3 T/min 을 넘지 않는지
+
+### 16.3 주의
+
+- 이 모드를 켜면 **`First sweep ch` 콤보의 Start / Stop / N 은 쓰이지 않습니다**
+  (입력칸이 잠깁니다). 콤보 자체는 `⏱ Time` 으로 전환하는 통로라 잠그지 않습니다.
+- power 는 **항상 Start→Stop 방향**으로만 훑습니다. `First 방향` 을 다중방향으로
+  두어도 무시하고, 자기장 점이 바뀔 때마다 power 는 Start 부터 다시 시작합니다.
+- **`Double Sweep with Time` 과 동시에 켤 수 없습니다.** 둘 다 First 축을 대체하기
+  때문이며, Power 를 켜면 field-time 이 자동으로 꺼집니다.
+- `Advance 전 명령 값 (pre-advance)` 구획은 이 모드에서 **전송되지 않습니다.** 그건
+  First 축이 자기장일 때 쓰는 것이고, 여기서는 First 가 power 이기 때문입니다.
+  자기장 속도는 위 `속도 명령` 이 담당합니다.
+- 모든 대기는 **Stop 을 누르면 즉시 빠져나옵니다** — 60초 대기 중이라도 붙잡히지 않습니다.
+
+### 16.4 측정이 끝나면 어디에 멈추나
+
+**아무것도 체크하지 않으면 마지막으로 쓴 값에 그대로 멈춥니다.**
+
+| 축 | 체크 안 했을 때 멈추는 곳 |
+|---|---|
+| power | 단방향이면 **Stop 값**. 다중방향이면 자기장 점 개수가 홀수→Stop, 짝수→Start |
+| 자기장 | **마지막 array 값**(second Stop) |
+
+되돌리려면 **`⏎ 측정 완료 후 복귀`** 에서 원하는 축을 체크하고 값을 넣으세요.
+
+```
+⏎ 측정 완료 후 복귀 (선택):
+  ☑ First  →  [ -30 ]      ☑ Second  →  [ 0 ]
+```
+
+- **First 를 먼저** 내리고 그다음 Second 를 옮깁니다 — 시료에 신호를 걸어 둔 채
+  마그넷을 움직이지 않기 위해서입니다. (Power Sweep 모드에서 First = power)
+- Second 는 그 채널의 advance 방식을 그대로 씁니다 — `feedback` 이면 **실제 도달까지
+  기다립니다**.
+- **Stop·오류로 끊긴 경우에는 복귀하지 않습니다.** 그때는 `⏹ Stop 시 실행 명령`
+  (예: iPS 의 HOLD)이 대신 나갑니다. 복귀 도중 Stop 을 눌러도 남은 축은 건드리지 않습니다.
+- 복귀에만 실패하면 경고창만 뜨고 측정 데이터는 그대로 정상 완료로 남습니다
+  (측정이 '중단됨'으로 바뀌거나 Resume 대상이 되지 않습니다).
+
+> ⚠️ 정상 완료 시에는 `⏹ Stop 시 실행 명령`이 **나가지 않습니다.** 측정이 끝난 뒤
+> iPS 에 HOLD 를 걸고 싶다면 위 복귀 옵션으로 자기장을 원하는 값에 보내거나,
+> Stop 을 눌러 명시적으로 끊으세요.
+
+### 16.5 자기장 포인트 사이 이동 속도
+
+Power Sweep 모드는 자기장 이동 방식을 따로 갖지 않습니다. **⚙ Config 에서 그
+자기장 명령을 어떻게 등록했는지**가 그대로 적용됩니다.
+
+| Config 의 그 명령 | 이동 방식 | 속도를 정하는 것 |
+|---|---|---|
+| 일반 (기본) / Controlled+`simple_hop` | 값만 write, **도달 대기 없음** | 장비 내부 ramp rate. 프로그램은 곧바로 측정 시작 ⚠️ |
+| Controlled + `sweep` | 소프트웨어가 잘게 쪼개 write | `sweep_rate` (units/min), 스텝 간격 0.1초 |
+| Controlled + `feedback` | write 후 도달·안정까지 폴링 | **장비 내부 ramp rate** (프로그램은 대기만) |
+| Controlled + `wait_for_time` / `threshold_time` | write 후 시간 대기 | 장비 내부 |
+
+> 자기장을 **일반**으로 등록해 두면 램프가 끝나기 전에 power 측정이 시작됩니다.
+> 마그넷은 ⚙ Config 에서 **Controlled Sweep**(보통 `feedback`)으로 등록하세요.
+> 램프 속도 자체(iPS 의 RFST 등)는 장비 설정이며, 프로그램에서 바꾸려면 Config 의
+> `Advance 전 명령` 을 써야 합니다.
+
+### 16.6 저장
+
+기존 double sweep 규칙 그대로 **자기장 값이 하위폴더, power 값이 파일명**입니다.
+
+```
+{filename}_001/{자기장축}_300/{power축}_-20.dat
+```
+
+---
+
 ## 부록 A — 드라이버 목록
 
 모두 `pythonization/instruments/drivers/` 안에 있으며, 모듈 이름은 `vendor_model.py`
@@ -646,3 +1061,5 @@ RETRACE 완료 후 측정값이 조건을 충족하면 알람을 발생시킵니
 |----|------|
 | `Escape` | 현재 보조 창 닫기 (숨김) |
 | `Enter` | Debug 콘솔에서 명령 전송 |
+| `Ctrl+Shift+C` | Cycle Sweep 창 열기 |
+| `Ctrl+Shift+B` | Double Sweep+ (Cycle) 창 열기 |

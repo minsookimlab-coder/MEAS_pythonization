@@ -40,7 +40,9 @@ from pythonization.ui.modules.vna.models import (
     VnaCommandEntry,
     VnaDoubleSweepControl,
     VnaFieldTimeConfig,
+    VnaFinishReturnConfig,
     VnaPlotCurveConfig,
+    VnaPowerSweepConfig,
     VnaPreCmdValue,
     VnaResumeState,
     VnaSectionConfig,
@@ -186,6 +188,9 @@ class _AcquireWorker(QObject):
     finished    = Signal()
     error       = Signal(str)
     progress    = Signal(str)
+    #: 데이터는 다 모았는데 뒷정리(복귀)만 실패 — 측정을 '오류'로 표시하면 안 되지만
+    #: 장비가 엉뚱한 값에 남았을 수 있어 조용히 넘기면 안 되는 경우.
+    warn        = Signal(str)
 
     def __init__(self, session, lib_reg, acq_cfg: VnaAcquireConfig,
                  sweep_values=None,
@@ -208,6 +213,8 @@ class _AcquireWorker(QObject):
         self._ref_len: Optional[int] = None   # 첫 스텝에서 확정된 기준 array 길이
         self._sec = None                 # advance 재사용용 SecondChannelWorker
         self._sec_stop = None
+        #: 값이 없어 건너뛴 sweep 명령 (같은 것을 매 스텝 알리지 않기 위한 기록)
+        self._skipped_blank: set = set()
 
     def stop(self):
         self._stop_flag = True
@@ -327,7 +334,9 @@ class _AcquireWorker(QObject):
         ft = p.get("field_time")
         ft_on = bool(ft and ft.get("enabled"))
         first_vals  = p["first_values"]
-        uni = (p["direction"] == "uni")
+        pw = p.get("power")          # Power Sweep 모드 설정 (아니면 None)
+        # Power 모드는 항상 power Start→Stop 순서로 훑는다 (방향 교대 없음)
+        uni = (p["direction"] == "uni") or pw is not None
         offset = p.get("second_index_offset", 0)   # resume: 건너뛴 second 개수 (전역 인덱스)
         tbl = p.get("second_table")                # SecondChannelModel (Feature 1) or None
         use_tbl = bool(p["second_enabled"] and tbl is not None)
@@ -372,9 +381,15 @@ class _AcquireWorker(QObject):
             ctx = (f"[Second {si+1}/{n2}={sv:.6g}] "
                    if (p["second_enabled"] and sv is not None) else "")
             if p["second_enabled"]:
-                self.progress.emit(f"{ctx}Second 채널 이동 중 → {sv:.6g}")
-                self._advance(p["second_cmd"], p["second_adv"], sv, second_prev)
+                if pw is not None:
+                    # Power 모드: 속도 → 목표 → ramp 시작 → 도달 → 안정화 대기
+                    self._pw_advance_field(p, sv, second_prev, ctx)
+                else:
+                    self.progress.emit(f"{ctx}Second 채널 이동 중 → {sv:.6g}")
+                    self._advance(p["second_cmd"], p["second_adv"], sv, second_prev)
                 second_prev = sv
+                if self._stop_flag:
+                    break
 
             # ── Double Sweep with Time ──
             if ft_on:
@@ -392,7 +407,9 @@ class _AcquireWorker(QObject):
             order = (list(first_vals) if (uni or si % 2 == 0)
                      else list(reversed(first_vals)))
             nf = len(order)
-            if uni and not self._stop_flag:
+            # Power 모드는 아래 루프의 첫 스텝이 이미 Start 로 이동하므로 '시작점 복귀'가
+            # 필요 없다. pre_cmds 도 first 축이 자기장일 때를 위한 것이라 여기선 건너뛴다.
+            if uni and pw is None and not self._stop_flag:
                 self.progress.emit(f"{ctx}① 시작점 복귀 → {first_vals[0]:.6g} (dummy 속도)")
                 self._run_pre_cmds("dummy")
                 try:
@@ -406,19 +423,161 @@ class _AcquireWorker(QObject):
             for k, fv in enumerate(order, 1):
                 if self._stop_flag:
                     break
-                self.progress.emit(f"{ctx}② First {k}/{nf} 이동 중 → {fv:.6g}")
+                axis = "Power" if pw is not None else "First"
+                self.progress.emit(f"{ctx}② {axis} {k}/{nf} 이동 중 → {fv:.6g}")
                 try:
                     self._advance(p["first_cmd"], p["first_adv"], fv, first_pos)
                     first_pos = fv
-                    self.progress.emit(f"{ctx}③ First {k}/{nf} 측정 중 (val={fv:.6g})")
+                    if pw is not None:
+                        # 이동 직후엔 아직 값이 안정되지 않았을 수 있다 → 측정 전 대기
+                        self._sleep_progress(pw["pre_measure_s"],
+                                             f"{ctx}{axis} {fv:.6g} — 측정 전 대기")
+                        if self._stop_flag:
+                            break
+                    self.progress.emit(f"{ctx}③ {axis} {k}/{nf} 측정 중 (val={fv:.6g})")
                     extra = [fv] + ([sv] if (p["second_enabled"] and sv is not None) else [])
                     self._acquire_once(idx, first_step=(idx == 0), extra_values=extra)
+                    if pw is not None:
+                        self._sleep_progress(pw["post_measure_s"],
+                                             f"{ctx}{axis} {fv:.6g} — 측정 후 대기")
                 except Exception as e:
                     self.error.emit(f"Step {idx+1}: {type(e).__name__}: {e}")
                     return
                 idx += 1
             self._finish_second(use_tbl, tbl, gidx)
             si += 1
+
+        if not self._stop_flag:
+            self._run_finish_return(p, first_pos, second_prev)
+
+    def _sleep_progress(self, seconds: float, label: str):
+        """남은 시간을 알리며 대기한다. Stop 이 걸리면 즉시 빠져나온다.
+
+        1분·5초 같은 고정 대기가 '멈춘 것처럼' 보이지 않도록 초 단위로 남은 시간을
+        상태줄에 찍는다.
+        """
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return
+        if seconds <= 0:
+            return
+        deadline = _time.perf_counter() + seconds
+        next_tick = 0.0
+        while not self._stop_flag:
+            now = _time.perf_counter()
+            remaining = deadline - now
+            if remaining <= 0:
+                return
+            if now >= next_tick:
+                self.progress.emit(f"⏳ {label} — {remaining:.0f}s 남음")
+                next_tick = now + 1.0
+            # max(0.0, ...) 필수: 두 perf_counter() 호출 사이에 deadline 을 넘기면
+            # 음수가 되어 sleep 이 ValueError 로 죽는다.
+            _time.sleep(max(0.0, min(0.05, remaining)))
+
+    # ---- Power Sweep 모드: 자기장 이동 ---------------------------------
+
+    def _pw_advance_field(self, p, target, prev, ctx=""):
+        """Power 모드의 자기장 한 점 이동.
+
+        ① 변화 속도 설정  ② 목표값 전송  ③ ramp 시작 트리거
+        ④ 도달 + 안정화까지 폴링  ⑤ 그 뒤 고정 시간 대기 — 항상 이 순서로 밟는다.
+
+        ②를 advance 방식(feedback 등)에 맡기지 않고 단순 write 로 하는 이유: Mercury iPS
+        처럼 '목표 설정 → RTOS 트리거' 가 따로인 장비는 write 와 폴링 **사이에** ③이
+        들어가야 하는데, advance 안에서는 그 자리를 만들 수 없다.
+        """
+        pw = p["power"]
+        if pw.get("rate_cmds"):
+            self.progress.emit(f"{ctx}① 자기장 변화 속도 {pw['field_rate']:g} 설정")
+            self._run_cmd_list(pw["rate_cmds"], pw["field_rate"])
+        if self._stop_flag:
+            return
+        self.progress.emit(f"{ctx}② 자기장 목표 {target:.6g} 전송")
+        self._advance(p["second_cmd"], None, target, prev)   # adv=None → 단순 write
+        if pw.get("go_cmds"):
+            self.progress.emit(f"{ctx}③ 자기장 ramp 시작")
+            self._run_cmd_list(pw["go_cmds"], target)
+        if self._stop_flag:
+            return
+        self._pw_wait_arrival(p, target, prev, ctx)
+        if self._stop_flag:
+            return
+        self._sleep_progress(pw["field_settle_s"],
+                             f"{ctx}자기장 {target:.6g} 안정 — 추가 대기")
+
+    def _pw_wait_arrival(self, p, target, prev, ctx=""):
+        """자기장이 target 에 도달하고 **안정될 때까지** 기다린다 (값을 다시 쓰지 않는다).
+
+        판정 기준은 second 채널의 Controlled advance 설정을 그대로 쓴다 —
+        일반 double sweep 의 feedback 과 같은 2단계다:
+          Phase 1  |읽은값 − 목표| 가 tolerance band 안에 들어올 때까지 폴링
+          Phase 2  최근 std_window 개 샘플의 흔들림이 std_threshold 아래로 내려갈 때까지
+
+        Phase 2 는 std_window·std_threshold 가 둘 다 설정돼 있을 때만 돈다(0 이면 생략).
+        **이미 목표값에 있어도 Phase 2 는 확인한다** — 도달했다고 안정된 것은 아니다.
+        read cmd 가 없으면 도달을 확인할 방법이 없으므로 통과한다(시작 전에 경고한다).
+        """
+        adv = p["second_adv"]
+        cmd = p["second_cmd"]
+        read_cmd = (getattr(adv, "feedback_read_cmd", "") or "").strip() if adv else ""
+        if not read_cmd or cmd is None:
+            return
+        alias = cmd.alias
+        if not self._session.is_open(alias):
+            self._session.open(alias)
+        if prev is None:
+            prev = self._read_current(cmd, adv)
+        distance = abs(target - (prev if prev is not None else 0.0))
+
+        sec = self._ensure_sec()
+        ch = self._make_sec_channel(cmd, adv)
+        use_std = ch.feedback_std_window > 0 and ch.feedback_std_threshold > 0.0
+
+        if distance >= 1e-12:
+            self.progress.emit(f"{ctx}④ 자기장 {target:.6g} 도달 대기 중…")
+            # 값을 다시 쓰지 않는 '도달 판정' 전용 경로 (워치독·통신오류 처리 포함)
+            if not sec._await_feedback_target(alias, ch, target, distance):
+                return          # Stop 요청
+        if use_std and not self._stop_flag:
+            self.progress.emit(
+                f"{ctx}④ 자기장 {target:.6g} 안정화 대기 중… "
+                f"(최근 {ch.feedback_std_window}개 std < {ch.feedback_std_threshold:g})")
+            sec._await_feedback_stability(alias, ch, target)
+
+    def _run_finish_return(self, p, first_pos, second_prev):
+        """모든 측정이 끝난 뒤 각 축을 지정값으로 되돌린다 (측정 없음).
+
+        **First 를 먼저** 내리고 그다음 Second 를 옮긴다 — 시료에 신호(power/bias)를
+        걸어 둔 채 마그넷을 움직이지 않기 위해서다. Second 이동은 그 채널의 advance
+        방식을 그대로 쓰므로, feedback 이면 실제 도달까지 기다린다.
+
+        Stop 으로 끊겼을 때는 부르지 않는다 — 그 경우엔 사용자가 등록한
+        'Stop 시 실행 명령'(예: HOLD)이 대신 나가야 한다.
+        """
+        ret = p.get("finish_return") or {}
+
+        def _go(label, cmd, adv, value, prev):
+            # 복귀 도중 Stop 을 누를 수도 있다 (자기장 하강은 몇 분씩 걸린다).
+            # 그때는 남은 축을 건드리지 않고 빠져나가 Stop 명령에 맡긴다.
+            if self._stop_flag:
+                return
+            self.progress.emit(f"⑤ 측정 완료 — {label} → {value:.6g} 복귀 중")
+            try:
+                self._advance(cmd, adv, value, prev)
+            except Exception as e:
+                # 데이터는 이미 다 모였다 → error 가 아니라 warn.
+                # error 로 올리면 정상 완료가 '중단'으로 표시되고 resume 상태가 남는다.
+                self.warn.emit(f"{label} 복귀 실패 ({value:.6g}): {type(e).__name__}: {e}")
+
+        if ret.get("first_enabled") and p["first_cmd"] is not None:
+            _go("First", p["first_cmd"], p["first_adv"],
+                float(ret.get("first_value", 0.0)), first_pos)
+        if (ret.get("second_enabled") and p["second_enabled"]
+                and p["second_cmd"] is not None):
+            _go("Second", p["second_cmd"], p["second_adv"],
+                float(ret.get("second_value", 0.0)), second_prev)
 
     def _run_field_time(self, p, idx, sv, si, uni, is_last, first_pos, ctx=""):
         """first 채널을 시간 기반으로 측정 (Double Sweep with Time).
@@ -714,6 +873,17 @@ class _AcquireWorker(QObject):
     def _exec_write_cmds(self, cmds: List[VnaCommandEntry], sv_str: str):
         for entry in cmds:
             if not entry.enabled:
+                continue
+            # 값을 받아야 하는 명령인데 넘길 값이 없으면 **보내지 않는다**.
+            # 빈 값으로 write 하면 ':CALC1:FILT:TIME:STAR ' 나
+            # 'SET:…:FSET:;…:ACTN:RTOS' 처럼 인자가 빠진 명령이 나가서, 측정과 무관하게
+            # 장비 상태(게이팅 시작점·자기장 목표 등)가 조용히 바뀐다.
+            # Single Acquire 와 Time 모드가 sweep 명령 전체를 빈 값으로 부르는 경로다.
+            if not sv_str and any(p.is_user_input for p in entry.params):
+                if entry.description not in self._skipped_blank:
+                    self._skipped_blank.add(entry.description)
+                    self.progress.emit(
+                        f"   · sweep 값이 없어 '{entry.description}' 은 보내지 않습니다")
                 continue
             lib      = self._lib_reg.get_library(entry.alias)
             template = get_template(lib, entry)
@@ -1228,6 +1398,20 @@ class VnaWindow(QDialog):
             "바깥 루프 축. 체크하면 ch(명령)·Start·Stop·N을 정합니다. "
             "끄면 First 축만 한 번 쓸고 끝납니다.<hr>"
 
+            "<b>■ Power Sweep 모드</b><br>"
+            "안쪽(First) 축을 <b>VNA power</b>로 대체합니다. Second(자기장) 한 점에 "
+            "<b>자기장을 고정</b>한 채 power를 Start→Stop으로 <b>N점</b>(처음·끝 포함) 바꾸며 "
+            "매 점에서 acquire하고, 끝나면 다음 자기장 점으로 넘어가 power를 처음부터 다시 훑습니다.<br>"
+            "&nbsp;– 자기장 한 점의 순서: <b>①속도 → ②목표 → ③ramp 시작 → "
+            "④도달(tolerance)·안정화(std) → ⑤고정 대기</b>. ④의 판정 기준은 Second 채널의 "
+            "Controlled advance 설정(Read Cmd·Tolerance·Std Window·Std Threshold)을 "
+            "그대로 씁니다 — 일반 double sweep 의 feedback 과 같은 2단계입니다.<br>"
+            "&nbsp;– 켜면 <b>First sweep ch 콤보와 그 Start/Stop/N은 쓰이지 않습니다</b> "
+            "(power ch·Start·Stop·N을 대신 씁니다).<br>"
+            "&nbsp;– <b>Double Sweep with Time과 함께 켤 수 없습니다</b> (둘 다 First 축을 대체).<br>"
+            "&nbsp;– 저장: 자기장 값이 <b>하위폴더</b>, power 값이 <b>파일명</b>이 됩니다 "
+            "(<code>&lt;field&gt;_300/&lt;power&gt;_-20.dat</code> 형식).<hr>"
+
             "<b>■ First 방향</b><br>"
             "&nbsp;• <b>단방향</b>: 매 sweep을 항상 <b>시작점→끝점</b>으로. 다음 Second 스텝 전에 "
             "<b>dummy로 시작점에 복귀</b>(측정 안 함)합니다. 자기장처럼 방향에 민감한 축에 적합.<br>"
@@ -1244,6 +1428,18 @@ class VnaWindow(QDialog):
             "First(자기장)를 N단계가 아니라 <b>시간 기반</b>으로 측정합니다. 목표로 ramp를 시작한 뒤 "
             "<b>acquire 간격</b>마다 측정하고, 상태 읽기 cmd 응답에 <b>HOLD 토큰</b>이 보이면 완료로 "
             "판단합니다. 단방향이면 매 sweep 전 시작점으로 controlled 복귀합니다.<hr>"
+
+            "<b>■ ⏎ 측정 완료 후 복귀</b><br>"
+            "체크한 축만 <b>정상 완료 후</b> 지정한 값으로 되돌립니다. "
+            "<b>First 를 먼저</b> 내리고 그다음 Second 를 옮깁니다 — 시료에 신호를 걸어 둔 채 "
+            "마그넷을 움직이지 않기 위해서입니다. Second 는 그 채널의 advance 방식을 그대로 쓰므로 "
+            "feedback 이면 실제 도달까지 기다립니다.<br>"
+            "&nbsp;– <b>체크하지 않으면 마지막으로 쓴 값에 그대로 멈춥니다</b> "
+            "(First=Stop 값, Second=마지막 array 값. 다중방향이면 First 는 Start 일 수도 있습니다).<br>"
+            "&nbsp;– <b>Stop·오류로 끊긴 경우에는 적용되지 않습니다</b> — 그때는 아래 "
+            "'Stop 시 실행 명령'이 대신 나갑니다.<br>"
+            "&nbsp;– 복귀에만 실패하면 측정 데이터는 그대로 두고 경고만 띄웁니다 "
+            "(측정이 '중단됨'으로 바뀌지 않습니다).<hr>"
 
             "<b>■ ⏹ Stop 시 실행 명령</b><br>"
             "측정 중 <b>Stop</b>(또는 오류 중단) 시 자동 전송할 명령. "
@@ -1482,6 +1678,16 @@ class VnaWindow(QDialog):
         layout.addWidget(self._cb_second_enable)
         layout.addWidget(self._build_second_channel_widget())
 
+        # Power Sweep — First 축을 power 로 대체 (Second=자기장 × power)
+        self._cb_power_mode = QCheckBox("Power Sweep 모드 (First 축을 power 로 대체)")
+        self._cb_power_mode.setToolTip(
+            "켜면 Second(자기장) 값 하나마다 power 를 Start→Stop 으로 N 점 바꾸며\n"
+            "매 점에서 acquire 합니다. First sweep ch 콤보와 그 Start/Stop/N 은\n"
+            "이 모드에서 쓰이지 않습니다.")
+        self._cb_power_mode.toggled.connect(self._on_power_mode_toggled)
+        layout.addWidget(self._cb_power_mode)
+        layout.addWidget(self._build_power_sweep_widget())
+
         layout.addLayout(self._build_direction_row())
         layout.addWidget(self._build_pre_advance_widget())
 
@@ -1494,6 +1700,7 @@ class VnaWindow(QDialog):
         layout.addWidget(self._cb_field_time)
         layout.addWidget(self._build_field_time_widget())
 
+        layout.addWidget(self._build_finish_return_widget())
         self._build_stop_cmd_section(layout)
         layout.addLayout(self._build_time_estimate_row())
 
@@ -1521,6 +1728,9 @@ class VnaWindow(QDialog):
 
         self._combo_second_cmd = QComboBox()
         self._combo_second_cmd.setFont(_MONO)
+        # Power 모드의 '속도 명령' 출처가 이 선택에 딸려 있다 (그 채널의 pre_cmds)
+        self._combo_second_cmd.currentIndexChanged.connect(
+            lambda _i: self._pw_update_rate_source_hint())
         cmd_row = QHBoxLayout()
         cmd_row.setSpacing(6)
         cmd_row.addWidget(QLabel("ch:"))
@@ -1563,6 +1773,263 @@ class VnaWindow(QDialog):
 
         self._second_widget.setVisible(False)
         return self._second_widget
+
+    def _build_power_sweep_widget(self) -> QWidget:
+        """Power Sweep 모드 설정 — power 명령 + 처음/끝/점 개수. 체크박스로 접힌다."""
+        self._power_widget = QWidget()
+        layout = QVBoxLayout(self._power_widget)
+        layout.setContentsMargins(14, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self._combo_power_cmd = QComboBox()
+        self._combo_power_cmd.setFont(_MONO)
+        self._combo_power_cmd.setToolTip(
+            "power 를 설정하는 sweep 명령 (Config 의 Sweep 명령 목록에서 고릅니다).")
+        cmd_row = QHBoxLayout()
+        cmd_row.setSpacing(6)
+        cmd_row.addWidget(QLabel("power ch:"))
+        cmd_row.addWidget(self._combo_power_cmd, 1)
+        layout.addLayout(cmd_row)
+
+        self._le_pw_start = self._mono_edit("-20", 54)
+        self._le_pw_stop = self._mono_edit("0", 54)
+        self._le_pw_n = self._mono_edit("11", 40)
+        self._le_pw_n.setToolTip("처음과 끝을 포함한 point 개수 (2 이면 처음·끝 두 점).")
+        range_row = QHBoxLayout()
+        range_row.setSpacing(4)
+        range_row.addWidget(QLabel("Start:"))
+        range_row.addWidget(self._le_pw_start)
+        range_row.addWidget(QLabel("Stop:"))
+        range_row.addWidget(self._le_pw_stop)
+        range_row.addWidget(QLabel("N:"))
+        range_row.addWidget(self._le_pw_n)
+        range_row.addStretch()
+        for field in (self._le_pw_start, self._le_pw_stop, self._le_pw_n):
+            field.textChanged.connect(self._update_time_estimate)
+        layout.addLayout(range_row)
+
+        hint = QLabel("→ Second(자기장) 한 점마다 power 를 Start→Stop 으로 N 점 훑습니다.")
+        hint.setStyleSheet("color:#888; font-size:10px;")
+        layout.addWidget(hint)
+
+        # 'power ch' 콤보에는 등록된 sweep 명령이 **전부** 나온다 — 주파수나 게이팅
+        # 명령을 잘못 골라도 측정은 그대로 돌고 데이터도 저장된다. 실제로 나가는
+        # VISA 문자열을 보여 줘서 그걸 눈으로 잡게 한다.
+        self._lbl_pw_cmd_preview = QLabel("")
+        self._lbl_pw_cmd_preview.setFont(QFont("Consolas", 8))
+        self._lbl_pw_cmd_preview.setWordWrap(True)
+        self._lbl_pw_cmd_preview.setStyleSheet("color:#888;")
+        layout.addWidget(self._lbl_pw_cmd_preview)
+        self._combo_power_cmd.currentIndexChanged.connect(
+            lambda _i: self._pw_update_cmd_preview())
+        self._le_pw_start.textChanged.connect(self._pw_update_cmd_preview)
+
+        layout.addWidget(self._hline())
+        layout.addLayout(self._build_power_timing_row())
+        layout.addWidget(self._hline())
+        self._build_power_field_section(layout)
+
+        self._power_widget.setVisible(False)
+        return self._power_widget
+
+    def _build_power_timing_row(self) -> QHBoxLayout:
+        """power 한 점의 타이밍 — 이동 후 측정까지 / 측정 후 다음 점까지."""
+        self._le_pw_pre = self._mono_edit("5", 46)
+        self._le_pw_pre.setToolTip(
+            "power 를 옮긴 뒤 실제 측정을 시작하기까지 기다리는 시간.\n"
+            "값이 안정될 시간을 줍니다.")
+        self._le_pw_post = self._mono_edit("5", 46)
+        self._le_pw_post.setToolTip(
+            "측정이 끝난 뒤 다음 power 점으로 넘어가기까지 기다리는 시간.")
+
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        row.addWidget(QLabel("이동 후 측정까지:"))
+        row.addWidget(self._le_pw_pre)
+        row.addWidget(QLabel("s"))
+        row.addSpacing(8)
+        row.addWidget(QLabel("측정 후 다음 점까지:"))
+        row.addWidget(self._le_pw_post)
+        row.addWidget(QLabel("s"))
+        row.addStretch()
+        for field in (self._le_pw_pre, self._le_pw_post):
+            field.textChanged.connect(self._update_time_estimate)
+        return row
+
+    def _build_power_field_section(self, layout: QVBoxLayout) -> None:
+        """자기장(Second) 이동 — 변화 속도·ramp 시작·도달 후 대기."""
+        title = QLabel("자기장(Second) 이동")
+        title.setStyleSheet("color:#79c0ff; font-size:10px; font-weight:bold;")
+        layout.addWidget(title)
+
+        self._le_pw_rate = self._mono_edit("0.3", 54)
+        self._le_pw_rate.setToolTip(
+            "다음 자기장 점으로 넘어갈 때의 변화 속도.\n"
+            "아래 '속도 명령'의 [parameter] 자리에 이 값이 채워져 전송됩니다.\n"
+            "Mercury iPS 는 보통 최대 0.3 T/min 입니다.")
+        self._lbl_pw_rate_warn = QLabel("")
+        self._lbl_pw_rate_warn.setStyleSheet("color:#d7ba7d; font-size:10px;")
+        rate_row = QHBoxLayout()
+        rate_row.setSpacing(4)
+        rate_row.addWidget(QLabel("변화 속도:"))
+        rate_row.addWidget(self._le_pw_rate)
+        rate_row.addWidget(QLabel("(T/min)"))
+        rate_row.addWidget(self._lbl_pw_rate_warn)
+        rate_row.addStretch()
+        self._le_pw_rate.textChanged.connect(self._on_pw_rate_changed)
+        layout.addLayout(rate_row)
+
+        rate_label = QLabel("속도 명령 — 목표 전송 **전**에 실행:")
+        rate_label.setStyleSheet("color:#888; font-size:10px;")
+        layout.addWidget(rate_label)
+        self._pw_rate_list = QListWidget()
+        self._pw_rate_list.setFont(_MONO)
+        self._pw_rate_list.setMaximumHeight(44)
+        layout.addWidget(self._pw_rate_list)
+        layout.addLayout(self._cmd_button_row(self._pw_rate_add, self._pw_rate_del))
+        self._pw_rate_cmds: list = []
+
+        # 속도 명령은 보통 Config 에서 그 채널의 'Advance 전 명령'으로 이미 등록해 둔다.
+        # 여기서 또 등록하게 하지 않고, 비어 있으면 그것을 그대로 쓴다.
+        self._lbl_pw_rate_src = QLabel("")
+        self._lbl_pw_rate_src.setStyleSheet("color:#79c0ff; font-size:10px;")
+        self._lbl_pw_rate_src.setWordWrap(True)
+        layout.addWidget(self._lbl_pw_rate_src)
+
+        go_label = QLabel("ramp 시작 명령 — 목표 전송 **후**에 실행 (예: …:ACTN:RTOS):")
+        go_label.setStyleSheet("color:#888; font-size:10px;")
+        go_label.setToolTip(
+            "목표값을 write 하는 것만으로 ramp 가 시작되는 장비면 비워 두세요.\n"
+            "Mercury iPS 는 RTOS(ramp-to-set) 트리거가 필요합니다.")
+        layout.addWidget(go_label)
+        self._pw_go_list = QListWidget()
+        self._pw_go_list.setFont(_MONO)
+        self._pw_go_list.setMaximumHeight(44)
+        layout.addWidget(self._pw_go_list)
+        layout.addLayout(self._cmd_button_row(self._pw_go_add, self._pw_go_del))
+        self._pw_go_cmds: list = []
+
+        self._le_pw_settle = self._mono_edit("60", 54)
+        self._le_pw_settle.setToolTip(
+            "자기장이 도달·안정된 뒤 power sweep 을 시작하기까지 더 기다리는 시간.\n"
+            "도달(tolerance)과 안정화(std) 판정은 Second 채널의 Controlled advance\n"
+            "설정을 그대로 쓰고, 그 둘을 모두 통과한 다음 이 시간이 시작됩니다.")
+        settle_row = QHBoxLayout()
+        settle_row.setSpacing(4)
+        settle_row.addWidget(QLabel("도달·안정화 후 대기:"))
+        settle_row.addWidget(self._le_pw_settle)
+        settle_row.addWidget(QLabel("s"))
+        settle_row.addStretch()
+        self._le_pw_settle.textChanged.connect(self._update_time_estimate)
+        layout.addLayout(settle_row)
+
+    def _on_pw_rate_changed(self, *_):
+        """IPS 한계(0.3 T/min)를 넘으면 눈에 띄게 알린다 (막지는 않는다)."""
+        rate = self._ds_f(self._le_pw_rate, 0.0)
+        if rate > 0.3:
+            self._lbl_pw_rate_warn.setText("⚠ IPS 한계(0.3) 초과")
+        elif rate <= 0:
+            self._lbl_pw_rate_warn.setText("⚠ 0 보다 커야 합니다")
+        else:
+            self._lbl_pw_rate_warn.setText("")
+        self._update_time_estimate()
+
+    def _pw_resolved_cmd(self, value: str) -> str:
+        """선택한 power 명령이 value 에 대해 실제로 보낼 VISA 문자열.
+
+        찾지 못하거나 조립에 실패하면 그 사유를 문자열로 돌려준다 — 조용히 빈 값을
+        내면 '잘못 골랐다'는 것을 알 방법이 없다.
+        """
+        i = self._combo_power_cmd.currentIndex()
+        cmds = self._cfg.acquire.sweep_cmds
+        if not (0 <= i < len(cmds)):
+            return ""
+        entry = cmds[i]
+        try:
+            template = get_template(self._lib_reg.get_library(entry.alias), entry)
+            if template is None:
+                return f"[{entry.alias}] (라이브러리에서 명령을 찾을 수 없습니다)"
+            return f"[{entry.alias}] {build_cmd(template, entry.params, value)}"
+        except Exception as e:
+            return f"[{entry.alias}] (명령 조립 실패: {type(e).__name__}: {e})"
+
+    def _pw_update_cmd_preview(self, *_):
+        """첫 power 점에서 실제로 나갈 명령을 그대로 보여 준다."""
+        if not hasattr(self, "_lbl_pw_cmd_preview"):
+            return
+        resolved = self._pw_resolved_cmd(self._le_pw_start.text().strip() or "0")
+        if not resolved:
+            self._lbl_pw_cmd_preview.setText("↳ power 명령을 선택하세요")
+            self._lbl_pw_cmd_preview.setStyleSheet("color:#d7ba7d;")
+            return
+        self._lbl_pw_cmd_preview.setText(f"↳ 첫 점에 보낼 명령:  {resolved}")
+        self._lbl_pw_cmd_preview.setStyleSheet(
+            "color:#d7ba7d;" if "(" in resolved.split("] ", 1)[-1][:1] else "color:#888;")
+
+    def _pw_effective_rate_cmds(self) -> list:
+        """실제로 전송할 속도 명령.
+
+        직접 등록한 게 없으면 **Second 채널의 'Advance 전 명령'(pre_cmds)** 을 쓴다 —
+        자기장 램프 속도 명령은 보통 ⚙ Config 에서 그 채널에 이미 달아 두기 때문에,
+        같은 것을 여기서 또 등록하게 하지 않는다.
+        """
+        if self._pw_rate_cmds:
+            return list(self._pw_rate_cmds)
+        adv = self._selected_advance(self._combo_second_cmd)
+        return list(getattr(adv, "pre_cmds", None) or []) if adv else []
+
+    def _pw_refresh_rate_list(self):
+        self._pw_rate_list.clear()
+        for c in self._pw_rate_cmds:
+            self._pw_rate_list.addItem(f"{c.alias}  {c.label or c.description}")
+        self._pw_update_rate_source_hint()
+
+    def _pw_update_rate_source_hint(self):
+        """속도 명령을 직접 등록하지 않았을 때 무엇이 대신 쓰이는지 보여 준다."""
+        if not hasattr(self, "_lbl_pw_rate_src"):
+            return
+        if self._pw_rate_cmds:
+            self._lbl_pw_rate_src.setText("")
+            return
+        fallback = self._pw_effective_rate_cmds()
+        if fallback:
+            names = ", ".join(c.label or c.description for c in fallback)
+            self._lbl_pw_rate_src.setText(
+                f"↳ 비어 있음 — Second 채널의 'Advance 전 명령'을 씁니다: {names}")
+            self._lbl_pw_rate_src.setStyleSheet("color:#79c0ff; font-size:10px;")
+        else:
+            self._lbl_pw_rate_src.setText(
+                "↳ 비어 있고 Second 채널에도 없음 — 변화 속도가 장비로 전송되지 않습니다.")
+            self._lbl_pw_rate_src.setStyleSheet("color:#d7ba7d; font-size:10px;")
+
+    def _pw_rate_add(self):
+        dlg = _PreAdvanceCmdDialog(self._lib_reg, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_cmd():
+            self._pw_rate_cmds.append(dlg.result_cmd())
+            self._pw_refresh_rate_list()
+
+    def _pw_rate_del(self):
+        i = self._pw_rate_list.currentRow()
+        if 0 <= i < len(self._pw_rate_cmds):
+            self._pw_rate_cmds.pop(i)
+            self._pw_refresh_rate_list()
+
+    def _pw_refresh_go_list(self):
+        self._pw_go_list.clear()
+        for c in self._pw_go_cmds:
+            self._pw_go_list.addItem(f"{c.alias}  {c.label or c.description}")
+
+    def _pw_go_add(self):
+        dlg = _PreAdvanceCmdDialog(self._lib_reg, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_cmd():
+            self._pw_go_cmds.append(dlg.result_cmd())
+            self._pw_refresh_go_list()
+
+    def _pw_go_del(self):
+        i = self._pw_go_list.currentRow()
+        if 0 <= i < len(self._pw_go_cmds):
+            self._pw_go_cmds.pop(i)
+            self._pw_refresh_go_list()
 
     def _build_direction_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -1652,6 +2119,56 @@ class VnaWindow(QDialog):
         self._ft_widget.setVisible(False)
         return self._ft_widget
 
+    def _build_finish_return_widget(self) -> QWidget:
+        """측정이 정상 완료된 뒤 각 축을 어디로 되돌릴지.
+
+        끄면 지금까지처럼 마지막 값에 그대로 멈춘다. Stop·오류로 끊긴 경우에는
+        적용하지 않는다 — 그때는 아래 'Stop 시 실행 명령'이 나가야 한다.
+        """
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+
+        label = QLabel("⏎ 측정 완료 후 복귀 (선택):")
+        label.setStyleSheet("color:#7ee787; font-size:10px;")
+        label.setToolTip(
+            "체크한 축만 측정이 끝난 뒤 그 값으로 되돌립니다.\n"
+            "First 를 먼저 내리고 그다음 Second 를 옮깁니다 — 시료에 신호를 걸어 둔 채\n"
+            "마그넷을 움직이지 않기 위해서입니다.\n"
+            "Second 는 그 채널의 advance 방식을 그대로 쓰므로 feedback 이면 도달까지 기다립니다.\n"
+            "체크하지 않으면 마지막으로 쓴 값에 그대로 멈춥니다.\n"
+            "Stop 이나 오류로 끊긴 경우에는 적용되지 않습니다 (아래 Stop 명령이 대신 나갑니다).")
+        layout.addWidget(label)
+
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        self._cb_ret_first = QCheckBox("First")
+        self._cb_ret_first.setToolTip(
+            "Power Sweep 모드에서는 이 First 가 power 축입니다.")
+        self._le_ret_first = self._mono_edit("0", 54)
+        row.addWidget(self._cb_ret_first)
+        row.addWidget(QLabel("→"))
+        row.addWidget(self._le_ret_first)
+
+        row.addSpacing(10)
+        self._cb_ret_second = QCheckBox("Second")
+        self._cb_ret_second.setToolTip(
+            "Second sweep channel 을 쓸 때만 적용됩니다 (보통 자기장).")
+        self._le_ret_second = self._mono_edit("0", 54)
+        row.addWidget(self._cb_ret_second)
+        row.addWidget(QLabel("→"))
+        row.addWidget(self._le_ret_second)
+        row.addStretch()
+        layout.addLayout(row)
+
+        # 체크한 축만 값 입력을 연다 (꺼진 칸의 값이 의미 있어 보이지 않게)
+        self._cb_ret_first.toggled.connect(self._le_ret_first.setEnabled)
+        self._cb_ret_second.toggled.connect(self._le_ret_second.setEnabled)
+        self._le_ret_first.setEnabled(False)
+        self._le_ret_second.setEnabled(False)
+        return widget
+
     @staticmethod
     def _cmd_button_row(add_slot, del_slot) -> QHBoxLayout:
         """명령 목록에 딸린 '+ 명령' / '✕' 버튼 한 쌍."""
@@ -1703,10 +2220,37 @@ class VnaWindow(QDialog):
         self._second_widget.setVisible(checked)
         self._update_time_estimate()
 
+    def _on_power_mode_toggled(self, checked: bool):
+        """Power 모드 on/off — First 축 입력을 잠그고 field-time 과 배타 처리한다.
+
+        둘 다 First 축을 대체하므로 동시에 켤 수 없다. Power 를 켜면 field-time 을 끈다.
+        """
+        self._power_widget.setVisible(checked)
+        if checked and self._cb_field_time.isChecked():
+            self._cb_field_time.setChecked(False)   # → _on_field_time_toggled 가 정리
+        self._cb_field_time.setEnabled(not checked)
+        self._sync_first_axis_enabled()
+        self._refresh_ds_dynamic()
+
     def _on_field_time_toggled(self, checked: bool):
         self._ft_widget.setVisible(checked)
-        self._le_sw_n.setEnabled(not checked)   # field-time은 First N 불필요
+        self._sync_first_axis_enabled()
         self._refresh_ds_dynamic()
+
+    def _power_mode_on(self) -> bool:
+        """Power Sweep 모드가 켜져 있는지 (Time sweep 선택 시에는 항상 False)."""
+        return (hasattr(self, "_cb_power_mode")
+                and self._cb_power_mode.isChecked()
+                and not self._is_time_sweep_selected())
+
+    def _sync_first_axis_enabled(self):
+        """First 축 입력의 활성 상태 — power/field-time 이 First 를 대체하면 잠근다."""
+        power_on = hasattr(self, "_cb_power_mode") and self._cb_power_mode.isChecked()
+        ft_on = hasattr(self, "_cb_field_time") and self._cb_field_time.isChecked()
+        self._le_sw_n.setEnabled(not (ft_on or power_on))   # field-time·power는 First N 불필요
+        # 콤보는 잠그지 않는다 — '⏱ Time' 전환 통로라서 잠그면 빠져나갈 길이 막힌다
+        for w in (self._le_sw_start, self._le_sw_stop):
+            w.setEnabled(not power_on)
 
     def _ft_refresh_list(self):
         self._ft_fwd_list.clear()
@@ -1820,7 +2364,10 @@ class VnaWindow(QDialog):
                 n2 = max(1, int(float(self._le_2_n.text())))
             except ValueError:
                 n2 = 0
-        first_min  = self._advance_min_time(self._selected_advance(self._combo_sweep_cmd))
+        power_on = self._power_mode_on()
+        # power 모드면 First 축 자리를 power 콤보가 대신한다
+        first_combo = self._combo_power_cmd if power_on else self._combo_sweep_cmd
+        first_min  = self._advance_min_time(self._selected_advance(first_combo))
         second_min = self._advance_min_time(self._selected_advance(self._combo_second_cmd)) if second_on else 0.0
         # 단방향이면 second 스텝 사이마다 first를 시작점으로 복귀(controlled) → (n2-1)회
         returns = (n2 - 1) if (uni and second_on) else 0
@@ -1833,7 +2380,8 @@ class VnaWindow(QDialog):
             return
 
         try:
-            n1 = max(1, int(float(self._le_sw_n.text())))
+            n1 = max(1, int(float(
+                (self._le_pw_n if power_on else self._le_sw_n).text())))
         except ValueError:
             n1 = 0
         try:
@@ -1844,12 +2392,34 @@ class VnaWindow(QDialog):
         if total <= 0:
             self._lbl_time_est.setText("예상: —")
             return
+        if power_on:
+            self._lbl_time_est.setText(
+                f"예상: {total} step · 약 {self._fmt_dur(self._power_mode_seconds(n1, n2, sps))}")
+            return
         # acquire + first advance(매 스텝) + second advance + dummy 복귀
         secs = (total * sps
                 + first_min * total
                 + second_min * n2
                 + first_min * returns)
         self._lbl_time_est.setText(f"예상: {total} step · 약 {self._fmt_dur(secs)}")
+
+    def _power_mode_seconds(self, n1: int, n2: int, sps: float) -> float:
+        """Power 모드 예상 소요 — 측정 대기와 자기장 ramp·안정화까지 더한다.
+
+        자기장 ramp 시간은 '한 점 간격 / 변화 속도'로 잡는다. 첫 점(현재값 → 시작점)은
+        현재 자기장을 알 수 없어 빠져 있으므로 실제로는 이보다 조금 더 걸린다.
+        """
+        pre = self._ds_f(self._le_pw_pre, 0.0)
+        post = self._ds_f(self._le_pw_post, 0.0)
+        settle = self._ds_f(self._le_pw_settle, 0.0)
+        per_point = sps + max(0.0, pre) + max(0.0, post)
+        secs = n1 * n2 * per_point + n2 * max(0.0, settle)
+
+        rate = self._ds_f(self._le_pw_rate, 0.0)
+        if rate > 0 and n2 > 1:
+            span = abs(self._ds_f(self._le_2_stop, 0.0) - self._ds_f(self._le_2_start, 0.0))
+            secs += (n2 - 1) * (span / (n2 - 1)) * 60.0 / rate
+        return secs
 
     # ---- Sweep command helpers ---------------------------------------
 
@@ -1884,7 +2454,25 @@ class VnaWindow(QDialog):
             new_idx = 0
         self._combo_sweep_cmd.setCurrentIndex(new_idx)
         self._populate_second_cmds()
+        self._populate_power_cmds()
         self._on_sweep_cmd_changed(new_idx)
+
+    def _populate_power_cmds(self):
+        """Power Sweep 콤보를 sweep_cmds 로 갱신 (Time 항목 없음)."""
+        if not hasattr(self, "_combo_power_cmd"):
+            return
+        cur = self._combo_power_cmd.currentIndex()
+        self._combo_power_cmd.blockSignals(True)
+        self._combo_power_cmd.clear()
+        for cmd in self._cfg.acquire.sweep_cmds:
+            label = cmd.figure_axis or cmd.description or "(unnamed)"
+            if not cmd.enabled:
+                label = "✗OFF " + label
+            self._combo_power_cmd.addItem(label)
+        self._combo_power_cmd.blockSignals(False)
+        if 0 <= cur < self._combo_power_cmd.count():
+            self._combo_power_cmd.setCurrentIndex(cur)
+        self._pw_update_cmd_preview()
 
     def _populate_second_cmds(self):
         """Second sweep channel 콤보를 sweep_cmds로 갱신 (Time 항목 없음)."""
@@ -1949,6 +2537,25 @@ class VnaWindow(QDialog):
             second_use_custom_table=self._cb_second_keep_table.isChecked(),
             field_initial_sweep=self._cb_ft_initial.isChecked(),
             dummy_measure=self._cb_dummy_measure.isChecked(),
+            power=VnaPowerSweepConfig(
+                enabled=self._cb_power_mode.isChecked(),
+                cmd_idx=max(0, self._combo_power_cmd.currentIndex()),
+                start=_f(self._le_pw_start, -20.0),
+                stop=_f(self._le_pw_stop, 0.0),
+                n=_i(self._le_pw_n, 11),
+                pre_measure_s=_f(self._le_pw_pre, 5.0),
+                post_measure_s=_f(self._le_pw_post, 5.0),
+                field_rate=_f(self._le_pw_rate, 0.3),
+                rate_cmds=list(self._pw_rate_cmds),
+                go_cmds=list(self._pw_go_cmds),
+                field_settle_s=_f(self._le_pw_settle, 60.0),
+            ),
+            finish_return=VnaFinishReturnConfig(
+                first_enabled=self._cb_ret_first.isChecked(),
+                first_value=_f(self._le_ret_first, 0.0),
+                second_enabled=self._cb_ret_second.isChecked(),
+                second_value=_f(self._le_ret_second, 0.0),
+            ),
         )
 
     def _apply_ds_control(self):
@@ -1981,7 +2588,36 @@ class VnaWindow(QDialog):
         self._ft_refresh_list()
         self._cb_field_time.setChecked(ft.enabled)
         self._ft_widget.setVisible(ft.enabled)
-        self._le_sw_n.setEnabled(not ft.enabled)
+        # Power Sweep 모드 복원 (field-time 과 배타 — 저장된 값이 둘 다 켜져 있으면
+        # field-time 을 우선하고 power 는 끈다)
+        pw = c.power
+        self._le_pw_start.setText(f"{pw.start:g}")
+        self._le_pw_stop.setText(f"{pw.stop:g}")
+        self._le_pw_n.setText(str(pw.n))
+        self._le_pw_pre.setText(f"{pw.pre_measure_s:g}")
+        self._le_pw_post.setText(f"{pw.post_measure_s:g}")
+        self._le_pw_rate.setText(f"{pw.field_rate:g}")
+        self._le_pw_settle.setText(f"{pw.field_settle_s:g}")
+        self._pw_rate_cmds = [pc.model_copy(deep=True) for pc in pw.rate_cmds]
+        self._pw_refresh_rate_list()
+        self._pw_go_cmds = [pc.model_copy(deep=True) for pc in pw.go_cmds]
+        self._pw_refresh_go_list()
+        self._on_pw_rate_changed()
+        if 0 <= pw.cmd_idx < self._combo_power_cmd.count():
+            self._combo_power_cmd.setCurrentIndex(pw.cmd_idx)
+        power_on = pw.enabled and not ft.enabled
+        self._cb_power_mode.setChecked(power_on)
+        self._power_widget.setVisible(power_on)
+        self._cb_field_time.setEnabled(not power_on)
+        self._sync_first_axis_enabled()
+        # 완료 후 복귀 복원
+        fr = c.finish_return
+        self._le_ret_first.setText(f"{fr.first_value:g}")
+        self._le_ret_second.setText(f"{fr.second_value:g}")
+        self._cb_ret_first.setChecked(fr.first_enabled)
+        self._cb_ret_second.setChecked(fr.second_enabled)
+        self._le_ret_first.setEnabled(fr.first_enabled)
+        self._le_ret_second.setEnabled(fr.second_enabled)
         # Stop 시 실행 명령 복원
         self._stop_cmds = [pc.model_copy(deep=True) for pc in c.stop_cmds]
         self._stop_refresh_list()
@@ -2211,6 +2847,12 @@ class VnaWindow(QDialog):
             self._set_status("Sweep 명령어가 등록되지 않았습니다. Config를 확인하세요.",
                              color="#f78166")
             return
+        # Power 모드는 First 콤보 대신 power 명령을 쓴다 → 그 유효성은 _resolve_power_channel 이 본다
+        if self._power_mode_on():
+            if not self._confirm_power_mode_ready():
+                return
+            self._start_double_sweep()
+            return
         sel = self._get_selected_sweep_cmd()
         if sel is not None and not sel.enabled:
             self._set_status("선택한 Sweep 명령이 비활성(OFF) 상태입니다. "
@@ -2307,8 +2949,95 @@ class VnaWindow(QDialog):
 
     # ── _start_double_sweep 의 단계별 처리 ────────────────────────────────
 
+    def _power_mode_warnings(self) -> List[str]:
+        """Power 모드 시작 전 짚어야 할 것들. 비어 있으면 그대로 시작해도 된다.
+
+        전부 '측정은 돌지만 결과가 조용히 틀어지는' 종류라 막지는 않고 확인만 받는다.
+        """
+        warnings: List[str] = []
+        if not self._cb_second_enable.isChecked():
+            warnings.append(
+                "Second sweep channel(자기장)이 꺼져 있습니다 — 자기장을 바꾸지 않고 "
+                "power sweep 만 1회 수행합니다.")
+            return warnings      # 자기장을 안 쓰면 아래 항목은 볼 필요가 없다
+
+        adv = self._selected_advance(self._combo_second_cmd)
+        read_cmd = (getattr(adv, "feedback_read_cmd", "") or "").strip() if adv else ""
+        if not read_cmd:
+            warnings.append(
+                "자기장 채널에 도달 확인용 Read Cmd 가 없습니다 — 도달을 기다리지 않고 "
+                "곧바로 '도달 후 대기'로 넘어갑니다 (ramp 중에 측정이 시작될 수 있습니다).\n"
+                "    ⚙ Config 에서 그 명령을 Controlled Sweep(feedback)으로 등록하고 "
+                "Read Cmd 를 넣으세요.")
+        elif not (getattr(adv, "feedback_std_window", 0) > 0
+                  and getattr(adv, "feedback_std_threshold", 0.0) > 0.0):
+            warnings.append(
+                "자기장 채널의 안정화 검사(Std Window / Std Threshold)가 꺼져 있습니다 — "
+                "tolerance band 안에 들어오기만 하면 바로 '도달 후 대기'로 넘어갑니다.\n"
+                "    램프 직후 출렁임까지 가라앉히려면 ⚙ Config 에서 그 값들을 설정하세요.")
+        rate_cmds = self._pw_effective_rate_cmds()
+        if not rate_cmds:
+            warnings.append(
+                "자기장 '속도 명령'이 없습니다 (이 창에도, Second 채널의 Advance 전 "
+                "명령에도) — 입력한 변화 속도가 장비로 전송되지 않고, 장비에 이미 "
+                "설정된 속도로 움직입니다.")
+        rate = self._ds_f(self._le_pw_rate, 0.0)
+        if rate_cmds and rate > 0.3:
+            warnings.append(
+                f"변화 속도 {rate:g} 가 Mercury iPS 한계(0.3 T/min)를 넘습니다 — "
+                "장비가 명령을 거부하거나 자체 한계로 잘라낼 수 있습니다.")
+        return warnings
+
+    def _confirm_power_mode_ready(self) -> bool:
+        """경고가 있으면 목록을 보여 주고 계속할지 묻는다. 없으면 바로 True."""
+        warnings = self._power_mode_warnings()
+        if not warnings:
+            return True
+        body = "\n\n".join(f"• {w}" for w in warnings)
+        answer = QMessageBox.question(
+            self, "Power Sweep — 시작 전 확인",
+            f"{body}\n\n이대로 시작하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _resolve_power_channel(self) -> Optional["_FirstChannel"]:
+        """Power Sweep 모드의 First 채널 — power 명령 + 처음~끝 N 점.
+
+        Second(자기장) 한 값마다 이 목록을 순서대로 훑는다. power 는 명령을 쓰는
+        즉시 반영되므로 advance(도달 대기)는 쓰지 않는다.
+        """
+        idx = self._combo_power_cmd.currentIndex()
+        cmds = self._cfg.acquire.sweep_cmds
+        if not (0 <= idx < len(cmds)):
+            self._set_status("Power sweep 명령을 선택하세요.", color="#f78166")
+            return None
+        cmd = cmds[idx]
+        if not cmd.enabled:
+            self._set_status("선택한 Power 명령이 비활성(OFF) 상태입니다.", color="#f78166")
+            return None
+        try:
+            start = float(self._le_pw_start.text())
+            stop = float(self._le_pw_stop.text())
+            count = int(self._le_pw_n.text())
+            if count < 1:
+                raise ValueError
+        except ValueError:
+            self._set_status("Power 범위가 올바르지 않습니다.", color="#f78166")
+            return None
+        return _FirstChannel(
+            cmd=cmd,
+            values=self._linspace(start, stop, count),
+            advance=cmd.advance if cmd.sweep_kind == "controlled" else None,
+            field_time=False,
+        )
+
     def _resolve_first_channel(self) -> Optional["_FirstChannel"]:
         """First 채널 명령 + 값 목록. 입력이 잘못되면 상태줄에 알리고 None."""
+        if self._power_mode_on():
+            return self._resolve_power_channel()
+
         cmd = self._get_selected_sweep_cmd()
         if cmd is None:
             self._set_status("First sweep 명령을 선택하세요.", color="#f78166")
@@ -2440,6 +3169,26 @@ class VnaWindow(QDialog):
                                     and resume_offset == 0
                                     and self._cb_ft_initial.isChecked()),
             "dummy_measure": self._cb_dummy_measure.isChecked(),
+            # Power Sweep 모드 전용 타이밍·자기장 이동 (모드가 꺼져 있으면 None)
+            "power": self._build_power_plan() if self._power_mode_on() else None,
+            # 정상 완료 후 복귀 (Stop/오류로 끊기면 워커가 건너뛴다)
+            "finish_return": {
+                "first_enabled":  self._cb_ret_first.isChecked(),
+                "first_value":    self._ds_f(self._le_ret_first, 0.0),
+                "second_enabled": self._cb_ret_second.isChecked(),
+                "second_value":   self._ds_f(self._le_ret_second, 0.0),
+            },
+        }
+
+    def _build_power_plan(self) -> dict:
+        """Power Sweep 모드에서 워커가 쓸 타이밍·자기장 이동 설정."""
+        return {
+            "pre_measure_s":  self._ds_f(self._le_pw_pre, 5.0),
+            "post_measure_s": self._ds_f(self._le_pw_post, 5.0),
+            "field_rate":     self._ds_f(self._le_pw_rate, 0.3),
+            "rate_cmds":      self._pw_effective_rate_cmds(),
+            "go_cmds":        list(self._pw_go_cmds),
+            "field_settle_s": self._ds_f(self._le_pw_settle, 60.0),
         }
 
     def _build_field_time_plan(self) -> dict:
@@ -2578,6 +3327,7 @@ class VnaWindow(QDialog):
         worker.step_timing.connect(self._on_step_timing)
         worker.step_elapsed.connect(self._on_step_elapsed)
         worker.progress.connect(self._on_acq_progress)
+        worker.warn.connect(self._on_acq_warn)
         worker.error.connect(self._on_acq_error)
         worker.finished.connect(self._on_acq_finished_slot)
         worker.finished.connect(thread.quit)
@@ -2796,6 +3546,22 @@ class VnaWindow(QDialog):
         else:
             btn.setToolTip("재개할 중단된 측정이 없습니다.")
 
+    @Slot(str)
+    def _on_acq_warn(self, msg: str):
+        """데이터는 다 모였지만 뒷정리(복귀)가 실패한 경우.
+
+        `_acq_errored` 를 세우지 않는다 — 측정 자체는 정상 완료라 resume 상태를
+        남기거나 '중단됨'으로 표시하면 안 된다. 다만 장비가 엉뚱한 값에 남아 있을 수
+        있으므로 상태줄과 창으로 분명히 알린다.
+        """
+        get_logger().warning("VNA finish-return failed: %s", msg)
+        self._set_status(f"⚠ {msg}", color="#d7ba7d")
+        QMessageBox.warning(
+            self, "복귀 실패 — 측정 데이터는 정상",
+            f"측정은 정상적으로 끝났지만 축을 되돌리지 못했습니다.\n\n{msg}\n\n"
+            "장비가 마지막 값에 그대로 있을 수 있으니 직접 확인하세요.")
+
+    @Slot(str)
     def _on_acq_error(self, msg: str):
         self._acq_errored = True
         self._set_status(f"Acquire error: {msg}", color="#f78166")
@@ -3129,13 +3895,17 @@ class VnaWindow(QDialog):
     # ------------------------------------------------------------------
 
     def _open_config(self):
+        # Config 창이 읽어 갈 파일에 이 창의 현재 상태를 먼저 반영한다.
+        # Config 는 통째로 저장(Save & Apply)하므로, 여기 체크박스·입력값·저장
+        # 폴더가 파일에 없으면 그 값들이 옛것으로 되돌아간다.
+        self._save_ui_state()
         cfg_path = self._config_path()
         if self._config_win is None:
             self._config_win = VnaConfigWindow(
                 self._lib_reg, config_path=cfg_path, parent=self)
             self._config_win.saved.connect(self._on_config_saved)
         else:
-            # Update path in case profile changed
+            # 경로 갱신 겸 재로드. 이미 떠 있어서 showEvent 가 안 오는 경우도 덮는다.
             self._config_win.set_config_path(cfg_path)
         self._config_win.show()
         self._config_win.raise_()

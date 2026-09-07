@@ -136,6 +136,50 @@ class VnaFieldTimeConfig(BaseModel):
     forward_cmds: List[VnaPreAdvanceCmd] = Field(default_factory=list)
 
 
+class VnaPowerSweepConfig(BaseModel):
+    """Power Sweep 모드 — First(안쪽) 축 자리를 VNA power 축이 대신한다.
+
+    켜면 Second(바깥) 축을 자기장으로 두고 아래 순서를 반복한다:
+      자기장 다음 점으로 이동(입력한 속도로) → 도달 → field_settle_s 대기
+      → power 처음 점 → pre_measure_s 대기 → 측정 → post_measure_s 대기
+      → 다음 power … → 마지막 power 끝나면 다음 자기장 점
+
+    이 모드에서는 First sweep ch 콤보와 그 Start/Stop/N 은 쓰이지 않고,
+    power 는 항상 Start→Stop 방향으로만 훑는다(방향 콤보 무시).
+    """
+    enabled: bool = False
+    cmd_idx:  int = 0        # acquire.sweep_cmds 안에서 power 명령의 인덱스
+    start:    float = -20.0  # 처음 power (포함)
+    stop:     float = 0.0    # 끝 power (포함)
+    n:        int = 11       # 처음·끝을 포함한 점 개수
+    # ── power 점마다의 측정 타이밍 ──
+    pre_measure_s:  float = 5.0   # power 이동 후 측정 시작까지
+    post_measure_s: float = 5.0   # 측정 후 다음 power 로 넘어가기까지
+    # ── 자기장(Second) 이동 ──
+    #: 변화 속도. rate_cmds 의 user_input 파라미터에 이 값이 채워진다
+    #: (Mercury iPS 는 T/min, 보통 최대 0.3).
+    field_rate:     float = 0.3
+    #: 자기장 목표를 보내기 **전에** 실행할 속도 설정 명령 (예: SET:…:SIG:RFST:{rate})
+    rate_cmds:      List[VnaPreAdvanceCmd] = Field(default_factory=list)
+    #: 목표를 보낸 **뒤** 실제 ramp 를 시작시키는 트리거 (예: SET:…:ACTN:RTOS).
+    #: 목표 설정만으로 움직이는 장비면 비워 둔다.
+    go_cmds:        List[VnaPreAdvanceCmd] = Field(default_factory=list)
+    field_settle_s: float = 60.0  # 자기장 도달 후 측정 시작까지 대기
+
+
+class VnaFinishReturnConfig(BaseModel):
+    """측정이 **정상 완료**된 뒤 각 축을 어디로 되돌릴지.
+
+    끄면(기본) 지금까지처럼 마지막으로 쓴 값에 그대로 멈춘다 — first 는 Stop 값
+    (다중방향이면 second 점 개수에 따라 Start 일 수도 있다), second 는 마지막 array 값.
+    Stop·오류로 끊긴 경우에는 적용하지 않는다 (그때는 'Stop 시 실행 명령'이 나간다).
+    """
+    first_enabled:  bool = False
+    first_value:    float = 0.0
+    second_enabled: bool = False
+    second_value:   float = 0.0
+
+
 class VnaDoubleSweepControl(BaseModel):
     """VNA Control 화면의 double-sweep 설정 (first/second 채널·방향·pre-advance 값)."""
     first_idx:   int = 0          # sweep_cmds 내 first channel 인덱스
@@ -160,6 +204,10 @@ class VnaDoubleSweepControl(BaseModel):
     field_initial_sweep:     bool = False
     # Feature 3: dummy(복귀) sweep도 측정할지 여부 (기본: 측정 안 함)
     dummy_measure:           bool = False
+    # Power Sweep 모드 — First 축을 power 로 대체 (Second=자기장 × power 2중 루프)
+    power:       VnaPowerSweepConfig = Field(default_factory=VnaPowerSweepConfig)
+    # 정상 완료 후 각 축 복귀 (끄면 마지막 값에 그대로 멈춘다)
+    finish_return: VnaFinishReturnConfig = Field(default_factory=VnaFinishReturnConfig)
 
 
 class VnaPlotCurveConfig(BaseModel):

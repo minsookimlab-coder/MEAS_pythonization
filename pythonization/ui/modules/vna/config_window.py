@@ -748,13 +748,15 @@ class _CmdListWidget(QWidget):
         self._lst.clear()
         for e in self._cmds:
             item = QListWidgetItem(self._label(e))
-            if not e.enabled:
+            # 여기서 토글할 수 없는 목록은 활성 상태를 표시하지도 않는다 —
+            # 끌 수 없는 자리에 '✗OFF' 만 보이면 어디서 켜는지 알 수 없다.
+            if self._with_onoff and not e.enabled:
                 item.setForeground(QColor("#6e7681"))   # 비활성: 회색 표시
             self._lst.addItem(item)
 
     def _label(self, entry: VnaCommandEntry) -> str:
         tag = "[R]" if entry.cmd_type == "query" else "[W]"
-        state = "" if entry.enabled else "✗OFF "
+        state = "" if (entry.enabled or not self._with_onoff) else "✗OFF "
         name = entry.figure_axis or entry.description
         extras = []
         if entry.bind_id > 0:
@@ -891,13 +893,34 @@ class VnaConfigWindow(QDialog):
         self._populate_acquire()
 
     def set_config_path(self, path: Path):
-        """프로파일 변경 시 VnaWindow에서 호출 — 경로 업데이트 후 재로드."""
-        if path != self._config_path:
-            self._config_path = path
-            self._cfg = load_vna_config(self._config_path)
-            self._cur_sec_idx = -1
-            self._populate_sections()
-            self._populate_acquire()
+        """프로파일 변경 / 창 열기 시 VnaWindow에서 호출 — 경로 갱신 후 항상 재로드."""
+        self._config_path = path
+        self.reload_from_disk()
+
+    def reload_from_disk(self):
+        """디스크의 설정을 다시 읽어 화면을 맞춘다.
+
+        이 창은 보관형이라 한 번 만들면 계속 살아 있다. 재로드하지 않으면 이 창이
+        열려 있는 동안 VNA Control 이 저장한 내용(섹션 명령 체크박스·입력값·
+        sweep role, 저장 폴더, 플롯 설정 등)을 모르는 채로 남고, 그 상태에서
+        [Save & Apply] 를 누르면 옛 값이 통째로 덮어써진다.
+        """
+        self._cfg = load_vna_config(self._config_path)
+        # 재populate 도중 _on_section_selected 가 '옛 위젯 내용'을 새 cfg 에
+        # 밀어 넣지 않도록 먼저 무효화한다.
+        self._cur_sec_idx = -1
+        self._populate_sections()
+        # setCurrentRow 가 같은 행이면 신호를 내지 않아 _cur_sec_idx 가 -1 로
+        # 남는다(그러면 저장 시 이 섹션 편집분이 통째로 누락). 여기서 직접 맞춘다.
+        self._cur_sec_idx = self._lst_sections.currentRow()
+        self._show_section_commands(self._cur_sec_idx)
+        self._populate_acquire()
+
+    def showEvent(self, event):
+        # 숨겼다 다시 열 때마다 디스크 기준으로 맞춘다 (Meta Data / Parameter
+        # Manager 창과 같은 규약).
+        self.reload_from_disk()
+        super().showEvent(event)
 
     # ------------------------------------------------------------------
     # UI
@@ -1030,8 +1053,11 @@ class VnaConfigWindow(QDialog):
         lbl.setStyleSheet("font-weight: bold;")
         lay.addWidget(lbl)
 
+        # with_onoff=False: 섹션 명령의 활성/비활성은 VNA Control 창의 체크박스가
+        # 단독으로 소유한다. 여기에도 On/Off 를 두면 같은 필드를 두 창이 서로
+        # 덮어써서 어느 쪽이 이겼는지 알 수 없게 된다.
         self._sec_cmd_list = _CmdListWidget(
-            self._lib_reg, mode="write", with_bind=True)
+            self._lib_reg, mode="write", with_bind=True, with_onoff=False)
         lay.addWidget(self._sec_cmd_list)
         return w
 

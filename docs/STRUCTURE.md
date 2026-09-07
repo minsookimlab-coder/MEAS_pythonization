@@ -1,6 +1,6 @@
 # Pythonization — 시스템 구조
 
-> Last updated: 2026-08-03 | Version: 1.8.0
+> Last updated: 2026-08-27 | Version: 1.10.0
 
 사용법은 [USER_MANUAL.md](USER_MANUAL.md), 변경 이력은 [CHANGELOG.md](CHANGELOG.md).
 
@@ -119,12 +119,14 @@ pythonization/                      (저장소 루트)
 
 | 경로 | 역할 |
 |---|---|
-| `vna/window.py` | VNA 제어 + Double Sweep(field-time/resume) |
+| `vna/window.py` | VNA 제어 + Double Sweep(field-time/power/resume/완료 후 복귀) |
 | `vna/config_window.py` | VNA 명령/advance 설정 |
 | `vna/models.py` | VNA 데이터 모델 + config/resume IO |
 | `mfli/window.py` | MFLI 주파수 noise sweep (+per-point 보조 읽기) |
 | `mfli/models.py` | MFLI 측정 설정 모델 + config IO |
 | `double_sweep/window.py` | 레거시 이중 sweep + 알람 |
+| `cycle_sweep/window.py` | 다구간 CYCLE sweep 반복 (Keithley 2636A 전용) |
+| `cycle_double_sweep/window.py` | Double Sweep+ — second 축(ITC/IPS) 한 점마다 cycle 한 세트 |
 
 ### 런타임 파일 (저장소 밖)
 
@@ -215,6 +217,59 @@ settings/
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
+│                          CYCLE SWEEP                                        │
+│  ui.modules.cycle_sweep.window        (sweep channel = Keithley 2636A 전용) │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  IDLE → PRE_INIT (현재값 → Initial Value, 데이터 없음)              │   │
+│  │            │                                                        │   │
+│  │            ▼                                                        │   │
+│  │         SWEEPING ─ 초기점(measure_only) → seg1 → seg2 → … → segM    │   │
+│  │            ▲                                          │             │   │
+│  │            └──── cycle i+1 (파일 새로 시작) ◄──────────┤             │   │
+│  │                                        cycle 소진 ─────┤             │   │
+│  │                    IDLE ◄── RETURNING_ZERO ◄───────────┘             │   │
+│  │                     ▲          (Return to zero 체크 시, 데이터 없음) │   │
+│  │                     └───────── 미체크면 마지막 target 에 정지        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  한 cycle = Initial Value 에서 targets 를 순서대로 훑기 (2회차부터는 직전   │
+│  cycle 의 마지막 target 에서 이어짐). rate·Time/Point 는 공통.              │
+│  구간 전환 판정: calculate_next_step 이 is_done=True + 측정값 없음으로      │
+│    돌려주는 한 번의 여분 왕복 (코너 값은 클램프된 직전 스텝이 이미 기록).   │
+│  자체 SweepWorker + DataSaver, cycle 1개당 .dat 1개                         │
+│  저장 설정은 이 창이 직접 보유 (메인 창과 별개, CycleSweepConfig 에 저장):   │
+│    main_folder / sub_folder / [YYYY-MM-DD] / {file_name}{date}_cycleNNN.dat │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   DOUBLE SWEEP+  (CYCLE × SECOND 축)                        │
+│  ui.modules.cycle_double_sweep.window                                       │
+│    second = ITC 온도 / IPS 자기장 (장비 라디오로 목록 필터)                 │
+│    first  = cycle 을 돌릴 sweep value                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  IDLE                                                               │   │
+│  │   └─▶ [array 값 i 마다 반복] ─────────────────────────────────────┐  │   │
+│  │        PRE_INIT          first → Initial Value  (데이터 없음)     │  │   │
+│  │          ▼                                                        │  │   │
+│  │        ADVANCING_SECOND  second → array[i]  (advance type 대로)   │  │   │
+│  │          ▼                                                        │  │   │
+│  │        SETTLING          Settle Wait 대기 (남은 시간 표시)        │  │   │
+│  │          ▼                 · skip_first_wait 면 i=0 에서 건너뜀   │  │   │
+│  │        CYCLING           cycle 1..N (cycle 마다 .dat 새로 시작)   │  │   │
+│  │          └────────────────── i+1 ────────────────────────────────┘  │   │
+│  │  array 소진 → RETURNING_SECOND_ZERO? → RETURNING_ZERO? → IDLE       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  first 를 Initial Value 로 먼저 되돌린 뒤 second 를 움직인다 — 온도/자기장이 │
+│  변하는 동안 시료에 직전 cycle 의 마지막 target 이 걸려 있지 않게 한다.     │
+│  Settle Wait 는 advance type 자체의 대기와 별개로 항상 추가 적용된다.       │
+│  자체 SweepWorker + SecondChannelWorker + DataSaver                         │
+│  저장 (CycleDoubleSweepConfig, 메인 창과 별개):                              │
+│    main_folder/sub_folder/[YYYY-MM-DD]/{name}{date}_{axis}_{2nd}_cycleNNN.dat│
+│  재개 단위는 array 값 — 그 값의 advance·대기·cycle 을 처음부터 다시 한다.   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
 │                     데이터 모델 계층 (config.models)                        │
 │                                                                             │
 │  [Library 계층]              [Instantiated 계층]     [Profile 계층]         │
@@ -224,7 +279,7 @@ settings/
 │  (visa_libraries.yaml)      InstantiatedSecond...    ┘  ┐                   │
 │                             {p} 채워짐                  ├→ FullProfile      │
 │  ParameterManagerProfile (SelectedEntry 목록)        ───┘   (profiles/      │
-│  DoubleSweepConfig                                           {name}.yaml)   │
+│  DoubleSweepConfig / CycleSweepConfig / CycleDoubleSweepConfig {name}.yaml) │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -255,8 +310,14 @@ main.py  (sys.path 설정만)
              ├─ vna/window.py            → ui/widgets/plot_panel.py
              ├─ mfli/window.py           → ui/widgets/plot_panel.py
              │                           → analysis/mfli_merge.py
-             └─ double_sweep/window.py   → measurement/second_channel_worker.py
-                                         → notify/alarm_manager.py
+             ├─ double_sweep/window.py   → measurement/second_channel_worker.py
+             │                           → notify/alarm_manager.py
+             ├─ cycle_sweep/window.py    → measurement/sweep_worker.py
+             │                           → instruments/factory.py (2636A 판정)
+             └─ cycle_double_sweep/window.py
+                                         → measurement/sweep_worker.py
+                                         → measurement/second_channel_worker.py
+                                         → instruments/factory.py (ITC/IPS 판정)
 ```
 
 계층 규칙: `ui/` 는 도메인 패키지를 부르지만 그 반대는 없다. `analysis/` 는 Qt 를
@@ -268,15 +329,18 @@ import 하지 않는다(CLI 겸용). 드라이버는 `instruments/base.py` 외�
 
 ```
 Main Thread (Qt Event Loop)
- ├─ MainWindow / VnaWindow / MfliWindow / DoubleSweepWindow UI (모든 QWidget·플롯)
+ ├─ MainWindow / VnaWindow / MfliWindow / DoubleSweepWindow / CycleSweepWindow
+ │  / CycleDoubleSweepWindow UI
+ │  (모든 QWidget·플롯)
  ├─ QTimer (sweep tick)
  └─ Signal/Slot 수신 (워커→GUI는 모두 bound @Slot = 자동 큐잉)
 
-Worker Thread: SweepWorker (메인 sweep) / _AcquireWorker (VNA) / _MfliAcquireWorker
+Worker Thread: SweepWorker (메인 sweep / double sweep / cycle sweep /
+               double sweep+ 각자 1개) / _AcquireWorker (VNA) / _MfliAcquireWorker
  └─ VISA write + measurement query, 신호 emit만 (GUI 직접 접근 금지)
     병렬 측정 시 ThreadPoolExecutor로 서로 다른 alias 동시 측정
 
-Worker Thread: SecondChannelWorker  [double sweep advance 시 활성]
+Worker Thread: SecondChannelWorker  [double sweep / double sweep+ advance 시 활성]
  └─ second channel 이동 / feedback·threshold 폴링
 ```
 
@@ -411,7 +475,7 @@ python -m unittest discover -s tests -t .
 |---|---|
 | `test_imports` | 모듈이 아예 import 되지 않음 |
 | `test_import_targets` | 함수 안에 숨은 import 가 깨짐 — 그 메뉴를 눌러야 드러난다 |
-| `test_windows` | 창 생성이 깨짐 — 모듈 import 만으로는 안 드러난다 |
+| `test_windows` | 창 생성이 깨짐 (창 11개) — 모듈 import 만으로는 안 드러난다 |
 | `test_cross_references` | 다른 창이 쓰는 `MainWindow` 내부 이름이 사라짐 — **측정을 실제로 돌려야** 드러난다 |
 | `test_annotations` | 어노테이션 전용 import 누락 — 3.14 는 지연 평가라 여기선 안 드러나고 3.10~3.13 에서 터진다 |
 

@@ -144,6 +144,7 @@ class DoubleSweepPhase(Enum):
     DUMMY            = auto()
     TRACE            = auto()
     RETRACE          = auto()
+    CYCLE            = auto()
 
 
 #: 그래프에서 곡선을 구분하는 phase 이름. 여기 없는 phase 는 데이터를 남기지 않는다.
@@ -151,6 +152,7 @@ _GRAPH_PHASE = {
     DoubleSweepPhase.DUMMY:   "dummy",
     DoubleSweepPhase.TRACE:   "trace",
     DoubleSweepPhase.RETRACE: "retrace",
+    DoubleSweepPhase.CYCLE:   "cycle",
 }
 
 
@@ -391,6 +393,7 @@ class DoubleSweepWindow(QDialog):
         outer.addLayout(self._build_title_row())
         outer.addWidget(self._build_second_channel_box())
         outer.addWidget(self._build_sweep_params_box())
+        outer.addWidget(self._build_cycle_box())
         outer.addWidget(self._build_sweep_advance_box())
         outer.addWidget(self._build_feedback_box())
         outer.addWidget(self._build_wait_time_box())
@@ -442,6 +445,43 @@ class DoubleSweepWindow(QDialog):
         unit.setStyleSheet("color: #888888;")
         unit.setMinimumWidth(50)
         return le, unit
+
+    def _build_cycle_box(self) -> QFrame:
+        """Cycle Sweep 설정 — Double Sweep에서 first 축을 cycle sequence로 사용."""
+        frame = QFrame()
+        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(8, 6, 8, 6)
+
+        title = QLabel("Cycle Sweep (per-second step)")
+        title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        layout.addWidget(title)
+
+        row = QHBoxLayout()
+        self._cb_cycle_enable = QCheckBox("Enable Cycle Sweep")
+        self._cb_cycle_enable.setFont(_MONO)
+        row.addWidget(self._cb_cycle_enable)
+        row.addStretch()
+        layout.addLayout(row)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(12)
+
+        self._le_cycle_targets = QLineEdit()
+        self._le_cycle_targets.setFont(_MONO)
+        self._le_cycle_targets.setPlaceholderText("e.g. 30,-30,30,0")
+        form.addRow("Targets (comma):", self._le_cycle_targets)
+
+        self._sb_cycle_repeats = QSpinBox()
+        self._sb_cycle_repeats.setRange(1, 1000)
+        self._sb_cycle_repeats.setValue(1)
+        self._sb_cycle_repeats.setFont(_MONO)
+        self._sb_cycle_repeats.setFixedWidth(100)
+        form.addRow("Repeats:", self._sb_cycle_repeats)
+
+        layout.addLayout(form)
+        return frame
 
     # ── 구획별 빌더 ───────────────────────────────────────────────────────
 
@@ -1076,6 +1116,13 @@ class DoubleSweepWindow(QDialog):
         self._le_fb_std_thresh.setText(f"{cfg.second_feedback_std_threshold:g}")
         # WAIT_FOR_TIME params
         self._le_wait_time.setText(f"{cfg.second_wait_time:g}")
+        # Cycle fields
+        try:
+            self._cb_cycle_enable.setChecked(bool(cfg.cycle_enabled))
+            self._le_cycle_targets.setText(cfg.cycle_targets_str or "")
+            self._sb_cycle_repeats.setValue(getattr(cfg, 'cycle_repeats', 1))
+        except Exception:
+            pass
         self._update_n_points()
         self._update_est_time()
         # 알람: 전달·텔레그램·고정트리거는 _alarm_cfg에 보관, 측정값 조건은 패널에 로드
@@ -1147,6 +1194,9 @@ class DoubleSweepWindow(QDialog):
             second_feedback_noisefloor=self._parse_ds_float(self._le_fb_noisefloor.text(), 0.0),
             second_feedback_std_threshold=self._parse_ds_float(self._le_fb_std_thresh.text(), 0.01),
             second_wait_time=self._parse_ds_float(self._le_wait_time.text(), 1.0),
+            cycle_enabled=bool(self._cb_cycle_enable.isChecked()),
+            cycle_targets_str=self._le_cycle_targets.text().strip(),
+            cycle_repeats=int(self._sb_cycle_repeats.value()),
             alarm=self._build_alarm_config(),
         )
         self._param_reg.save_double_sweep_config(cfg)
@@ -1223,6 +1273,36 @@ class DoubleSweepWindow(QDialog):
         if self._second_channel is not None:
             second_ch = self._make_effective_second_channel()
         sec = _estimate_total_seconds(cfg, len(arr), second_ch)
+        # Add cycle time per-array if cycle enabled
+        try:
+            if getattr(cfg, 'cycle_enabled', False):
+                text = (getattr(cfg, 'cycle_targets_str', '') or '').strip()
+                parts = [p.strip() for p in text.split(',') if p.strip()]
+                targets = []
+                valid = True
+                for p in parts:
+                    try:
+                        v = float(p)
+                    except Exception:
+                        valid = False
+                        break
+                    if math.isnan(v) or math.isinf(v):
+                        valid = False
+                        break
+                    targets.append(v)
+                if valid and targets:
+                    # Estimate single cycle time: initial -> first + chain
+                    def _chain(start: float) -> float:
+                        total = 0.0
+                        prev = start
+                        for t in targets:
+                            total += abs(t - prev) * 60.0 / max(1e-12, cfg.rate_trace)
+                            prev = t
+                        return total
+                    per_cycle = _chain(cfg.start_point) + (max(0, int(getattr(cfg, 'cycle_repeats', 1)) - 1) * _chain(targets[-1]))
+                    sec += len(arr) * per_cycle
+        except Exception:
+            pass
         self._lbl_est_time.setText(_fmt_hms(sec))
         eta = _datetime.now() + _timedelta(seconds=sec)
         # 24h 이내면 HH:MM, 그 이상이면 날짜 포함
@@ -1328,6 +1408,31 @@ class DoubleSweepWindow(QDialog):
         self._prepare_derivative_channels()
         self._ctx = self._build_context()
         self._configure_metadata()
+        # Parse cycle targets (if enabled)
+        try:
+            if getattr(self._cfg, 'cycle_enabled', False):
+                text = (self._cfg.cycle_targets_str or "").strip()
+                targets = []
+                for part in text.split(','):
+                    p = part.strip()
+                    if not p:
+                        continue
+                    try:
+                        v = float(p)
+                    except Exception:
+                        v = None
+                    if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
+                        targets = None
+                        break
+                    targets.append(v)
+                if targets is None or not targets:
+                    QMessageBox.warning(self, "Cycle Targets 오류",
+                                        "Cycle Targets에 올바른 숫자값을 하나 이상 입력하세요.")
+                    return False
+                self._cycle_targets = targets
+                self._cycle_repeats = int(getattr(self._cfg, 'cycle_repeats', 1))
+        except Exception:
+            pass
 
         self._lock_ui_for_run()
         self._sync_data_window_columns()
@@ -1368,6 +1473,11 @@ class DoubleSweepWindow(QDialog):
         self._btn_resume.setEnabled(False)
         self._lbl_last_alarm.setText("(없음)")
         self._lbl_last_alarm.setStyleSheet("color: #888888; font-size: 10px;")
+        # Cycle phase state (per-array step)
+        self._cycle_targets = []
+        self._cycle_repeats = 1
+        self._cycle_current_repeat = 0
+        self._cycle_seg_idx = 0
 
     def _prepare_derivative_channels(self):
         """미분 채널을 현재 UI 설정으로 다시 만들고 버퍼를 비운다 (단일 sweep 과 동일)."""
@@ -1797,7 +1907,13 @@ class DoubleSweepWindow(QDialog):
             return
         if self._phase != DoubleSweepPhase.ADVANCING_SECOND:
             return
-        self._start_sweep_phase(DoubleSweepPhase.DUMMY)
+        # If cycle sweep is enabled, start CYCLE phase instead of DUMMY/TRACE/RETRACE
+        if getattr(self._cfg, 'cycle_enabled', False):
+            self._cycle_current_repeat = 0
+            self._cycle_seg_idx = 0
+            self._start_sweep_phase(DoubleSweepPhase.CYCLE)
+        else:
+            self._start_sweep_phase(DoubleSweepPhase.DUMMY)
 
     @Slot(str)
     def _on_advance_error(self, msg: str):
@@ -2071,7 +2187,8 @@ class DoubleSweepWindow(QDialog):
         if self._phase not in (DoubleSweepPhase.PRE_INIT,
                                DoubleSweepPhase.DUMMY,
                                DoubleSweepPhase.TRACE,
-                               DoubleSweepPhase.RETRACE):
+                               DoubleSweepPhase.RETRACE,
+                               DoubleSweepPhase.CYCLE):
             return
 
         cfg = self._cfg
@@ -2086,10 +2203,22 @@ class DoubleSweepWindow(QDialog):
         elif self._phase == DoubleSweepPhase.TRACE:
             sweep_to, sweep_rate = cfg.stop_point, cfg.rate_trace
             active_meas = ctx.active_measurements
-        else:  # RETRACE
+        elif self._phase == DoubleSweepPhase.RETRACE:
             sweep_to = 0.0 if cfg.retrace_to_zero else cfg.start_point
             sweep_rate = cfg.rate_retrace
             active_meas = ctx.active_measurements
+        else:  # CYCLE
+            # perform one segment of cycle targets per tick
+            active_meas = ctx.active_measurements
+            # fallback: use start_point if no targets parsed
+            targets = getattr(self, '_cycle_targets', []) or []
+            if not targets:
+                sweep_to = cfg.start_point
+            else:
+                # current segment target
+                idx = max(0, min(self._cycle_seg_idx, len(targets) - 1))
+                sweep_to = targets[idx]
+            sweep_rate = cfg.rate_trace
 
         t_emit = time.perf_counter()
         self._emit_step(StepRequest(
@@ -2115,8 +2244,9 @@ class DoubleSweepWindow(QDialog):
             self._handle_pre_init_step(result)
             return
         if self._phase not in (DoubleSweepPhase.DUMMY,
-                               DoubleSweepPhase.TRACE,
-                               DoubleSweepPhase.RETRACE):
+                       DoubleSweepPhase.TRACE,
+                       DoubleSweepPhase.RETRACE,
+                       DoubleSweepPhase.CYCLE):
             return
         # is_done 인데 측정값이 없다 = 이미 목표에 있었다 → 기록 없이 다음 phase
         if result.is_done and not result.meas_results:
@@ -2150,7 +2280,44 @@ class DoubleSweepWindow(QDialog):
 
         main_win._timing_window.update_timing(result.timing, t_recv,
                                               time.perf_counter())
-        self._schedule_next_step(result)
+
+        if self._phase == DoubleSweepPhase.CYCLE:
+            # record row as usual
+            # schedule next segment or finish cycle
+            if result.is_done:
+                # advance to next segment
+                self._cycle_seg_idx += 1
+                if self._cycle_seg_idx >= len(getattr(self, '_cycle_targets', []) or []):
+                    # one cycle completed
+                    self._cycle_current_repeat += 1
+                    if self._cycle_current_repeat < max(1, int(getattr(self, '_cycle_repeats', 1))):
+                        # start next repeat from first target
+                        self._cycle_seg_idx = 0
+                        self._sweep_timer.start(0)
+                    else:
+                        # all repeats done for this array point
+                        # save metadata and mark done, then advance array
+                        self._check_alarm(is_comm_error=False)
+                        self._main_win._meta_manager.save(
+                            self._main_win._param_manager_reg.meta_data_config,
+                            self._data_saver.get_filepath(),
+                            extra=self._build_meta_extra(),
+                        )
+                        self._second_table_model.mark_done(self._array_idx)
+                        self._refresh_second_table_win()
+                        if not self._begin_array_index(self._array_idx + 1):
+                            if self._cfg.to_zero_at_last and self._second_channel is not None:
+                                self._return_second_to_zero()
+                            else:
+                                self._finish()
+                else:
+                    # next segment within same cycle
+                    self._sweep_timer.start(0)
+            else:
+                # continue current segment with regular interval
+                self._sweep_timer.start(self._next_interval_ms(result))
+        else:
+            self._schedule_next_step(result)
 
     # ── _on_step_done 의 단계별 처리 ───────────────────────────────────────
 

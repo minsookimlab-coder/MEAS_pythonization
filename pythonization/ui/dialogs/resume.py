@@ -18,6 +18,14 @@ from pythonization.measurement.resume_log import ResumePoint
 
 _MONO = QFont("Consolas", 9)
 
+#: 목록 앞에 붙이는 sweep 종류 표시. 모르는 값은 "더블"로 두어 기존 동작을 유지한다.
+_SWEEP_TYPE_TAG = {
+    "single":  "단일",
+    "double":  "더블",
+    "cycle":   "사이클",
+    "cycle2d": "더블+",
+}
+
 
 class ResumePickerDialog(QDialog):
     """재개 지점 목록에서 하나를 선택."""
@@ -45,7 +53,7 @@ class ResumePickerDialog(QDialog):
         self._list = QListWidget()
         self._list.setFont(_MONO)
         for p in self._points:
-            tag = "단일" if p.sweep_type == "single" else "더블"
+            tag = _SWEEP_TYPE_TAG.get(p.sweep_type, "더블")
             item = QListWidgetItem(f"[{tag}] {p.timestamp}\n        {p.label}")
             item.setData(Qt.ItemDataRole.UserRole, p)
             self._list.addItem(item)

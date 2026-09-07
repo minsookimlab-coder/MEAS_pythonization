@@ -28,7 +28,7 @@ _LOG_PATH = SETTINGS_DIR / "resume_points.json"
 class ResumePoint:
     """측정 재개에 필요한 상태 스냅샷.
 
-    sweep_type: "single" | "double"
+    sweep_type: "single" | "double" | "cycle"
     timestamp:  ISO8601 문자열 (외부에서 주입 — 스크립트 결정성 위해)
     label:      목록 표시용 한 줄 요약
     data_filepath: 이어쓸 .dat 파일 경로 (없으면 "")
@@ -36,6 +36,7 @@ class ResumePoint:
         single → {last_write_value, step_count, sweep_to, sweep_rate,
                   time_per_point, active_meas_indices}
         double → {array_idx, phase, last_write_value, second_value}
+        cycle  → {cycle_idx, segment_idx}
     """
     sweep_type: str
     timestamp: str

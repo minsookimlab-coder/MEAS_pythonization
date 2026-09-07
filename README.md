@@ -3,7 +3,8 @@
 저온·자기장 환경에서 시료 물성을 측정하는 계측 자동화 프로그램 (PySide6 + VISA).
 
 계측기를 sweep 하며 측정값을 읽어 `.dat` 로 저장하고, 실시간 그래프·알람·중단 후
-재개를 제공한다. VNA / MFLI noise sweep / Double Sweep 은 각자 독립 창으로 동작한다.
+재개를 제공한다. VNA / MFLI noise sweep / Double Sweep / Cycle Sweep /
+Double Sweep+ (Cycle) 은 각자 독립 창으로 동작한다.
 
 ---
 
@@ -64,7 +65,7 @@ pythonization/
     ├── widgets/         여러 창이 공유하는 위젯 (플롯 패널 등)
     ├── dialogs/         설정·구성 다이얼로그
     ├── panels/          측정 중 띄우는 보조 창 (그래프·데이터·타이밍·디버그)
-    ├── modules/         독립 측정 모듈 창 — vna / mfli / double_sweep
+    ├── modules/         독립 측정 모듈 창 — vna / mfli / double_sweep / cycle_sweep
     └── assets/          이미지 등 정적 자산
 ```
 
@@ -110,7 +111,7 @@ python -m unittest discover -s tests -t .
 | 파일 | 지키는 것 |
 |---|---|
 | `test_imports` / `test_import_targets` | 모든 모듈과 모든 import 문(함수 내부 포함)이 해석되는지 |
-| `test_windows` | 메뉴가 여는 창 10개가 실제로 생성되는지 |
+| `test_windows` | 메뉴가 여는 창 11개가 실제로 생성되는지 |
 | `test_cross_references` | 다른 창이 쓰는 `MainWindow` 내부 이름이 살아 있는지 |
 | `test_annotations` | 어노테이션 전용 import 누락 (3.14는 지연 평가라 안 드러난다) |
 
@@ -127,9 +128,11 @@ python -m unittest discover -s tests -t .
 | `test_feedback_advance` | FEEDBACK 도달·안정화 판정식 (자기장 제어) |
 | `test_profile_rebuild` | 라이브러리 갱신 시 사용자 설정 보존 |
 | `test_add_entry` | placeholder 치환 — sweep 축만 `{v}`, 나머지는 고정값 |
-| `test_vna_double_sweep` | 다중방향 시 first 축 순서 반전 |
+| `test_vna_double_sweep` | 다중방향 시 first 축 순서 반전, Power Sweep 측정 순서·대기, 완료 후 축 복귀 |
 | `test_mfli_merge` | LabOne 병합 — 정렬, 주파수 매칭, NaN 채움 |
 | `test_plot_panel` | 공용 플롯 패널 상태 저장/복원 |
+| `test_cycle_sweep` | Cycle sweep — targets 파싱, 소요시간, 2636A 판정, 구간 전환 계약 |
+| `test_cycle_double_sweep` | Double Sweep+ — array 생성, ITC/IPS 판정, Settle Wait 게이트, 파일명 |
 
 ---
 

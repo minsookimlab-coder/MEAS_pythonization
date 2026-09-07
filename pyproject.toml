@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pythonization"
-version = "1.8.0"
+version = "1.10.0"
 description = "저온·자기장 물성 측정 자동화 (PySide6 + VISA)"
 requires-python = ">=3.10"
 dependencies = [
