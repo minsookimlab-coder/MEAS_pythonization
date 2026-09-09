@@ -162,6 +162,10 @@ class MainWindow(QMainWindow):
         # 스텝 타이머 (single-shot, time_per_point마다 한 스텝)
         self._sweep_step_timer = QTimer(self)
         self._sweep_step_timer.setSingleShot(True)
+        # 기본값(CoarseTimer)은 Windows 에서 간격을 최대 5% 조정하고 다른 타이머와
+        # 묶어서 발사한다(coalescing). 렌더 5fps·glow 30ms 와 뭉치면 스텝이 몰려
+        # 나가 측정 주기가 흔들린다. 측정 시퀀스는 일정해야 하므로 정밀 타이머를 쓴다.
+        self._sweep_step_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._sweep_step_timer.timeout.connect(self._sweep_tick)
 
         # 자식 창
@@ -1707,6 +1711,7 @@ class MainWindow(QMainWindow):
                           self._sweep_config.time_per_point)
         self._running = True
         self._sweep_step_count = 0
+        self._overrun_count = 0   # Time/Point 초과 횟수 (진단용)
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._btn_resume.setEnabled(False)
@@ -1936,6 +1941,18 @@ class MainWindow(QMainWindow):
         self.set_source_value(result.current)
         self._sweep_step_count += 1
 
+        # ── 다음 스텝을 UI 작업 '전에' 예약한다 ───────────────────────────────
+        # 기록·그래프·로그·fsync 가 늦어져도 측정 주기가 밀리지 않게 하기 위함이다.
+        # 예약 시각은 t_emit 기준이므로 여기서 걸든 뒤에서 걸든 발사 시각은 같지만,
+        # 미리 걸어 두면 그 사이의 GUI 작업이나 GC 일시정지가 발사를 늦추지 못한다.
+        # 완료/중단 경로에서는 _on_stop() 이 이 타이머를 멈춘다.
+        self._pending_interval_ms = None
+        if not result.is_done and not result.measure_only:
+            tpp_now = self._sweep_config.time_per_point
+            elapsed_ms = int((t_recv - result.timing.t_emit) * 1000)
+            self._pending_interval_ms = max(0, int(tpp_now * 1000) - elapsed_ms)
+            self._sweep_step_timer.start(self._pending_interval_ms)
+
         # DataWindow 갱신: next_v + 체크된 measurement 값만
         # val=None  → 실제 측정 에러 (스윕 중단)
         # val=nan   → threshold 초과 (스윕 계속, 파일에 "nan" 기록)
@@ -2102,18 +2119,25 @@ class MainWindow(QMainWindow):
             # 초기 상태 측정 완료 → 즉시 sweep 타이머 시작
             self._sweep_step_timer.start(0)
         else:
-            # t_ui_done을 타이머 직전에 다시 찍어 모든 처리 시간 반영
-            t_before_timer = time.perf_counter()
-            elapsed_ms = int((t_before_timer - result.timing.t_emit) * 1000)
-            interval_ms = max(0, int(tpp * 1000) - elapsed_ms)
-            self._lbl_idle.setText(
-                f"{interval_ms} ms" if interval_ms >= 0
-                else f"overrun {-interval_ms} ms"
-            )
-            self._lbl_idle.setStyleSheet(
-                "color: #f44747;" if interval_ms <= 0 else "color: #555555;"
-            )
-            self._sweep_step_timer.start(interval_ms)
+            # 타이머는 이미 위에서 걸었다. 여기서는 남은 여유만 표시한다.
+            # UI 작업까지 끝난 시점의 실제 여유를 보여 줘야 진단에 쓸모가 있다.
+            spare_ms = int((self._sweep_config.time_per_point * 1000)
+                           - (time.perf_counter() - result.timing.t_emit) * 1000)
+            if spare_ms >= 0:
+                self._lbl_idle.setText(f"{spare_ms} ms")
+                self._lbl_idle.setStyleSheet("color: #555555;")
+            else:
+                # 한 스텝이 Time/Point 를 넘겼다 = 이 구간의 실제 sweep rate 가
+                # 설정값보다 느려졌다는 뜻. 조용히 넘기지 않고 알린다.
+                self._lbl_idle.setText(f"overrun {-spare_ms} ms")
+                self._lbl_idle.setStyleSheet("color: #f44747;")
+                self._overrun_count = getattr(self, "_overrun_count", 0) + 1
+                if self._overrun_count in (1, 10, 100, 1000):
+                    self._log_sweep(
+                        f"  ⚠ 스텝이 Time/Point 를 {-spare_ms} ms 초과 "
+                        f"(누적 {self._overrun_count}회) — 이 구간은 설정한 "
+                        f"sweep rate 보다 느리게 진행됩니다.",
+                        color="#d7ba7d")
 
     def _on_step_error(self, msg: str):
         """Worker에서 예외 발생 시 메인 스레드에서 처리."""
