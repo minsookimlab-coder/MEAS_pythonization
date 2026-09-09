@@ -16,8 +16,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtCore import (Qt, QMimeData, QObject, QThread, QTimer,
+                            Signal, Slot)
+from PySide6.QtGui import QAction, QDrag, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -502,6 +503,49 @@ class DataStore:
 # GraphPanel
 # ──────────────────────────────────────────────────────────
 
+#: 그래프 패널을 끌어 놓을 때 쓰는 MIME 타입 (이 창 안에서만 의미가 있다)
+_PANEL_MIME = "application/x-pythonization-graphpanel"
+
+
+class _DragHandle(QLabel):
+    """패널 헤더의 손잡이. 여기를 잡아 끌어야 패널이 움직인다.
+
+    패널 전체를 드래그 대상으로 삼으면 콤보·체크박스·플롯 조작과 충돌한다.
+    """
+
+    def __init__(self, panel: "GraphPanel") -> None:
+        super().__init__("☰")
+        self._panel = panel
+        self.setToolTip("끌어서 그래프 위치를 바꿉니다")
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setFixedWidth(18)
+        self.setStyleSheet("color: #888888; font-size: 14px;")
+        self._press_pos = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_pos is None:
+            return
+        if (event.position().toPoint() - self._press_pos).manhattanLength() < 8:
+            return
+        drag = QDrag(self._panel)
+        mime = QMimeData()
+        mime.setData(_PANEL_MIME, str(id(self._panel)).encode())
+        drag.setMimeData(mime)
+        drag.setPixmap(self._panel.grab().scaledToWidth(
+            220, Qt.TransformationMode.SmoothTransformation))
+        self._press_pos = None
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def mouseReleaseEvent(self, event):
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
+
 class GraphPanel(QFrame):
     """Single resizable plot panel.
 
@@ -516,6 +560,8 @@ class GraphPanel(QFrame):
     """
 
     remove_requested = Signal(object)   # emits self
+    #: (끌어온 패널, 놓인 패널) — GraphWindow 가 순서를 바꾼다
+    move_requested = Signal(object, object)
 
     def __init__(self, store: DataStore, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -523,6 +569,7 @@ class GraphPanel(QFrame):
         self._x_key: Optional[str] = None
         self._y_key: Optional[str] = None
         self._curves: Dict[str, pg.PlotDataItem] = {}
+        self.setAcceptDrops(True)   # 헤더 손잡이로 끌어온 다른 패널을 받는다
         self._dirty = False
         # SI divisors — persist across redraws so manual zoom stays valid
         self._x_div: float = 1.0
@@ -561,17 +608,24 @@ class GraphPanel(QFrame):
         hdr = QHBoxLayout()
         hdr.setSpacing(6)
 
+        hdr.addWidget(_DragHandle(self))
         hdr.addWidget(QLabel("X:"))
         self._cmb_x = QComboBox()
         self._cmb_x.setFont(_MONO)
-        self._cmb_x.setMinimumWidth(150)
+        # 최소 폭을 크게 잡으면 패널 전체의 최소 너비가 커져서 2열 배치에서
+        # 열 경계를 움직일 수 없다. 줄여 두고 남는 공간에서 늘어나게 한다.
+        self._cmb_x.setMinimumWidth(80)
+        self._cmb_x.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                  QSizePolicy.Policy.Fixed)
         self._cmb_x.currentIndexChanged.connect(self._on_axis_changed)
         hdr.addWidget(self._cmb_x)
 
         hdr.addWidget(QLabel("Y:"))
         self._cmb_y = QComboBox()
         self._cmb_y.setFont(_MONO)
-        self._cmb_y.setMinimumWidth(150)
+        self._cmb_y.setMinimumWidth(80)
+        self._cmb_y.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                  QSizePolicy.Policy.Fixed)
         self._cmb_y.currentIndexChanged.connect(self._on_axis_changed)
         hdr.addWidget(self._cmb_y)
 
@@ -1317,6 +1371,35 @@ class GraphPanel(QFrame):
     #: 커서에서 이 픽셀 반경 안에 점이 있어야 표시한다.
     _HOVER_RADIUS_PX = 14
 
+    # ------------------------------------------------------------------
+    # 드래그 앤 드롭 — 패널 위치 바꾸기
+    # ------------------------------------------------------------------
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(_PANEL_MIME):
+            event.acceptProposedAction()
+            self.setStyleSheet("QFrame { border: 2px solid #1f77b4; }")
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet("")
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self.setStyleSheet("")
+        if not event.mimeData().hasFormat(_PANEL_MIME):
+            event.ignore()
+            return
+        src_id = int(bytes(event.mimeData().data(_PANEL_MIME)).decode())
+        if src_id == id(self):
+            event.ignore()
+            return
+        src = event.source()
+        if isinstance(src, GraphPanel):
+            self.move_requested.emit(src, self)
+        event.acceptProposedAction()
+
     def _setup_hover_readout(self) -> None:
         """마우스 위치에서 가장 가까운 측정 포인트의 값을 띄운다.
 
@@ -1873,6 +1956,37 @@ class MapPanel(QFrame):
 # GraphWindow
 # ──────────────────────────────────────────────────────────
 
+class MapWindow(QWidget):
+    """2D colour-map 전용 창.
+
+    예전에는 Graph 창 오른쪽을 splitter 로 나눠 썼는데, 그러면 XY 그래프가 쓸 수
+    있는 폭이 절반으로 줄고 격자 배치와도 겹친다. 별도 창으로 뺀다.
+    MapPanel 인스턴스는 GraphWindow 가 계속 들고 있고(그래야 update_map_base 가
+    창을 열지 않고도 동작한다) 이 창은 화면만 빌려 준다.
+    """
+
+    def __init__(self, panel: "MapPanel", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setWindowTitle("2D Map")
+        self.resize(760, 640)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        panel.setVisible(True)
+        lay.addWidget(panel)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event) -> None:
+        # 숨기기만 한다 — MapPanel 은 GraphWindow 소유라 파괴하면 안 된다.
+        event.ignore()
+        self.hide()
+
+
 class GraphWindow(QWidget):
     """Floating real-time graph window.
 
@@ -1929,11 +2043,20 @@ class GraphWindow(QWidget):
         bar.addWidget(btn_add)
         bar.addWidget(btn_clear)
         bar.addSpacing(12)
-        self._btn_map = QPushButton("2D Map")
-        self._btn_map.setCheckable(True)
-        self._btn_map.setToolTip("오른쪽 패널을 2D colour-map 모드로 전환")
-        self._btn_map.toggled.connect(self._toggle_map)
+        self._btn_map = QPushButton("2D Map…")
+        self._btn_map.setToolTip("2D colour-map 을 별도 창으로 엽니다")
+        self._btn_map.clicked.connect(self._open_map_window)
         bar.addWidget(self._btn_map)
+
+        bar.addSpacing(12)
+        bar.addWidget(QLabel("열:"))
+        self._cmb_cols = QComboBox()
+        self._cmb_cols.addItem("1", 1)
+        self._cmb_cols.addItem("2", 2)
+        self._cmb_cols.setFixedWidth(52)
+        self._cmb_cols.setToolTip("그래프를 몇 열로 배치할지 (최대 2열)")
+        self._cmb_cols.currentIndexChanged.connect(self._on_cols_changed)
+        bar.addWidget(self._cmb_cols)
         bar.addSpacing(16)
 
         # ── Render mode toggle ────────────────────────────
@@ -1952,33 +2075,23 @@ class GraphWindow(QWidget):
         bar.addWidget(btn_save_img)
         root.addLayout(bar)
 
-        # ── Splitter: left (XY panels) | right (MapPanel) ──
-        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        # ── 그래프 격자 ────────────────────────────────────────────────
+        # 행 = 세로 splitter 의 자식, 각 행 = 가로 splitter (최대 2열).
+        # 행 안의 가로 splitter 를 움직이면 다른 행에도 같은 크기를 적용해
+        # 열이 어긋나지 않게 한다 (_on_row_splitter_moved).
+        self._grid_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._grid_splitter.setChildrenCollapsible(False)
+        self._row_splitters: List[QSplitter] = []
+        self._syncing_cols = False
 
-        # Left side: scrollable XY panels
-        left_w = QWidget()
-        left_lay = QVBoxLayout(left_w)
-        left_lay.setContentsMargins(0, 0, 0, 0)
-        left_lay.setSpacing(0)
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
-        self._scroll_content = QWidget()
-        self._panel_layout = QVBoxLayout(self._scroll_content)
-        self._panel_layout.setSpacing(6)
-        self._panel_layout.setContentsMargins(0, 0, 0, 0)
-        self._panel_layout.addStretch()
-        self._scroll.setWidget(self._scroll_content)
-        left_lay.addWidget(self._scroll)
-        self._splitter.addWidget(left_w)
+        self._scroll.setWidget(self._grid_splitter)
+        root.addWidget(self._scroll)
 
-        # Right side: MapPanel (hidden by default)
+        # 2D Map 은 별도 창 (필요할 때만 만든다)
+        self._map_win: Optional[MapWindow] = None
         self._map_panel = MapPanel()
-        self._map_panel.setVisible(False)
-        self._splitter.addWidget(self._map_panel)
-
-        self._splitter.setStretchFactor(0, 1)
-        self._splitter.setStretchFactor(1, 0)
-        root.addWidget(self._splitter)
 
     # Session -----------------------------------------------------------------
 
@@ -2024,34 +2137,107 @@ class GraphWindow(QWidget):
     def _add_panel(self) -> None:
         panel = GraphPanel(self._store)
         panel.remove_requested.connect(self._remove_panel)
+        panel.move_requested.connect(self._move_panel)
         col_display = self._store.col_display_list()
         if col_display:
             panel.update_columns(col_display)
         panel.ensure_phases(self._store.phases() or ["_"])
-        # Insert before the trailing stretch item
-        self._panel_layout.insertWidget(self._panel_layout.count() - 1, panel)
         self._panels.append(panel)
+        self._rebuild_grid()
 
     def _remove_panel(self, panel: GraphPanel) -> None:
         if len(self._panels) <= 1:
             return     # always keep at least one
         self._panels.remove(panel)
-        self._panel_layout.removeWidget(panel)
+        panel.setParent(None)
         panel.deleteLater()
+        self._rebuild_grid()
+
+    def _move_panel(self, src: GraphPanel, dst: GraphPanel) -> None:
+        """끌어온 패널을 놓인 패널 자리에 끼워 넣는다 (나머지는 밀린다)."""
+        if src is dst or src not in self._panels or dst not in self._panels:
+            return
+        self._panels.remove(src)
+        self._panels.insert(self._panels.index(dst), src)
+        self._rebuild_grid()
+
+    # 격자 --------------------------------------------------------------------
+
+    def _on_cols_changed(self) -> None:
+        self._rebuild_grid()
+
+    def _cols(self) -> int:
+        return int(self._cmb_cols.currentData() or 1)
+
+    def _rebuild_grid(self) -> None:
+        """self._panels 순서대로 행×열 격자를 다시 만든다.
+
+        패널을 지우지 않고 부모만 옮긴다(setParent(None) → 새 splitter 에 추가).
+        행 하나가 세로 splitter 의 자식이므로 행 높이는 자연히 함께 움직이고,
+        열 너비는 _on_row_splitter_moved 가 모든 행에 같은 값을 퍼뜨려 맞춘다.
+        """
+        prev_col_sizes = None
+        for rs in self._row_splitters:
+            if rs.count() > 1:
+                prev_col_sizes = rs.sizes()
+                break
+
+        for panel in self._panels:
+            panel.setParent(None)
+        for rs in self._row_splitters:
+            rs.setParent(None)
+            rs.deleteLater()
+        self._row_splitters = []
+
+        cols = self._cols()
+        for i in range(0, len(self._panels), cols):
+            row = QSplitter(Qt.Orientation.Horizontal)
+            row.setChildrenCollapsible(False)
+            for panel in self._panels[i:i + cols]:
+                row.addWidget(panel)
+                panel.show()
+            row.splitterMoved.connect(self._on_row_splitter_moved)
+            self._row_splitters.append(row)
+            self._grid_splitter.addWidget(row)
+
+        # 이전에 맞춰 둔 열 너비를 새 행들에도 그대로 적용
+        if prev_col_sizes and len(prev_col_sizes) == cols:
+            for rs in self._row_splitters:
+                if rs.count() == cols:
+                    rs.setSizes(prev_col_sizes)
+
+    def _on_row_splitter_moved(self, _pos: int, _index: int) -> None:
+        """한 행의 열 경계를 옮기면 다른 행도 같은 위치로 맞춘다."""
+        if self._syncing_cols:
+            return
+        src = self.sender()
+        if not isinstance(src, QSplitter):
+            return
+        sizes = src.sizes()
+        if len(sizes) < 2:
+            return
+        self._syncing_cols = True
+        try:
+            for rs in self._row_splitters:
+                if rs is not src and rs.count() == len(sizes):
+                    rs.setSizes(sizes)
+        finally:
+            self._syncing_cols = False
+
+    # 2D Map (별도 창) --------------------------------------------------------
+
+    def _open_map_window(self) -> None:
+        if self._map_win is None:
+            self._map_win = MapWindow(self._map_panel, parent=self)
+        self._map_win.show()
+        self._map_win.raise_()
+        self._map_win.activateWindow()
 
     def _clear_data(self) -> None:
         self._store.clear()
         for panel in self._panels:
             panel.reset_phases()
             panel.ensure_phases(["_"])
-
-    def _toggle_map(self, checked: bool) -> None:
-        self._map_panel.setVisible(checked)
-        if checked:
-            w = self.width()
-            self._splitter.setSizes([w * 55 // 100, w * 45 // 100])
-        else:
-            self._splitter.setSizes([self.width(), 0])
 
     # Render mode -------------------------------------------------------------
 
@@ -2105,7 +2291,7 @@ class GraphWindow(QWidget):
         if not path.lower().endswith(".png"):
             path += ".png"
 
-        pixmap = self._splitter.grab()
+        pixmap = self._grid_splitter.grab()
         if not pixmap.save(path, "PNG"):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Save Failed", f"Could not save image to:\n{path}")
