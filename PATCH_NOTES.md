@@ -78,9 +78,15 @@
   형식만 담은 `app_config.example.yaml` 을 대신 추적한다. 디스크의 실제 파일은 그대로
   두므로 동작 변화는 없고, 파일이 없으면 `load_app_config()` 가 `AppConfig()` 기본값으로
   시작한다.
-- **남은 위반(미처리)** — `dist/Pythonization/_internal/settings/` 에 실제 사용자 설정이
-  들어간 채 추적되고 있다(`instruments.yaml` 의 장비 IP·MAC, `profiles/SangIl.yaml` 등).
-  배포본은 빈 상태로 나가야 한다. `dist/` 배포 방식을 정한 뒤 처리한다.
+- **[중요] `dist/` 배포본 안에 실제 랩 설정이 들어간 채 추적되고 있었다** —
+  `dist/Pythonization/_internal/settings/` 의 `instruments.yaml`(장비 IP·MAC),
+  `profiles/SangIl.yaml`·`default.yaml`·`test.yaml`, `visa_libraries.yaml`,
+  `active_profile.txt` 등. 배포본은 빈 상태로 나가야 한다.
+  → `dist/` 전체를 추적 해제하고 `.gitignore` 에 넣었다. 앞으로 배포본은 저장소가 아니라
+  **GitHub Releases** 로 올린다. 디스크의 `dist/` 와 exe 는 그대로 두므로 빌드·실행에는
+  영향이 없다. 추적 파일이 **1027개 → 77개**(약 172 MB 감소)로 줄었다.
+  **주의:** 이 파일들은 git *이력*에는 남아 있다. 완전히 지우려면 이력 재작성
+  (`git filter-repo`)과 강제 푸시가 필요하며, 저장소를 공유 중이면 협의가 필요하다.
 
 ### 문서
 

@@ -18,3 +18,6 @@ Thumbs.db
 
 # 사용자 설정 — 자격증명 포함 (규칙 3). 예시는 app_config.example.yaml
 app_config.yaml
+
+# 빌드 배포본 — GitHub Releases 로 배포한다 (규칙 3)
+dist/
