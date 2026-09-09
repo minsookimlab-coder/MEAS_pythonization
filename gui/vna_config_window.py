@@ -1036,7 +1036,18 @@ class VnaConfigWindow(QDialog):
         # 두 창이 서로 덮어써서 어느 쪽이 이겼는지 알 수 없게 된다.
         self._sec_cmd_list = _CmdListWidget(
             self._lib_reg, mode="write", with_bind=True, with_onoff=False)
-        lay.addWidget(self._sec_cmd_list)
+        lay.addWidget(self._sec_cmd_list, stretch=3)
+
+        lbl_opc = QLabel("OPC  (완료 대기 — query, 묶음 명령을 다 보낸 뒤 실행)")
+        lbl_opc.setStyleSheet("font-weight: bold;")
+        lay.addWidget(lbl_opc)
+        hint = QLabel("응답이 1 이 될 때까지 기다린다. 대기하는 동안 측정 Start 와 "
+                      "모든 Execute 버튼이 잠긴다. 비워 두면 명령만 보내고 바로 끝난다.")
+        hint.setStyleSheet("color: #888888; font-size: 11px;")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        self._sec_opc_list = _CmdListWidget(self._lib_reg, mode="read")
+        lay.addWidget(self._sec_opc_list, stretch=2)
         return w
 
     # ---- Acquire tab -------------------------------------------------
@@ -1098,22 +1109,26 @@ class VnaConfigWindow(QDialog):
 
     def _on_section_selected(self, row: int):
         if 0 <= self._cur_sec_idx < len(self._cfg.sections):
-            self._cfg.sections[self._cur_sec_idx].commands = \
-                self._sec_cmd_list.get_commands()
+            sec = self._cfg.sections[self._cur_sec_idx]
+            sec.commands = self._sec_cmd_list.get_commands()
+            sec.opc_cmds = self._sec_opc_list.get_commands()
         self._cur_sec_idx = row
         self._show_section_commands(row)
 
     def _show_section_commands(self, idx: int):
         if 0 <= idx < len(self._cfg.sections):
-            self._sec_cmd_list.set_commands(
-                self._cfg.sections[idx].commands)
+            sec = self._cfg.sections[idx]
+            self._sec_cmd_list.set_commands(sec.commands)
+            self._sec_opc_list.set_commands(sec.opc_cmds)
         else:
             self._sec_cmd_list.set_commands([])
+            self._sec_opc_list.set_commands([])
 
     def _flush_section_commands(self):
         if 0 <= self._cur_sec_idx < len(self._cfg.sections):
-            self._cfg.sections[self._cur_sec_idx].commands = \
-                self._sec_cmd_list.get_commands()
+            sec = self._cfg.sections[self._cur_sec_idx]
+            sec.commands = self._sec_cmd_list.get_commands()
+            sec.opc_cmds = self._sec_opc_list.get_commands()
 
     # --- Section buttons ---
 

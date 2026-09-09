@@ -87,6 +87,10 @@ class VnaCommandEntry(BaseModel):
 class VnaSectionConfig(BaseModel):
     name: str = ""
     commands: List[VnaCommandEntry] = Field(default_factory=list)
+    # 묶음 명령을 다 보낸 뒤 실행할 완료 대기(OPC) 쿼리.
+    # 응답이 1 이 될 때까지 폴링하며, 그동안 측정 Start 와 Execute 를 잠근다.
+    # 비어 있으면 예전처럼 write 만 보내고 바로 끝난다.
+    opc_cmds: List[VnaCommandEntry] = Field(default_factory=list)
 
 
 class VnaAcquireConfig(BaseModel):

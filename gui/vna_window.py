@@ -82,11 +82,24 @@ def _qthread_running(t) -> bool:
 class _VnaWorker(QThread):
     done  = Signal(list)
     error = Signal(str)
+    opc_started = Signal()      # 묶음 명령을 다 보내고 완료 대기에 들어감
 
-    def __init__(self, session, commands: List[Tuple[str, str, bool]]):
+    #: OPC 폴링 간격(초) / 최대 대기(초). 장비가 영영 1 을 안 주면 창이 잠긴 채로
+    #: 남으므로 상한을 둔다.
+    _OPC_POLL_S = 0.1
+    _OPC_TIMEOUT_S = 600.0
+
+    def __init__(self, session, commands: List[Tuple[str, str, bool]],
+                 opc_commands: Optional[List[Tuple[str, str]]] = None):
         super().__init__()
         self._session  = session
         self._commands = commands
+        self._opc      = opc_commands or []
+        self._stop     = False
+
+    def stop(self):
+        """OPC 대기를 중단시킨다 (창을 닫거나 사용자가 멈출 때)."""
+        self._stop = True
 
     def run(self):
         results = []
@@ -100,9 +113,28 @@ class _VnaWorker(QThread):
                 else:
                     self._session.write(alias, cmd)
                     results.append((False, None))
+            if self._opc:
+                self.opc_started.emit()
+                self._wait_opc()
             self.done.emit(results)
         except Exception as e:
             self.error.emit(f"{type(e).__name__}: {e}")
+
+    def _wait_opc(self):
+        """OPC 쿼리 응답이 1 이 될 때까지 폴링한다 (acquire 의 Wait 단계와 같은 규칙)."""
+        for alias, cmd in self._opc:
+            if not self._session.is_open(alias):
+                self._session.open(alias)
+            deadline = _time.monotonic() + self._OPC_TIMEOUT_S
+            while not self._stop:
+                response = str(self._session.query(alias, cmd)).strip().lstrip("+")
+                if response == "1":
+                    break
+                if _time.monotonic() > deadline:
+                    raise TimeoutError(
+                        f"[{alias}] OPC 응답을 {int(self._OPC_TIMEOUT_S)}초 동안 받지 "
+                        f"못했습니다 (마지막 응답: {response!r}). 명령: {cmd}")
+                _time.sleep(self._OPC_POLL_S)
 
 
 # ---------------------------------------------------------------------------
@@ -843,7 +875,7 @@ class _CmdRowWidget(QWidget):
 # ---------------------------------------------------------------------------
 
 class _SectionWidget(QGroupBox):
-    execute_requested     = Signal(list)
+    execute_requested     = Signal(list, list)   # (write 명령, OPC 명령)
     role_toggle_requested = Signal(object, str)   # (row, role) — _CmdRowWidget에서 pass-through
 
     def __init__(self, sec_cfg: VnaSectionConfig,
@@ -921,7 +953,27 @@ class _SectionWidget(QGroupBox):
 
     def _on_execute(self):
         cmds = [row.get_command() for row in self._cmd_rows]
-        self.execute_requested.emit([c for c in cmds if c])
+        self.execute_requested.emit([c for c in cmds if c], self._resolve_opc())
+
+    def _resolve_opc(self) -> list:
+        """섹션의 OPC 쿼리를 (alias, cmd) 로 해석한다.
+
+        OPC 는 Control 화면에 행으로 뜨지 않고 Config 에만 있으므로 여기서 직접
+        템플릿을 채운다. 해석에 실패한 항목은 건너뛰고 실행을 막지는 않는다.
+        """
+        out = []
+        for entry in getattr(self._sec_cfg, "opc_cmds", []) or []:
+            if not entry.enabled:
+                continue
+            try:
+                lib = self._lib_reg.get_library(entry.alias)
+                template = get_template(lib, entry)
+                if template is None:
+                    continue
+                out.append((entry.alias, build_cmd(template, entry.params, "")))
+            except Exception:
+                continue
+        return out
 
     def get_updated_config(self) -> VnaSectionConfig:
         """현재 UI 상태를 반영한 VnaSectionConfig 반환 (저장용)."""
@@ -2361,26 +2413,36 @@ class VnaWindow(QDialog):
     # Section execute
     # ------------------------------------------------------------------
 
-    def _on_execute_section(self, cmds: list):
+    def _on_execute_section(self, cmds: list, opc_cmds: list = None):
         if not cmds:
             self._set_status("No enabled commands.", color="#888")
             return
         if self._sec_worker and self._sec_worker.isRunning():
             self._set_status("Busy — please wait.", color="#888")
             return
-        self._sec_worker = _VnaWorker(self._session, cmds)
+        self._sec_worker = _VnaWorker(self._session, cmds, opc_cmds or [])
         # bound 슬롯으로 연결 (워커 스레드 GUI 접근 크래시 방지 — 메인 스레드 큐잉)
         self._sec_worker.done.connect(self._on_section_done)
         self._sec_worker.error.connect(self._on_section_error)
+        self._sec_worker.opc_started.connect(self._on_section_opc_started)
+        # 명령을 보내는 동안, 그리고 OPC 응답이 올 때까지 측정 Start 와 Execute 를 잠근다.
+        # 장비가 아직 이전 동작을 끝내지 않았는데 측정을 시작하면 값이 뒤섞인다.
+        self._set_section_busy(True)
         self._set_status("Running...", color="#888")
         self._sec_worker.start()
 
+    @Slot()
+    def _on_section_opc_started(self):
+        self._set_status("완료 대기 중 (OPC)…", color="#d7ba7d")
+
     @Slot(list)
     def _on_section_done(self, results: list):
+        self._set_section_busy(False)
         self._set_status(f"Section executed ({len(results)} cmd(s)).", color="#7ee787")
 
     @Slot(str)
     def _on_section_error(self, msg: str):
+        self._set_section_busy(False)
         self._set_status(f"Error: {msg}", color="#f78166")
 
     # ------------------------------------------------------------------
@@ -3052,7 +3114,12 @@ class VnaWindow(QDialog):
                 th.wait(timeout_ms)
             except RuntimeError:
                 pass
-        # 2) 섹션 실행 워커
+        # 2) 섹션 실행 워커 — OPC 대기 중이면 최대 10분까지 잡고 있으므로 먼저 끊는다
+        try:
+            if self._sec_worker is not None:
+                self._sec_worker.stop()
+        except RuntimeError:
+            pass
         if _qthread_running(self._sec_worker):
             try:
                 self._sec_worker.wait(timeout_ms)
@@ -3067,18 +3134,32 @@ class VnaWindow(QDialog):
                     pass
         self._bg_workers = []
 
-    def _set_acquire_busy(self, busy: bool):
-        # sweep 중에는 충돌·설정변경을 막기 위해 동작 버튼을 모두 비활성화 (Stop만 활성)
+    def _set_section_busy(self, busy: bool):
+        """섹션 실행(묶음 명령 + OPC 완료 대기) 동안 측정 Start 와 Execute 를 잠근다.
+
+        장비가 아직 이전 동작을 끝내지 않았는데 측정을 시작하면 값이 뒤섞이므로,
+        OPC 응답이 올 때까지는 시작할 수 없어야 한다. acquire 쪽 잠금과 서로
+        덮어쓰지 않도록 두 상태를 각각 두고 합쳐서 적용한다.
+        """
+        self._section_busy = busy
+        self._apply_busy_state()
+
+    def _apply_busy_state(self):
+        busy = getattr(self, "_acq_busy", False) or getattr(self, "_section_busy", False)
         self._btn_single.setEnabled(not busy)
         self._btn_sweep.setEnabled(not busy)
-        self._btn_stop_acq.setEnabled(busy)
         self._btn_cfg.setEnabled(not busy)
         self._btn_alarm.setEnabled(not busy)
-        if getattr(self, "_btn_resume", None) is not None and busy:
-            self._btn_resume.setEnabled(False)   # 해제는 _update_resume_button이 판단
-        # 섹션 Execute(같은 VISA 세션으로 VNA 제어) — sweep 중 누르면 충돌하므로 비활성화
         for sw in self._section_widgets:
             sw.setEnabled(not busy)
+
+    def _set_acquire_busy(self, busy: bool):
+        # sweep 중에는 충돌·설정변경을 막기 위해 동작 버튼을 모두 비활성화 (Stop만 활성)
+        self._acq_busy = busy
+        self._apply_busy_state()
+        self._btn_stop_acq.setEnabled(busy)
+        if getattr(self, "_btn_resume", None) is not None and busy:
+            self._btn_resume.setEnabled(False)   # 해제는 _update_resume_button이 판단
         # Feature 1: 측정 중엔 테이블의 '재생성'만 잠근다(값 편집·행 추가/삭제는 유지).
         #            '커스텀 테이블 유지' 체크박스는 측정 중 변경 금지(잠금).
         win = getattr(self, "_second_table_win", None)
