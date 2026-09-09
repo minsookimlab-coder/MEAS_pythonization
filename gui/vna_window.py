@@ -1266,13 +1266,17 @@ class VnaWindow(QDialog):
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle("VNA Control")
-        self.resize(1500, 780)
+        self.resize(1500, 780)   # 최대화를 푼 뒤의 복원 크기
         self.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowMinimizeButtonHint |
             Qt.WindowType.WindowMaximizeButtonHint |
             Qt.WindowType.WindowCloseButtonHint
         )
+        # 처음 열 때는 최대화 상태로 — 섹션·그래프·데이터가 한 화면에 들어와야 한다.
+        # show() 가 이 상태를 그대로 따르므로 여기서 지정하면 된다.
+        # (setWindowFlags 가 상태를 초기화할 수 있어 반드시 그 뒤에 둔다.)
+        self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
         self._session            = session
         self._lib_reg            = lib_reg
         self._param_manager_reg  = param_manager_reg
@@ -3255,13 +3259,17 @@ class VnaWindow(QDialog):
 
     def _open_config(self):
         from gui.vna_config_window import VnaConfigWindow
+        # Config 창이 읽어 갈 파일에 이 창의 현재 상태를 먼저 반영한다.
+        # Config 는 통째로 저장(Save & Apply)하므로, 여기 체크박스·입력값·저장
+        # 폴더가 파일에 없으면 그 값들이 옛것으로 되돌아간다.
+        self._save_ui_state()
         cfg_path = self._config_path()
         if self._config_win is None:
             self._config_win = VnaConfigWindow(
                 self._lib_reg, config_path=cfg_path, parent=self)
             self._config_win.saved.connect(self._on_config_saved)
         else:
-            # Update path in case profile changed
+            # 경로 갱신 겸 재로드. 이미 떠 있어서 showEvent 가 안 오는 경우도 덮는다.
             self._config_win.set_config_path(cfg_path)
         self._config_win.show()
         self._config_win.raise_()
