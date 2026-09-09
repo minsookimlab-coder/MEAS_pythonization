@@ -418,3 +418,50 @@ def build_cmd(template: str, params: List[VnaParamSpec],
         return template.format(**d)
     except Exception as e:
         raise ValueError(f"Command format error '{template}': {e}")
+
+
+# ---------------------------------------------------------------------------
+# Calibration (전역 설정 — 프로파일과 무관)
+# ---------------------------------------------------------------------------
+
+class VnaCalibrationConfig(BaseModel):
+    """VNA Calibration 창 설정.
+
+    프로파일마다 달라지는 값이 아니라 장비 자체의 교정 절차이므로 **전역**으로
+    저장한다(SETTINGS_DIR/vna_calibration.yaml). 프로파일을 바꿔도 그대로 쓴다.
+
+    buttons — 각 항목이 창의 버튼 하나가 된다. 누르면 그 명령을 바로 보낸다.
+    opc     — 모든 버튼이 공유하는 완료 대기 쿼리. 응답이 1 이 될 때까지 기다리며
+              그동안 모든 버튼이 잠긴다. 비우면 대기 없이 바로 끝난다.
+    """
+    buttons: List[VnaCommandEntry] = Field(default_factory=list)
+    opc: List[VnaCommandEntry] = Field(default_factory=list)
+
+
+def calibration_path() -> Path:
+    """전역 calibration 설정 파일 경로 (사용자 데이터 폴더)."""
+    from core.app_dirs import SETTINGS_DIR
+    return SETTINGS_DIR / "vna_calibration.yaml"
+
+
+def load_vna_calibration(path: Optional[Path] = None) -> VnaCalibrationConfig:
+    p = path or calibration_path()
+    if not p.exists():
+        return VnaCalibrationConfig()
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        return VnaCalibrationConfig(**data)
+    except Exception:
+        # 설정이 깨져도 창은 떠야 한다 — 빈 설정으로 시작한다.
+        return VnaCalibrationConfig()
+
+
+def save_vna_calibration(cfg: VnaCalibrationConfig, path: Optional[Path] = None) -> None:
+    p = path or calibration_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            yaml.dump(cfg.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
+            encoding="utf-8")
+    except Exception as e:
+        print(f"[vna_calibration] save failed: {e}")

@@ -1347,6 +1347,8 @@ class VnaWindow(QDialog):
         self._sweep_folder: Optional[Path] = None
         self._sweep_figure_axis: str = ""
         self._config_win = None
+        self._cal_win = None          # Calibration 창 (보관형)
+        self._cal_callback = None     # 실행 완료를 알릴 콜백
         self._resume_state: Optional[VnaResumeState] = None   # double sweep 재개 상태
         self._bg_workers: list = []   # 백그라운드 _VnaWorker(stop-cmd 등) 추적 (종료 시 wait)
         from gui.second_channel_model import SecondChannelModel
@@ -1431,6 +1433,14 @@ class VnaWindow(QDialog):
         self._btn_cfg.setFixedHeight(22)
         self._btn_cfg.clicked.connect(self._open_config)
         lay.addWidget(self._btn_cfg)
+
+        self._btn_cal = QPushButton("⚙ Calibration")
+        self._btn_cal.setFixedHeight(22)
+        self._btn_cal.setToolTip(
+            "교정 명령을 버튼으로 모아 둔 창. 버튼을 누르면 명령을 보내고 "
+            "OPC 응답이 올 때까지 기다린다. 설정은 프로파일과 무관한 전역 설정.")
+        self._btn_cal.clicked.connect(self._open_calibration)
+        lay.addWidget(self._btn_cal)
 
         self._btn_alarm = QPushButton("⚙ Alarm")
         self._btn_alarm.setFixedHeight(22)
@@ -2413,6 +2423,55 @@ class VnaWindow(QDialog):
     # Section execute
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Calibration
+    # ------------------------------------------------------------------
+
+    def _open_calibration(self):
+        from gui.vna_calibration_window import VnaCalibrationWindow
+        if getattr(self, "_cal_win", None) is None:
+            self._cal_win = VnaCalibrationWindow(self._lib_reg, self, parent=self)
+        self._cal_win.show()
+        self._cal_win.raise_()
+
+    def run_calibration(self, cmds: list, opc_cmds: list, on_finished):
+        """Calibration 창이 부르는 실행 진입점.
+
+        섹션 실행과 같은 워커·같은 잠금을 쓴다 — 같은 VISA 세션으로 같은 장비를
+        건드리므로, 교정 중에는 측정 Start 와 섹션 Execute 도 함께 잠겨야 한다.
+
+        반환: (시작했는가, 못 한 이유)
+        """
+        if self._sec_worker and self._sec_worker.isRunning():
+            return False, "다른 명령이 실행 중입니다. 끝난 뒤 다시 누르세요."
+        if getattr(self, "_acq_busy", False):
+            return False, "측정 중에는 교정을 실행할 수 없습니다."
+        worker = _VnaWorker(self._session, cmds, opc_cmds or [])
+        self._sec_worker = worker
+        self._cal_callback = on_finished
+
+        def _done(_results):
+            self._set_section_busy(False)
+            self._set_status("Calibration 완료.", color="#7ee787")
+            cb = getattr(self, "_cal_callback", None)
+            if cb:
+                cb(None)
+
+        def _error(msg):
+            self._set_section_busy(False)
+            self._set_status(f"Calibration 오류: {msg}", color="#f78166")
+            cb = getattr(self, "_cal_callback", None)
+            if cb:
+                cb(msg)
+
+        worker.done.connect(_done)
+        worker.error.connect(_error)
+        worker.opc_started.connect(self._on_section_opc_started)
+        self._set_section_busy(True)
+        self._set_status("Calibration 실행 중…", color="#888")
+        worker.start()
+        return True, ""
+
     def _on_execute_section(self, cmds: list, opc_cmds: list = None):
         if not cmds:
             self._set_status("No enabled commands.", color="#888")
@@ -3150,6 +3209,8 @@ class VnaWindow(QDialog):
         self._btn_sweep.setEnabled(not busy)
         self._btn_cfg.setEnabled(not busy)
         self._btn_alarm.setEnabled(not busy)
+        if getattr(self, "_btn_cal", None) is not None:
+            self._btn_cal.setEnabled(not busy)
         for sw in self._section_widgets:
             sw.setEnabled(not busy)
 

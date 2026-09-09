@@ -2,6 +2,41 @@
 
 ---
 
+## v1.07.5 — 2026-09-09 (기능 추가)
+
+### VNA Calibration 창
+
+VNA Control 의 **Config 옆 [⚙ Calibration]** 버튼으로 연다. VISA Library 에 등록해 둔
+명령을 고르면 **그 항목 하나가 버튼 하나**가 되고, 누르면 그 명령을 바로 보낸 뒤
+전역 OPC 응답이 올 때까지 **모든 버튼을 잠근다**. 교정은 한 단계가 끝나기 전에 다음
+단계를 누르면 안 되기 때문이다.
+
+    [1port short] 클릭 -> short 교정 명령 전송 -> OPC 대기 -> 잠금 해제
+    [1port open]  클릭 -> ...
+
+- `gui/vna_calibration_window.py` — 버튼 격자(한 줄 3개), 상태줄, OPC 표시.
+  버튼 라벨은 라이브러리의 figure_axis(없으면 description)를 쓴다. 값이 필요한
+  명령이면 버튼 옆에 입력칸이 붙는다.
+- `gui/vna_calibration_editor.py` — [버튼 구성…] 다이얼로그. 명령 편집 UI 는 VNA
+  Config 의 `_CmdListWidget` 을 **재사용**한다(같은 일을 하는 목록을 두 벌 만들면
+  한쪽만 고쳐진다). ↑ ↓ 순서가 버튼 배치 순서다.
+- **OPC 는 전역 설정** — 모든 버튼이 같은 완료 대기 쿼리를 쓴다. 비워 두면 대기 없이
+  바로 끝난다.
+- **설정은 프로파일이 아니라 전역**으로 저장한다. 교정 절차는 장비의 성질이지
+  측정 프로파일마다 달라지는 값이 아니다 → `SETTINGS_DIR/vna_calibration.yaml`
+  (규칙 3: 사용자 설정은 Documents 아래).
+
+실행은 섹션 실행과 **같은 워커·같은 잠금**을 쓴다(`_VnaWorker` + `_set_section_busy`).
+같은 VISA 세션으로 같은 장비를 건드리므로, 교정 중에는 측정 Start 와 섹션 Execute 도
+함께 잠긴다. 반대로 **측정 중에는 교정을 시작할 수 없다** — 이유를 상태줄에 알린다.
+
+헤드리스 검증: 라이브러리에 short/open/load + `*OPC?` 를 등록하고 ① 전역 파일 저장·로드
+② 버튼 3개가 figure_axis 라벨로 생성 ③ [1port short] 클릭 -> `SENS:CORR:COLL:SHOR1`
+전송 -> OPC 3회 폴링 -> 그동안 버튼·Start 모두 비활성 -> 완료 후 해제
+④ 측정 중 교정 요청은 거부 확인.
+
+---
+
 ## v1.07.4 — 2026-09-09 (기능 추가)
 
 ### VNA Section 에 OPC(완료 대기) 추가
