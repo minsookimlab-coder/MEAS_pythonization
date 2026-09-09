@@ -36,6 +36,22 @@ def _placeholders(template: str) -> list:
     return out
 
 
+#: sweep 축 placeholder 는 fill_params 에 키는 있지만 값이 이 표식이다.
+#: Parameter Manager 가 '측정할 때 값이 들어올 자리' 라는 뜻으로 넣는다.
+SWEEP_SENTINEL = "[SWEEP]"
+
+
+def filled_keys(fill_params: dict) -> set:
+    """실제 값이 채워진 placeholder 이름만.
+
+    sweep 축은 키가 있어도 '채워진 것' 이 아니다. 이걸 채워진 값으로 세면
+    '파라미터가 줄었다' 는 잘못된 판정이 나고, 값 치환 때 명령에
+    '[SWEEP]' 이라는 문자열이 그대로 박힌다.
+    """
+    return {k for k, v in (fill_params or {}).items()
+            if str(v).strip() != SWEEP_SENTINEL}
+
+
 def check_placeholders(description: str, template: str, fill_params: dict,
                        axis_slots: int = 0) -> str:
     """라이브러리 템플릿을 이 항목의 fill_params 로 다시 채울 수 있는지 판정한다.
@@ -48,7 +64,7 @@ def check_placeholders(description: str, template: str, fill_params: dict,
     반환: 문제가 없으면 빈 문자열, 있으면 사용자에게 보일 사유.
     """
     need = _placeholders(template)
-    have = set(fill_params or {})
+    have = filled_keys(fill_params)
     unfilled = [n for n in need if n not in have]
     if len(unfilled) == axis_slots:
         return ""
@@ -352,6 +368,39 @@ class ProfileRegistry:
     # Library rebuild (ParameterManagerRegistry compatibility)
     # ------------------------------------------------------------------
 
+    def refresh_needs_fix(self, mui: MainUIProfile,
+                          lib_registry: "VisaLibraryRegistry") -> None:
+        """needs_fix 를 라이브러리 기준으로 다시 계산한다 (명령은 건드리지 않는다).
+
+        needs_fix 는 파생 상태다. 프로파일 파일에 저장돼 있지만 그 사이 라이브러리가
+        바뀌었을 수도, 판정 로직이 고쳐졌을 수도 있다. 저장된 값을 그대로 믿으면
+        예전 판정이 계속 남아 멀쩡한 항목이 잠긴 채로 보인다. 창을 열 때마다 다시
+        계산한다.
+
+        라이브러리에 해당 항목이 아예 없으면(orphan) placeholder 문제가 아니므로
+        needs_fix 를 비운다.
+        """
+        for group, kind, slots in (
+            (mui.measurements, "measurements", 0),
+            (mui.sweep_values, "sweep_values", 1),
+            (mui.write_cmds, "write_cmds", None),
+        ):
+            for item in group:
+                try:
+                    lib = lib_registry.get_library(item.alias)
+                    entries = getattr(lib, kind, [])
+                    entry = next((e for e in entries
+                                  if e.description == item.description), None)
+                except Exception:
+                    entry = None
+                if entry is None:
+                    item.needs_fix = ""
+                    continue
+                template = getattr(entry, "cmd_query", None) or entry.cmd_set
+                n = slots if slots is not None else (1 if "{v}" in item.cmd_set else 0)
+                item.needs_fix = check_placeholders(
+                    item.description, template, item.fill_params, n)
+
     def propagate_library_change(self, lib_registry: "VisaLibraryRegistry") -> dict:
         """라이브러리 변경을 **모든 프로파일**에 다시 적용한다.
 
@@ -449,12 +498,13 @@ class ProfileRegistry:
                         new_sweep_values.append(sv.model_copy(update={"needs_fix": nf}))
                     else:
                         # 채우지 않고 남는 자리 하나 = sweep 축 → {v} 로 정규화
+                        done = filled_keys(sv.fill_params)
                         axis = next(n for n in _placeholders(entry.cmd_set)
-                                    if n not in (sv.fill_params or {}))
+                                    if n not in done)
                         new_cmd_set = entry.cmd_set.replace(f"{{{axis}}}", "{v}")
-                        if sv.fill_params:
-                            for k, val in sv.fill_params.items():
-                                new_cmd_set = new_cmd_set.replace(f"{{{k}}}", str(val))
+                        for k in done:
+                            new_cmd_set = new_cmd_set.replace(
+                                f"{{{k}}}", str(sv.fill_params[k]))
                         new_sweep_values.append(sv.model_copy(update={
                             "cmd_set":         new_cmd_set,
                             "paired_read_cmd": entry.paired_read_cmd,
@@ -477,12 +527,14 @@ class ProfileRegistry:
                         new_write_cmds.append(wc.model_copy(update={"needs_fix": nf}))
                     else:
                         new_cmd_set = entry.cmd_set
+                        done = filled_keys(wc.fill_params)
                         if slots:
                             axis = next(n for n in _placeholders(entry.cmd_set)
-                                        if n not in (wc.fill_params or {}))
+                                        if n not in done)
                             new_cmd_set = new_cmd_set.replace(f"{{{axis}}}", "{v}")
-                        for k, val in (wc.fill_params or {}).items():
-                            new_cmd_set = new_cmd_set.replace(f"{{{k}}}", str(val))
+                        for k in done:
+                            new_cmd_set = new_cmd_set.replace(
+                                f"{{{k}}}", str(wc.fill_params[k]))
                         new_write_cmds.append(wc.model_copy(update={
                             "cmd_set":     new_cmd_set,
                             "figure_axis": entry.figure_axis,

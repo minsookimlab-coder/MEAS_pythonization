@@ -440,6 +440,12 @@ class MainWindow(QMainWindow):
         try:
             fp = self._param_manager_reg.get_active_profile()
             mui = fp.main_ui
+            # needs_fix 는 파생 상태다 — 저장된 값을 믿지 말고 라이브러리 기준으로
+            # 다시 계산한다. 안 그러면 옛 판정이 남아 멀쩡한 항목이 잠긴 채 보인다.
+            try:
+                self._param_manager_reg.refresh_needs_fix(mui, self._visa_lib_registry)
+            except Exception as e:
+                self._log(f"  needs_fix 재계산 경고: {e}", color="#d7ba7d")
             if mui.sweep_values or mui.measurements or mui.write_cmds:
                 self._on_selection_applied(mui)
             else:
