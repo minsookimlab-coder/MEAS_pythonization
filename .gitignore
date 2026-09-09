@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 가상환경
+.venv/
+venv/
+
+# PyInstaller 산출물
+build/
+
+# 에디터 / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
