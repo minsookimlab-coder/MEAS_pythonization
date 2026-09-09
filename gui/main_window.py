@@ -1395,9 +1395,16 @@ class MainWindow(QMainWindow):
 
         for idx, sv in enumerate(sweep_values):
             color = self._get_alias_color(sv.alias)
-            rb = QRadioButton(f"[{sv.alias}]  {sv.description}  ({sv.unit})")
+            needs_fix = getattr(sv, "needs_fix", "")
+            label = f"[{sv.alias}]  {sv.description}  ({sv.unit})"
+            rb = QRadioButton(("⚠ " + label) if needs_fix else label)
             rb.setFont(_MONO)
-            rb.setStyleSheet(f"QRadioButton {{ color: {color}; }}")
+            if needs_fix:
+                rb.setStyleSheet("QRadioButton { color: #f44747; }")
+                rb.setToolTip(needs_fix)
+                rb.setEnabled(False)
+            else:
+                rb.setStyleSheet(f"QRadioButton {{ color: {color}; }}")
             self._sweep_radio_group.addButton(rb, idx)
             cl.addWidget(rb)
 
@@ -1454,12 +1461,23 @@ class MainWindow(QMainWindow):
             key = (m.alias, m.description)
 
             # ── Checkbox ──────────────────────────────────────────────
-            cb = QCheckBox(f"[{m.alias}]  {m.description}  ({m.unit})")
+            needs_fix = getattr(m, "needs_fix", "")
+            label = f"[{m.alias}]  {m.description}  ({m.unit})"
+            cb = QCheckBox(("⚠ " + label) if needs_fix else label)
             cb.setFont(_MONO)
-            cb.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
-            init_checked = prev_checked.get(key, m.checked) if prev_checked else m.checked
-            cb.setChecked(init_checked)
-            m.checked = init_checked  # write-back: 프로파일과 동기화
+            if needs_fix:
+                # 라이브러리 명령이 바뀌어 다시 만들 수 없는 항목 — 측정에 못 쓴다.
+                # 지우지 않고 비활성화만 해서, 사용자가 어디를 고쳐야 하는지 보이게 둔다.
+                cb.setStyleSheet("QCheckBox { color: #f44747; }")
+                cb.setToolTip(needs_fix)
+                cb.setChecked(False)
+                cb.setEnabled(False)
+                m.checked = False
+            else:
+                cb.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
+                init_checked = prev_checked.get(key, m.checked) if prev_checked else m.checked
+                cb.setChecked(init_checked)
+                m.checked = init_checked  # write-back: 프로파일과 동기화
 
             def _make_cb_wb(meas, _cb):
                 def _wb():
@@ -1605,14 +1623,45 @@ class MainWindow(QMainWindow):
         self._visa_lib_window.raise_()
 
     def _on_library_saved(self):
-        """라이브러리 저장 후 main UI를 재인스턴스화 (세팅 보존 모드)."""
+        """라이브러리 저장 후, 그 명령을 쓰는 **모든 프로파일**을 재인스턴스화한다.
+
+        활성 프로파일만 고치면 다른 프로파일은 옛 명령을 든 채 남는다.
+        파라미터 개수가 맞지 않아 다시 만들 수 없는 항목은 needs_fix 가 붙고,
+        UI 에서 비활성화 + 빨간 ⚠ 표시 + 툴팁으로 안내된다.
+        """
+        problems = self._param_manager_reg.propagate_library_change(
+            self._visa_lib_registry
+        )
         new_mui = self._param_manager_reg.rebuild_main_ui_from_library(
             self._visa_lib_registry, drop_orphans=False
         )
         self._on_selection_applied(new_mui)
+        self._report_library_problems(problems)
         # Parameter Manager 창이 열려 있으면 라이브러리 뷰 갱신
         if self._param_manager_window is not None and self._param_manager_window.isVisible():
             self._param_manager_window.refresh_library()
+
+    def _report_library_problems(self, problems: dict) -> None:
+        """라이브러리 변경으로 못 쓰게 된 항목을 로그와 다이얼로그로 알린다."""
+        if not problems:
+            self._log("  라이브러리 변경을 모든 프로파일에 적용했습니다.", color="#4ec9b0")
+            return
+        lines = []
+        for name, items in problems.items():
+            lines.append(f"[{name}]")
+            lines.extend(f"    - {it}" for it in items)
+        body = "\n".join(lines)
+        for ln in ["  라이브러리 변경으로 사용할 수 없게 된 항목이 있습니다:"] + lines:
+            self._log(ln, color="#f44747")
+        active = self._param_manager_reg.active_name
+        QMessageBox.warning(
+            self, "라이브러리 변경 — 다시 등록이 필요한 항목",
+            "명령의 파라미터 개수가 달라져서 아래 항목을 그대로 쓸 수 없습니다.\n"
+            "측정에 쓰이지 않도록 비활성화했습니다 (목록에 빨간 ⚠ 표시).\n\n"
+            f"{body}\n\n"
+            f"Parameter Manager 에서 해당 항목을 지우고 다시 등록하면 해결됩니다.\n"
+            f"(현재 활성 프로파일: {active})",
+        )
 
     def _on_start(self):
         if self._running:

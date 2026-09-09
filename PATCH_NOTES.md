@@ -2,6 +2,65 @@
 
 ---
 
+## v1.07.3 — 2026-09-09 (기능 추가 · 버그픽스)
+
+### VISA Library 변경을 쓰는 곳 전부에 다시 적용
+
+라이브러리에서 명령을 고쳐도 **활성 프로파일의 main_ui 만** 갱신됐다. 다른 프로파일은
+옛 명령을 든 채 남아, 나중에 그 프로파일로 전환한 사용자가 조용히 틀린 명령으로
+측정하게 됐다. 파라미터가 안 맞을 때의 처리도 위험했다 —
+
+- 측정 항목: `entry.cmd_query.format(**fill_params)` 가 `KeyError` 로 실패하면
+  **치환되지 않은 템플릿을 그대로** `resolved_cmd` 에 넣었다. `{ch}` 가 남은 문자열이
+  장비로 나간다.
+- sweep/write: 조용히 **옛 명령을 유지**해서, 라이브러리를 고쳤는데 반영이 안 된
+  것처럼 보였다.
+
+바뀐 동작:
+
+- `ProfileRegistry.propagate_library_change()` 신설 — 라이브러리 저장 시
+  **모든 프로파일**을 재인스턴스화해 저장한다.
+- `check_placeholders()` 신설 — 라이브러리 템플릿의 placeholder 를 그 항목의
+  `fill_params` 로 채울 수 있는지 판정한다. 비워 두는 자리 수(sweep 축)를
+  `axis_slots` 로 받는다: 측정 0, sweep value 1, write cmd 는 기존 명령의 `{v}` 유무.
+- 맞으면 명령·figure_axis·unit 을 갱신하고, **안 맞으면 옛 명령을 그대로 둔 채**
+  `needs_fix` 에 사유를 남긴다. 반쯤 치환된 명령은 절대 만들지 않는다.
+- `Instantiated{Measurement,SweepValue,WriteCmd}` 에 `needs_fix: str` 추가
+  (빈 문자열 = 정상). 기존 프로파일 YAML 은 기본값으로 채워져 그대로 열린다.
+
+UI:
+
+- 못 쓰게 된 항목은 메인 창에서 **비활성화**된다 — 측정 체크박스는 체크 해제 후
+  잠기고(`checked=False` 로 프로파일에도 반영), sweep 채널 라디오는 선택할 수 없다.
+- 빨간색 + `⚠` 표시로 구분되고, **마우스를 올리면** 무엇이 어떻게 달라졌는지와
+  "Parameter Manager 에서 이 항목을 지우고 다시 등록하면 해결됩니다" 안내가 뜬다.
+- 라이브러리 저장 직후, 프로파일별로 어떤 항목이 막혔는지 요약 다이얼로그와
+  Console 로그로 알린다.
+
+헤드리스 검증: 프로파일 2개(A·B)에 같은 명령을 등록한 뒤 ① 파라미터 수가 같은 변경 →
+양쪽 모두 새 명령으로 갱신 ② 파라미터가 늘어난 변경 → 양쪽 모두 옛 명령 유지 +
+needs_fix + 체크박스/라디오 비활성화 + 툴팁 확인.
+
+### 알람 Test 의 인증서 오류
+
+- **[중요] Telegram/이메일 Test 가 `CERTIFICATE_VERIFY_FAILED: self-signed certificate
+  in certificate chain` 으로 실패했다** — MITM 이 아니었다. 같은 서버를 Windows 자체
+  검증기로 확인하면 정상(`SslPolicyErrors.None`)이고 GoDaddy 루트도 저장소에 있는데,
+  Python 의 `ssl.create_default_context()` 만 실패했다. Windows 는 필요한 루트를 처음
+  쓸 때 자동으로 내려받는데(automatic root update), Python 은 **그 시점의 저장소
+  스냅샷**을 OpenSSL 에 넘기므로 아직 받아오지 않았으면 체인을 못 세운다. 그래서
+  '가끔 된다'로 보였다.
+- `core/net_ssl.py` 신설 — 검증은 켜 둔 채 검증 주체만 옮긴다:
+  `truststore`(Windows 자체 검증 API 위임) → `certifi` 번들 → 표준 라이브러리 순.
+  Telegram(`urlopen`)과 이메일(`smtplib.starttls`) 모두 이 컨텍스트를 쓴다.
+  두 패키지는 선택 의존성이며 `pythonization.bat` 이 자동 설치한다.
+- 그래도 실패하면 `explain_ssl_error()` 가 원인과 조치(패키지 설치 / 사내 CA 설치 /
+  시스템 시각 확인)를 담은 안내를 Test 결과에 보여 준다.
+- **인증서 검증은 끄지 않는다.** 예전에 `CERT_NONE` 으로 껐다가 봇 토큰이 MITM 에
+  노출된 전례가 있다.
+
+---
+
 ## v1.07.2 — 2026-09-09 (성능 · 버그픽스 · 저장소 정리)
 
 ### 측정 중 GUI 지연

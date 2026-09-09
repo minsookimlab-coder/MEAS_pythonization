@@ -160,6 +160,9 @@ class InstantiatedMeasurement(BaseModel):
     axis_suffix: str = ""   # user-defined suffix appended to figure_axis in data files
     meas_type: MeasType = MeasType.NONE  # contact → column = "contact_{suffix}"
     checked: bool = True    # main UI 체크박스 상태 — 프로파일에 저장됨
+    # 라이브러리 명령이 바뀌어 이 항목을 다시 만들 수 없을 때의 사유.
+    # 빈 문자열이면 정상. 값이 있으면 UI 에서 비활성화하고 툴팁으로 안내한다.
+    needs_fix: str = ""
 
 
 class InstantiatedSweepValue(BaseModel):
@@ -173,6 +176,9 @@ class InstantiatedSweepValue(BaseModel):
     safety_steps: int = 0           # 0 = safety 없음
     safety_interval_ms: float = 0.0 # sub-step 사이 대기 시간 (ms)
     fill_params: Dict[str, str] = Field(default_factory=dict)  # 원본 입력값 (재편집용)
+    # 라이브러리 명령이 바뀌어 이 항목을 다시 만들 수 없을 때의 사유.
+    # 빈 문자열이면 정상. 값이 있으면 UI 에서 비활성화하고 툴팁으로 안내한다.
+    needs_fix: str = ""
 
 
 class InstantiatedWriteCmd(BaseModel):
@@ -183,6 +189,9 @@ class InstantiatedWriteCmd(BaseModel):
     figure_axis: str = ""
     unit: str = ""
     fill_params: Dict[str, str] = Field(default_factory=dict)  # 원본 입력값 (재편집용)
+    # 라이브러리 명령이 바뀌어 이 항목을 다시 만들 수 없을 때의 사유.
+    # 빈 문자열이면 정상. 값이 있으면 UI 에서 비활성화하고 툴팁으로 안내한다.
+    needs_fix: str = ""
 
 
 class SecondSweepAdvanceType(str, Enum):

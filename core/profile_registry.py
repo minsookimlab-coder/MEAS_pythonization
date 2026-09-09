@@ -22,6 +22,51 @@ if TYPE_CHECKING:
 from core.app_dirs import SETTINGS_DIR as _SETTINGS_DIR
 
 
+# ---------------------------------------------------------------------------
+# 라이브러리 명령 변경 추적
+# ---------------------------------------------------------------------------
+
+def _placeholders(template: str) -> list:
+    """템플릿에 남아 있는 {이름} 목록 (중복 제거, 등장 순서 유지)."""
+    seen, out = set(), []
+    for name in _re.findall(r"\{(\w+)\}", template or ""):
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def check_placeholders(description: str, template: str, fill_params: dict,
+                       axis_slots: int = 0) -> str:
+    """라이브러리 템플릿을 이 항목의 fill_params 로 다시 채울 수 있는지 판정한다.
+
+    axis_slots — 채우지 않고 비워 두는 자리 수.
+        측정(query)      0 — 모든 placeholder 가 fill_params 에 있어야 한다
+        sweep value      1 — sweep 축 하나가 {v} 로 남는다
+        write cmd      0/1 — 기존 명령에 {v} 가 있었는지에 따라
+
+    반환: 문제가 없으면 빈 문자열, 있으면 사용자에게 보일 사유.
+    """
+    need = _placeholders(template)
+    have = set(fill_params or {})
+    unfilled = [n for n in need if n not in have]
+    if len(unfilled) == axis_slots:
+        return ""
+    lib_txt = ", ".join(f"{{{n}}}" for n in need) or "(없음)"
+    have_txt = ", ".join(sorted(have)) or "(없음)"
+    if len(unfilled) > axis_slots:
+        what = "채워야 할 파라미터가 늘었습니다"
+    else:
+        what = "파라미터가 줄었습니다"
+    return (
+        f"VISA Library 의 '{description}' 명령이 바뀌어 이 항목을 그대로 쓸 수 없습니다 "
+        f"— {what}.\n"
+        f"  라이브러리 명령의 파라미터: {lib_txt}\n"
+        f"  이 항목에 저장된 값:        {have_txt}\n\n"
+        f"Parameter Manager 에서 이 항목을 지우고 다시 등록하면 해결됩니다."
+    )
+
+
 class ProfileRegistry:
     """
     Named profiles management.
@@ -307,6 +352,46 @@ class ProfileRegistry:
     # Library rebuild (ParameterManagerRegistry compatibility)
     # ------------------------------------------------------------------
 
+    def propagate_library_change(self, lib_registry: "VisaLibraryRegistry") -> dict:
+        """라이브러리 변경을 **모든 프로파일**에 다시 적용한다.
+
+        활성 프로파일만 고치면 다른 프로파일은 옛 명령을 든 채 남아, 나중에 그
+        프로파일로 전환한 사용자가 조용히 틀린 명령으로 측정하게 된다.
+
+        각 프로파일의 main_ui 를 라이브러리 기준으로 재인스턴스화해 저장하고,
+        파라미터가 맞지 않아 쓸 수 없게 된 항목은 needs_fix 에 사유를 남긴다.
+
+        반환: {프로파일 이름: [문제 항목 설명, …]} — 문제가 있는 프로파일만 담는다.
+        """
+        original = self._active_name
+        problems: Dict[str, List[str]] = {}
+        try:
+            for name in self.list_profiles():
+                try:
+                    profile = self.get_profile(name)
+                except Exception:
+                    continue
+                self._active_name = name          # rebuild 가 활성 프로파일을 본다
+                try:
+                    new_mui = self.rebuild_main_ui_from_library(
+                        lib_registry, drop_orphans=False)
+                except Exception:
+                    continue
+                broken = [
+                    f"{item.alias} / {item.description}"
+                    for group in (new_mui.measurements, new_mui.sweep_values,
+                                  new_mui.write_cmds)
+                    for item in group
+                    if getattr(item, "needs_fix", "")
+                ]
+                if broken:
+                    problems[name] = broken
+                profile.main_ui = new_mui
+                self.save_profile(name, profile)
+        finally:
+            self._active_name = original
+        return problems
+
     def rebuild_main_ui_from_library(
         self,
         lib_registry: "VisaLibraryRegistry",
@@ -336,15 +421,20 @@ class ProfileRegistry:
                 lib = lib_registry.get_library(m.alias)
                 entry = next((e for e in lib.measurements if e.description == m.description), None)
                 if entry:
-                    try:
-                        resolved = entry.cmd_query.format(**m.fill_params) if m.fill_params else entry.cmd_query
-                    except (KeyError, ValueError):
-                        resolved = entry.cmd_query
-                    new_measurements.append(m.model_copy(update={
-                        "resolved_cmd": resolved,
-                        "figure_axis":  entry.figure_axis,
-                        "unit":         entry.unit,
-                    }))
+                    nf = check_placeholders(m.description, entry.cmd_query, m.fill_params, 0)
+                    if nf:
+                        # 파라미터가 안 맞으면 옛 명령을 그대로 두고 표시만 남긴다.
+                        # 반쯤 치환된 템플릿({ph} 가 남은 문자열)을 장비로 보내면 안 된다.
+                        new_measurements.append(m.model_copy(update={"needs_fix": nf}))
+                    else:
+                        resolved = (entry.cmd_query.format(**m.fill_params)
+                                    if m.fill_params else entry.cmd_query)
+                        new_measurements.append(m.model_copy(update={
+                            "resolved_cmd": resolved,
+                            "figure_axis":  entry.figure_axis,
+                            "unit":         entry.unit,
+                            "needs_fix":    "",
+                        }))
                 else:
                     new_measurements.append(m)
 
@@ -354,17 +444,24 @@ class ProfileRegistry:
                 lib = lib_registry.get_library(sv.alias)
                 entry = next((e for e in lib.sweep_values if e.description == sv.description), None)
                 if entry:
-                    lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
-                    new_cmd_set = (
-                        entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}") if len(lib_phs) == 1
-                        else sv.cmd_set
-                    )
-                    new_sweep_values.append(sv.model_copy(update={
-                        "cmd_set":         new_cmd_set,
-                        "paired_read_cmd": entry.paired_read_cmd,
-                        "figure_axis":     entry.figure_axis,
-                        "unit":            entry.unit,
-                    }))
+                    nf = check_placeholders(sv.description, entry.cmd_set, sv.fill_params, 1)
+                    if nf:
+                        new_sweep_values.append(sv.model_copy(update={"needs_fix": nf}))
+                    else:
+                        # 채우지 않고 남는 자리 하나 = sweep 축 → {v} 로 정규화
+                        axis = next(n for n in _placeholders(entry.cmd_set)
+                                    if n not in (sv.fill_params or {}))
+                        new_cmd_set = entry.cmd_set.replace(f"{{{axis}}}", "{v}")
+                        if sv.fill_params:
+                            for k, val in sv.fill_params.items():
+                                new_cmd_set = new_cmd_set.replace(f"{{{k}}}", str(val))
+                        new_sweep_values.append(sv.model_copy(update={
+                            "cmd_set":         new_cmd_set,
+                            "paired_read_cmd": entry.paired_read_cmd,
+                            "figure_axis":     entry.figure_axis,
+                            "unit":            entry.unit,
+                            "needs_fix":       "",
+                        }))
                 else:
                     new_sweep_values.append(sv)
 
@@ -374,18 +471,24 @@ class ProfileRegistry:
                 lib = lib_registry.get_library(wc.alias)
                 entry = next((e for e in lib.write_cmds if e.description == wc.description), None)
                 if entry:
-                    lib_phs = _re.findall(r"\{(\w+)\}", entry.cmd_set)
-                    if not lib_phs:
-                        new_cmd_set = entry.cmd_set
-                    elif len(lib_phs) == 1 and "{v}" in wc.cmd_set:
-                        new_cmd_set = entry.cmd_set.replace(f"{{{lib_phs[0]}}}", "{v}")
+                    slots = 1 if "{v}" in wc.cmd_set else 0
+                    nf = check_placeholders(wc.description, entry.cmd_set, wc.fill_params, slots)
+                    if nf:
+                        new_write_cmds.append(wc.model_copy(update={"needs_fix": nf}))
                     else:
-                        new_cmd_set = wc.cmd_set
-                    new_write_cmds.append(wc.model_copy(update={
-                        "cmd_set":     new_cmd_set,
-                        "figure_axis": entry.figure_axis,
-                        "unit":        entry.unit,
-                    }))
+                        new_cmd_set = entry.cmd_set
+                        if slots:
+                            axis = next(n for n in _placeholders(entry.cmd_set)
+                                        if n not in (wc.fill_params or {}))
+                            new_cmd_set = new_cmd_set.replace(f"{{{axis}}}", "{v}")
+                        for k, val in (wc.fill_params or {}).items():
+                            new_cmd_set = new_cmd_set.replace(f"{{{k}}}", str(val))
+                        new_write_cmds.append(wc.model_copy(update={
+                            "cmd_set":     new_cmd_set,
+                            "figure_axis": entry.figure_axis,
+                            "unit":        entry.unit,
+                            "needs_fix":   "",
+                        }))
                 else:
                     new_write_cmds.append(wc)
 
