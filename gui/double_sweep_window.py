@@ -35,6 +35,7 @@ from core.data_saver import DataSaver
 from core.second_channel_worker import SecondChannelWorker, SecondChannelRequest
 from core.sweep_worker import SweepWorker, StepRequest, StepResult
 from gui.alarm_config_window import MeasCondPanel, AlarmConfigWindow
+from gui.glow_frame import GlowFrame, glow_color
 
 if TYPE_CHECKING:
     from gui.main_window import MainWindow
@@ -288,11 +289,7 @@ class DoubleSweepWindow(QDialog):
     def _build_ui(self):
         dialog_layout = QVBoxLayout(self)
         dialog_layout.setContentsMargins(0, 0, 0, 0)
-        self._glow_frame = QFrame()
-        self._glow_frame.setObjectName("dsGlowFrame")
-        self._glow_frame.setStyleSheet(
-            "QFrame#dsGlowFrame { border: 3px solid transparent; border-radius: 6px; }"
-        )
+        self._glow_frame = GlowFrame("dsGlowFrame")
         dialog_layout.addWidget(self._glow_frame)
 
         # 좌/우 2-패널 레이아웃
@@ -2187,20 +2184,11 @@ class DoubleSweepWindow(QDialog):
 
     def _update_glow(self):
         self._glow_phase += 0.07
-        intensity = (math.sin(self._glow_phase) + 1) / 2
-        alpha = int(80 + intensity * 140)
-        green = int(140 + intensity * 80)
-        self._glow_frame.setStyleSheet(
-            f"QFrame#dsGlowFrame {{"
-            f"border: 3px solid rgba(40, {green}, 70, {alpha});"
-            f"border-radius: 6px; }}"
-        )
+        self._glow_frame.set_glow(glow_color(self._glow_phase))
 
     def _stop_glow(self):
         self._glow_timer.stop()
-        self._glow_frame.setStyleSheet(
-            "QFrame#dsGlowFrame { border: 3px solid transparent; border-radius: 6px; }"
-        )
+        self._glow_frame.set_glow(None)
 
     # ------------------------------------------------------------------
     # Window lifecycle

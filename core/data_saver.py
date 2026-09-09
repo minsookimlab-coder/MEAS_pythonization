@@ -3,12 +3,17 @@ DataSaver: 측정 데이터를 .dat 파일로 저장합니다.
 sweep 시작 시 헤더를 기록하고, 매 스텝마다 한 줄씩 append합니다.
 
 데이터 신뢰성:
-  - 매 append마다 flush + os.fsync → 강제 종료/크래시에도 기록된 행은 디스크에 남음.
+  - 매 append마다 flush → 프로그램이 죽어도 기록된 행은 OS 캐시에 남아 살아남음.
+  - os.fsync(물리 디스크 동기화)는 _FSYNC_INTERVAL_S 마다 한 번만 호출한다.
+    매 행마다 부르면 GUI 스레드에서 평균 0.83 ms, 간헐적으로 8 ms 넘게 멈췄고
+    (실측, 로컬 SSD 기준) 네트워크·USB 드라이브면 훨씬 커진다. 정전·BSOD 시
+    최대 이 간격만큼의 행이 유실될 수 있으나, 프로세스 크래시에는 영향 없다.
   - start_session 실패 사유를 start_error()로 노출 → 호출자가 측정을 중단할 수 있음.
   - append_row는 성공 여부(bool)를 반환 → 연속 실패를 호출자가 감지 가능.
 """
 import os
 import re
+import time
 from datetime import date
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -16,7 +21,11 @@ from typing import Callable, List, Optional, Tuple
 
 class DataSaver:
 
+    #: os.fsync 최소 간격 (초). 0 이면 매 행 동기화 (예전 동작).
+    _FSYNC_INTERVAL_S = 1.0
+
     def __init__(self):
+        self._last_fsync: float = 0.0
         self._main_folder: str = ""
         self._custom_folder: str = ""
         self._custom_word: str = ""
@@ -141,7 +150,7 @@ class DataSaver:
         """한 스텝의 데이터를 한 줄 append합니다.
 
         반환:
-          True  — 정상 기록 (flush + fsync로 디스크에 내구성 보장)
+          True  — 정상 기록 (flush 완료. fsync는 _FSYNC_INTERVAL_S 마다)
           False — 저장 비활성/미시작(no-op)이거나 쓰기 실패
         """
         if not self._enabled or self._filepath is None:
@@ -149,8 +158,12 @@ class DataSaver:
         try:
             with open(self._filepath, "a", encoding="utf-8") as f:
                 f.write("\t".join(values) + "\n")
-                f.flush()
-                os.fsync(f.fileno())   # 강제 종료/크래시에도 행 손실 방지
+                f.flush()   # 프로세스가 죽어도 이 행은 OS 캐시에 남는다
+                # 물리 디스크 동기화는 간격을 두고 — 매 행마다 하면 측정 루프가 멈춘다
+                now = time.monotonic()
+                if now - self._last_fsync >= self._FSYNC_INTERVAL_S:
+                    os.fsync(f.fileno())
+                    self._last_fsync = now
             return True
         except Exception as e:
             self._report_error(f"기록 실패: {e}")

@@ -28,6 +28,7 @@ from config.app_config import AppConfig, load_app_config, save_app_config
 from config.config_models import MainUIProfile, DerivConfigData
 from gui.console_handler import ConsoleCommand, ConsoleCommandHandler
 from gui.debug_window import DebugWindow
+from gui.glow_frame import GlowFrame, glow_color
 from gui.sweep_array_window import SweepArrayWindow
 
 _MONO = QFont("Consolas", 10)
@@ -261,11 +262,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(act_mfli)
 
     def _setup_ui(self):
-        self._glow_frame = QFrame()
-        self._glow_frame.setObjectName("glowFrame")
-        self._glow_frame.setStyleSheet(
-            "QFrame#glowFrame { border: 3px solid transparent; border-radius: 6px; }"
-        )
+        self._glow_frame = GlowFrame("glowFrame")
         self.setCentralWidget(self._glow_frame)
 
         outer = QVBoxLayout(self._glow_frame)
@@ -846,20 +843,11 @@ class MainWindow(QMainWindow):
 
     def _update_glow(self):
         self._glow_phase += 0.07
-        intensity = (math.sin(self._glow_phase) + 1) / 2
-        alpha = int(80 + intensity * 140)
-        green = int(140 + intensity * 80)
-        self._glow_frame.setStyleSheet(
-            f"QFrame#glowFrame {{"
-            f"border: 3px solid rgba(40, {green}, 70, {alpha});"
-            f"border-radius: 6px; }}"
-        )
+        self._glow_frame.set_glow(glow_color(self._glow_phase))
 
     def _stop_glow(self):
         self._glow_timer.stop()
-        self._glow_frame.setStyleSheet(
-            "QFrame#glowFrame { border: 3px solid transparent; border-radius: 6px; }"
-        )
+        self._glow_frame.set_glow(None)
 
     # ------------------------------------------------------------------
     # Parameter Manager
