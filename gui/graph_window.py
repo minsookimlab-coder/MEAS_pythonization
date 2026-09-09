@@ -626,6 +626,7 @@ class GraphPanel(QFrame):
         self._pi.getAxis("left").enableAutoSIPrefix(False)
         self._pi.addLegend(offset=(10, 10))
         root.addWidget(self._pw)
+        self._setup_hover_readout()
 
         # ── Right-click context menu (added to pyqtgraph's ViewBox menu) ─────
         vb = self._pi.getViewBox()
@@ -1308,6 +1309,117 @@ class GraphPanel(QFrame):
         if not pixmap.save(path, "PNG"):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(None, "Save Failed", f"Could not save image to:\n{path}")
+
+    # ------------------------------------------------------------------
+    # Hover readout — 측정 포인트에 마우스를 올리면 값 표시
+    # ------------------------------------------------------------------
+
+    #: 커서에서 이 픽셀 반경 안에 점이 있어야 표시한다.
+    _HOVER_RADIUS_PX = 14
+
+    def _setup_hover_readout(self) -> None:
+        """마우스 위치에서 가장 가까운 측정 포인트의 값을 띄운다.
+
+        비용은 마우스가 플롯 위에 있을 때만 든다. SignalProxy 로 초당 30회로 묶어
+        (마우스 이동 신호는 그보다 훨씬 자주 온다) 매번 하는 일은 표시 버퍼
+        (화면 폭 만큼, 보통 1000점 미만) 에 대한 numpy 거리 계산 한 번뿐이다.
+        측정 루프(append_point)나 렌더 타이머에는 아무것도 더하지 않는다.
+        """
+        self._hover_marker = pg.ScatterPlotItem(
+            size=11, pen=pg.mkPen("#d0021b", width=2), brush=pg.mkBrush(255, 255, 255, 0))
+        self._hover_marker.setZValue(100)
+        self._hover_marker.hide()
+        self._pi.addItem(self._hover_marker, ignoreBounds=True)
+
+        self._hover_text = pg.TextItem(anchor=(0, 1), color="#111111",
+                                       fill=pg.mkBrush(255, 255, 255, 225),
+                                       border=pg.mkPen("#888888"))
+        self._hover_text.setZValue(101)
+        self._hover_text.hide()
+        self._pi.addItem(self._hover_text, ignoreBounds=True)
+
+        self._hover_proxy = pg.SignalProxy(
+            self._pw.scene().sigMouseMoved, rateLimit=30, slot=self._on_hover)
+        self._pw.scene().sigMouseHover.connect(self._on_scene_hover)
+
+    def _on_scene_hover(self, items) -> None:
+        # 플롯 밖으로 나가면 표시를 지운다
+        if not items:
+            self._hide_hover()
+
+    def _hide_hover(self) -> None:
+        if getattr(self, "_hover_marker", None) is not None:
+            self._hover_marker.hide()
+            self._hover_text.hide()
+
+    def _hover_sources(self):
+        """(이름, 표시버퍼 dict, 뷰박스, y 단위접두어, y 키) 목록.
+
+        메인 Y 와 Extra Y 를 같은 방식으로 훑기 위한 어댑터. Extra Y 는 자기
+        축(vb)을 쓸 수 있으므로 뷰박스를 따로 들고 다닌다.
+        """
+        main_vb = self._pi.getViewBox()
+        out = [(self._y_key or "Y", self._disp_bufs, main_vb, self._y_pfx, self._y_key)]
+        for state in self._extra_ys:
+            if not state.key or not state.disp_bufs:
+                continue
+            vb = main_vb if state.uses_main_vb else state.vb
+            pfx = self._y_pfx if state.uses_main_vb else getattr(state, "y_pfx", "")
+            out.append((state.key, state.disp_bufs, vb, pfx, state.key))
+        return out
+
+    def _on_hover(self, evt) -> None:
+        pos = evt[0]
+        if not self._pi.sceneBoundingRect().contains(pos):
+            self._hide_hover()
+            return
+
+        best = None   # (픽셀거리^2, x, y, phase, y_key, y_pfx, vb)
+        for _name, bufs, vb, y_pfx, y_key in self._hover_sources():
+            try:
+                mp = vb.mapSceneToView(pos)
+                px, py = vb.viewPixelSize()
+            except Exception:
+                continue
+            if not px or not py:
+                continue
+            mx, my = mp.x(), mp.y()
+            for phase, buf in (bufs or {}).items():
+                if buf is None or buf._n <= 0:
+                    continue
+                xs, ys = buf.get()
+                if len(xs) == 0:
+                    continue
+                dx = (xs - mx) / px
+                dy = (ys - my) / py
+                d2 = dx * dx + dy * dy
+                i = int(np.argmin(d2))
+                if best is None or d2[i] < best[0]:
+                    best = (float(d2[i]), float(xs[i]), float(ys[i]),
+                            phase, y_key, y_pfx, vb)
+
+        if best is None or best[0] > self._HOVER_RADIUS_PX ** 2:
+            self._hide_hover()
+            return
+
+        _d2, x, y, phase, y_key, y_pfx, vb = best
+        self._hover_marker.setData([x], [y])
+        self._hover_marker.show()
+        self._hover_text.setText(self._hover_label(x, y, phase, y_key, y_pfx))
+        self._hover_text.setPos(x, y)
+        self._hover_text.show()
+
+    def _hover_label(self, x: float, y: float, phase: str,
+                     y_key: str, y_pfx: str) -> str:
+        """표시 문자열. 값은 화면에 그려진 것과 같은 단위(SI 접두어 포함)로 쓴다."""
+        x_lbl, x_unit = self._store.col_meta(self._x_key) if self._x_key else ("X", "")
+        y_lbl, y_unit = self._store.col_meta(y_key) if y_key else ("Y", "")
+        lines = []
+        if phase and phase != "_":
+            lines.append(phase)
+        lines.append(f"{x_lbl}: {x:.6g} {self._x_pfx}{x_unit}".rstrip())
+        lines.append(f"{y_lbl}: {y:.6g} {y_pfx}{y_unit}".rstrip())
+        return "\n".join(lines)
 
     def clear_curves(self) -> None:
         self._stop_regression()
