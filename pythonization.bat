@@ -27,7 +27,7 @@ call ".venv\Scripts\activate.bat"
 
 :: Install / upgrade packages
 echo [*] Installing packages...
-pip install --upgrade --quiet PySide6 pyvisa numpy pyqtgraph pydantic PyYAML
+pip install --upgrade --quiet PySide6 pyvisa numpy pyqtgraph pydantic PyYAML truststore certifi
 if errorlevel 1 (
     echo [ERROR] Package installation failed. Check your internet connection.
     pause

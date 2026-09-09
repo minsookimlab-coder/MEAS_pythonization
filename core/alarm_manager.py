@@ -4,6 +4,8 @@ AlarmManager: Double Sweep 알람 발생 시 사운드 재생 및 이메일 전�
 import threading
 from typing import Dict, List, Optional, TYPE_CHECKING  # noqa: F401
 
+from core.net_ssl import explain_ssl_error, make_ssl_context
+
 if TYPE_CHECKING:
     from config.config_models import AlarmConfig, AlarmTrigger
 
@@ -125,9 +127,9 @@ class AlarmManager:
     @staticmethod
     def _tg_ssl_ctx():
         # 검증된 TLS 컨텍스트. (예전엔 CERT_NONE+check_hostname=False로 인증서 검증을
-        # 꺼서 봇 토큰이 MITM에 노출됐다. api.telegram.org는 공인 CA 인증서라 검증이 정상.)
-        import ssl
-        return ssl.create_default_context()
+        # 꺼서 봇 토큰이 MITM에 노출됐다. 검증은 켜둔 채 검증 주체만 OS 로 옮긴다 —
+        # 이유는 core/net_ssl.py 참고.)
+        return make_ssl_context()
 
     def _send_telegram(self, token: str, chat_id: str, reason: str) -> None:
         try:
@@ -166,7 +168,7 @@ class AlarmManager:
                     return None
                 return str(result)
         except Exception as e:
-            return str(e)
+            return explain_ssl_error(e) or str(e)
 
     def _send_email(self, cfg: "AlarmConfig", reason: str) -> None:
         try:
@@ -185,7 +187,7 @@ class AlarmManager:
 
             with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=15) as s:
                 s.ehlo()
-                s.starttls()
+                s.starttls(context=make_ssl_context())
                 s.ehlo()
                 if cfg.smtp_user and cfg.smtp_password:
                     s.login(cfg.smtp_user, cfg.smtp_password)
