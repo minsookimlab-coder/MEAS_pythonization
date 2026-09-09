@@ -2,6 +2,83 @@
 
 ---
 
+## v1.07.2 — 2026-09-09 (성능 · 버그픽스 · 저장소 정리)
+
+### 측정 중 GUI 지연
+
+- **[치명] 측정 내내 테두리 glow 애니메이션이 GUI 스레드의 25~43%를 먹고 있었다** —
+  `gui/main_window.py` 의 `_glow_frame` 은 **centralWidget** 이라 그 안에 UI 전체(자식
+  위젯 369개)가 들어 있는데, `_update_glow()` 가 30 ms 마다 `setStyleSheet()` 을 다시
+  지정했다. Qt 는 스타일시트가 바뀌면 그 위젯과 **모든 자식**의 스타일을 재계산·polish
+  한다. 실측 갱신 7.55 ms + 리페인트까지 12.89 ms 로, 30 ms 주기 중 최대 12.89 ms 를
+  애니메이션이 차지했다. 스텝 처리 타이머와 glow 타이머가 독립이라 두 틱이 겹칠 때만
+  스텝이 밀려 **'간헐적'으로만** 드러났다.
+  → 공용 위젯 `gui/glow_frame.py` 를 신설. 스타일시트는 최초 1회(투명 테두리로 여백
+  확보)만 쓰고 빛나는 테두리는 `paintEvent` 에서 직접 그린다. 갱신 시 인자 없는
+  `update()` 는 자식 전부를 다시 그리므로 **테두리 띠 영역만** 무효화한다.
+  `12.89 ms → 0.33 ms` (39배). 같은 패턴이던 `gui/double_sweep_window.py` 도 함께 교체.
+- **Sweep/Console 로그가 버퍼 상한에 닿으면 한 줄당 3.2 ms** — `gui/debug_window.py`
+  `_append()` 가 `moveCursor` + `insertHtml` 에 직접 만든 트림 루프까지 돌렸다.
+  로그가 짧을 땐 0.36 ms 지만 상한(2000줄) 도달 후 평균 3.19 ms, 최대 15.2 ms.
+  Verbose 를 켜면 매 스텝 호출된다. → `QTextDocument.setMaximumBlockCount()` 로 트림을
+  맡기고 `append()` 한 번으로 대체. `3.19 ms → 0.029 ms` (110배). `_trim()` 과
+  `_line_counts` 장부 제거.
+- **`.dat` 한 줄마다 `os.fsync()` 로 물리 디스크 동기화** — `core/data_saver.py`
+  `append_row()`. 로컬 SSD 에서도 평균 0.83 ms, 최대 7.9 ms 이고 네트워크·USB 드라이브면
+  훨씬 커진다. → `flush()` 는 매 행 유지(프로세스가 죽어도 OS 캐시에 남는다),
+  `fsync` 만 `_FSYNC_INTERVAL_S`(1초) 간격으로. `0.83 ms → 0.27 ms`.
+  **주의:** 정전·BSOD 시 최대 1초분 행이 유실될 수 있다(프로세스 크래시는 영향 없음).
+
+30 ms 주기당 GUI 점유 **43% → 1.1%**. 측정값은 헤드리스로 렌더링을 이미지로 떠서 확인
+(glow 켤 때 테두리 픽셀만 바뀌고 내부는 그대로, 끄면 복귀).
+
+### VNA
+
+- **[중요] VNA Config 의 [Save & Apply] 가 VNA Control 설정을 통째로 되돌렸다** —
+  `gui/vna_config_window.py` 의 `VnaConfigWindow` 는 보관형인데 **생성 시 한 번만**
+  디스크를 읽었고(`set_config_path()` 는 경로가 바뀔 때만 재로드), `_on_save()` 는
+  `self._cfg` **전체**를 파일에 쓴다. Config 를 열어둔 채 Control 에서 값을 바꿔 저장한
+  뒤 Config 에서 저장하면 옛 스냅샷이 덮어썼다. 되돌아가는 값은 섹션 명령 체크박스만이
+  아니라 명령 입력값·단위·sweep role(start/stop/n_points)·저장 폴더·플롯 설정·acquire
+  sweep 범위·time mode 전부다.
+  → `reload_from_disk()` 신설, `set_config_path()` 는 항상 재로드, `showEvent` 에서도
+  재로드. `gui/vna_window.py:_open_config()` 는 Config 를 띄우기 전에 `_save_ui_state()`
+  로 현재 상태를 파일에 먼저 반영한다. 재로드 시 `_cur_sec_idx` 가 −1 로 남아 **선택된
+  섹션의 편집분이 저장에서 통째로 누락되던** 문제(같은 행이면 `setCurrentRow` 가 신호를
+  내지 않음)도 함께 수정.
+- **VNA Config 의 Sections 탭에서 On/Off 버튼 제거** — `VnaCommandEntry.enabled` 라는
+  **한 개의 필드**를 Config 의 [On/Off] 버튼과 Control 의 체크박스가 각자 고치고 있었다.
+  이제 섹션 명령의 활성/비활성은 **VNA Control 체크박스가 단독 소유**한다. 토글할 수
+  없는 목록에서는 회색·`OFF` 표시도 하지 않는다(끌 수 없는 자리에 OFF 만 보이면 어디서
+  켜는지 알 수 없다). **Acquire 탭의 Start/Wait/Read 는 그대로 유지** — 이쪽은 Control
+  에 체크박스가 없어 Config 가 유일한 토글이다.
+- **VNA Control 창이 최대화 상태로 열린다** — `gui/vna_window.py:1279`. `resize(1500,
+  780)` 은 최대화를 푼 뒤의 복원 크기로 남겼다. `setWindowFlags()` 가 window state 를
+  초기화할 수 있어 반드시 그 뒤에서 지정한다.
+
+### 저장소 정리
+
+- **`.gitignore` 신설** — 원래 아예 없어서 `.pyc` **172개**가 추적되고 있었고 `git status`
+  가 매번 수십 줄로 덮였다. 추적 해제(디스크 파일은 유지).
+- **`pythonization/` · `tests/` 껍데기 삭제** — `refactor/restructure` 브랜치에서
+  전환할 때 남은 잔해. `.py` 파일 0개에 `__pycache__` 106개와 루트와 내용이 동일한
+  `app_config.yaml` 1개뿐이었다. 실제 소스는 해당 브랜치에 그대로 있다.
+- `_diff_vna.txt`(94 KB `git diff` 덤프) 삭제, `build/`(PyInstaller 중간 산출물) 추적 해제.
+- `version_info.txt` 를 PATCH_NOTES 버전에 맞췄다 — `1.0.0.0` 에 멈춰 있어 exe 버전이
+  실제 버전과 달랐다.
+
+### 문서
+
+- **`READ_FIRST_BEFORE_CODING.md` 신설** — AI 코딩 도구로 작업하기 전에 읽는 지침.
+  ① 수정사항은 PATCH_NOTES 에 반드시 기입 ② VISA 명령어는 라이브러리에 등록한 뒤에만
+  사용(코드에 문자열 박기 금지, `InstrumentSession` 이 유일한 I/O 창구, 장비 고유
+  프로토콜은 `driver/` 안에서만) ③ 이를 어기는 요구가 오면 그대로 따르지 말고 더 나은
+  설계를 먼저 제안.
+- **`CLAUDE.md` 신설** — 위 지침의 요약. Claude Code 가 매 세션 자동으로 읽는 파일이라
+  지침이 자동 적용되게 하는 진입점이다.
+
+---
+
 ## v1.07.1 — 2026-07-30 (버그픽스)
 
 - **[치명] 장시간 측정 중 워커가 조용히 멈추던 race 수정** — `gui/mfli_window.py` follow 폴 루프와
