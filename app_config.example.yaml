@@ -1,0 +1,23 @@
+# app_config.yaml 예시 — 실제 파일은 git 에 추적하지 않는다 (규칙 3).
+#
+# 프로그램 폴더의 app_config.yaml 이 없으면 이 기본값으로 시작하고,
+# Settings -> Config 에서 저장하면 자동으로 만들어진다.
+#
+# alarm_delivery 의 smtp_password / telegram_bot_token 은 자격증명이므로
+# 절대 커밋하지 않는다. data_dir 가 비면 ~/Documents/pythonization/settings 를 쓴다.
+#
+alarm_delivery:
+  email_to: ''
+  smtp_host: ''
+  smtp_password: ''
+  smtp_port: 587
+  smtp_user: ''
+  telegram_bot_token: ''
+  telegram_chat_id: ''
+  telegram_contacts: []
+  use_email: false
+  use_sound: true
+  use_telegram: false
+data_dir: ''
+global_threshold: 1.0e+37
+parallel_measurement: false

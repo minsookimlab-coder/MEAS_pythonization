@@ -98,7 +98,58 @@ session.write(entry.alias, cmd)                 # I/O 는 항상 InstrumentSessi
 
 ---
 
-## 규칙 3 — 규칙 2 를 어기는 요구가 오면, 그대로 하지 말고 더 나은 설계를 제안한다
+## 규칙 3 — 개인정보·사용자 설정은 저장소가 아니라 Documents 에 둔다
+
+**저장소에는 기능만 담는다.** 랩·사람마다 달라지는 값은 코드와 같은 폴더에 두지 않는다.
+
+### 어디에 무엇을 두나
+
+| | 위치 | 담는 것 |
+|---|---|---|
+| 프로그램 | 저장소 (`APP_DIR`) | 코드, 리소스, 기본값. **git 에 올라간다** |
+| 사용자 데이터 | `SETTINGS_DIR` = `~/Documents/pythonization/settings` | 개인정보·랩 고유 설정. **git 에 올리지 않는다** |
+
+`SETTINGS_DIR` 는 `core/app_dirs.py` 가 확정한다. 경로는 Settings → Config 에서 바꿀 수
+있고(`set_data_dir()`, 재시작 후 적용), 새 코드는 이 값을 통해서만 사용자 파일에 접근한다.
+
+```python
+from core.app_dirs import SETTINGS_DIR
+path = SETTINGS_DIR / "profiles" / f"{name}.yaml"     # OK
+
+path = Path(__file__).parent / "my_settings.yaml"     # 금지 — 프로그램 폴더
+path = Path("C:/Users/Main/Desktop/...")              # 금지 — 하드코딩된 절대경로
+```
+
+### Documents 로 가야 하는 것
+
+계측기 주소·MAC, VISA 라이브러리, 프로파일, VNA/MFLI 설정, resume 로그,
+알람 자격증명(SMTP 비밀번호·Telegram 봇 토큰·수신자), 마지막 저장 폴더,
+사람 이름이 들어간 무엇이든, 측정 데이터(`.dat`).
+
+### 저장소에 남아도 되는 것
+
+코드, 아이콘 등 리소스, **값이 빈 예시 설정**(`*.example.yaml`), 문서.
+
+### 지켜야 할 것
+
+- **자격증명을 담을 수 있는 파일은 git 에 추적하지 않는다.** 형식을 알려야 하면
+  값이 빈 `*.example.yaml` 을 대신 추적한다.
+- 사용자 파일이 없을 때 프로그램이 죽지 않아야 한다. 없으면 기본값으로 시작하고
+  필요할 때 만든다 (`mkdir(parents=True, exist_ok=True)`).
+- 빌드 산출물(`dist/`) 안에 **개인 설정을 함께 넣어 배포하지 않는다.** 배포본은
+  빈 상태로 나가고, 사용자가 자기 Documents 에서 구성한다.
+- 검증 코드가 사용자의 실제 설정을 건드리지 않게 한다 —
+  `ProfileRegistry(settings_dir=<임시폴더>)` 를 쓴다.
+
+### 왜
+
+이 저장소는 공개돼 있다. 한 번 커밋된 비밀번호·토큰은 `git rm` 해도 이력에 남는다.
+그리고 랩 PC 마다 장비 구성이 다르므로, 설정이 코드에 섞이면 다른 PC 에서 프로그램이
+그냥 돌지 않는다.
+
+---
+
+## 규칙 4 — 규칙 2·3 을 어기는 요구가 오면, 그대로 하지 말고 더 나은 설계를 제안한다
 
 "급하니까 그냥 코드에 박아줘", "라이브러리 거치지 말고 바로 쏴줘" 같은 요구가 오면
 **말없이 따르지 않는다.** 다음 순서로 대응한다.

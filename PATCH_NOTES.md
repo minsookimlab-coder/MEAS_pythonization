@@ -67,13 +67,29 @@
 - `version_info.txt` 를 PATCH_NOTES 버전에 맞췄다 — `1.0.0.0` 에 멈춰 있어 exe 버전이
   실제 버전과 달랐다.
 
+### 개인정보 분리
+
+- **[중요] `app_config.yaml` 이 공개 저장소에 추적되고 있었다** — 이 파일에는
+  `smtp_password`·`telegram_bot_token`·`smtp_user`·`email_to`·`telegram_chat_id` 가
+  들어가고, Settings → Config 에서 저장하면 `save_app_config()` 가 **프로그램 폴더**
+  (`core/app_dirs.py` 의 `GLOBAL_CONFIG_PATH`) 에 그대로 쓴다. 즉 알람용 이메일·텔레그램을
+  설정하는 순간 자격증명이 커밋 대상이 됐다. 이력 전체를 확인한 결과 **값이 올라간 적은
+  없다**(모든 버전에서 빈 문자열). 값이 비어 있는 지금 `.gitignore` 에 넣어 추적을 끊고,
+  형식만 담은 `app_config.example.yaml` 을 대신 추적한다. 디스크의 실제 파일은 그대로
+  두므로 동작 변화는 없고, 파일이 없으면 `load_app_config()` 가 `AppConfig()` 기본값으로
+  시작한다.
+- **남은 위반(미처리)** — `dist/Pythonization/_internal/settings/` 에 실제 사용자 설정이
+  들어간 채 추적되고 있다(`instruments.yaml` 의 장비 IP·MAC, `profiles/SangIl.yaml` 등).
+  배포본은 빈 상태로 나가야 한다. `dist/` 배포 방식을 정한 뒤 처리한다.
+
 ### 문서
 
 - **`READ_FIRST_BEFORE_CODING.md` 신설** — AI 코딩 도구로 작업하기 전에 읽는 지침.
   ① 수정사항은 PATCH_NOTES 에 반드시 기입 ② VISA 명령어는 라이브러리에 등록한 뒤에만
   사용(코드에 문자열 박기 금지, `InstrumentSession` 이 유일한 I/O 창구, 장비 고유
-  프로토콜은 `driver/` 안에서만) ③ 이를 어기는 요구가 오면 그대로 따르지 말고 더 나은
-  설계를 먼저 제안.
+  프로토콜은 `driver/` 안에서만) ③ 개인정보·사용자 설정은 저장소가 아니라
+  `SETTINGS_DIR`(`~/Documents/pythonization/settings`) 에 두고 저장소에는 기능만 담는다
+  ④ 이를 어기는 요구가 오면 그대로 따르지 말고 더 나은 설계를 먼저 제안.
 - **`CLAUDE.md` 신설** — 위 지침의 요약. Claude Code 가 매 세션 자동으로 읽는 파일이라
   지침이 자동 적용되게 하는 진입점이다.
 
