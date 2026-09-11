@@ -686,9 +686,17 @@ class MainWindow(QMainWindow):
             "(sweep channel + active measurements + second channel if DS open)"
         )
         btn_quick_conn.clicked.connect(self._on_connection_test)
+        btn_quick_reconn = QPushButton("장비 재연결")
+        btn_quick_reconn.setToolTip(
+            "활성 기기의 세션을 끊고 다시 연결합니다.\n"
+            "우리 쪽 세션이 꼬였을 때 쓰는 수단이며, 다른 프로그램이 잡은 세션은\n"
+            "여기서 끊을 수 없습니다 (장비 전면/웹의 LAN Reset 등이 필요)."
+        )
+        btn_quick_reconn.clicked.connect(self._on_reconnect_instruments)
         quick_row.addWidget(btn_quick_graph)
         quick_row.addWidget(btn_quick_ds)
         quick_row.addWidget(btn_quick_conn)
+        quick_row.addWidget(btn_quick_reconn)
         layout.addLayout(quick_row)
 
         # --- Save Settings panel ---
@@ -1012,6 +1020,64 @@ class MainWindow(QMainWindow):
 
         return aliases
 
+    def _connection_hint(self, alias: str, exc: Exception) -> str:
+        """연결 실패를 '원인 + 이 인터페이스에서 할 수 있는 조치' 로 풀어 준다."""
+        from core.visa_errors import connection_failure_hint
+        cfg = self._registry.get_config(alias)
+        return connection_failure_hint(
+            exc, alias=alias,
+            interface_type=getattr(cfg, "interface_type", "") if cfg else "",
+            address=getattr(cfg, "address", "") if cfg else "",
+            port=getattr(cfg, "port", None) if cfg else None,
+        )
+
+    def _on_reconnect_instruments(self):
+        """활성 장비의 세션을 끊고 다시 연결한다.
+
+        우리 쪽 세션이 꼬였을 때(응답은 오는데 상태가 이상하거나, timeout 이라
+        _evict_broken 이 세션을 유지한 경우) 쓰는 수동 수단이다.
+        남의 프로그램이 잡은 세션은 여기서 끊을 수 없다 — 그건 장비 쪽 조치가 필요하다.
+        """
+        if self._running:
+            QMessageBox.warning(self, "측정 중",
+                                "측정 중에는 재연결할 수 없습니다. 먼저 중단하세요.")
+            return
+        aliases = self.collect_active_aliases(include_second=True)
+        if not aliases:
+            QMessageBox.information(self, "장비 재연결", "활성화된 기기가 없습니다.")
+            return
+
+        results = []
+        for alias in aliases:
+            was_open = self._session.is_open(alias)
+            try:
+                if was_open:
+                    self._session.close(alias)
+                self._session.open(alias)
+                results.append((True, alias,
+                                "재연결됨" if was_open else "새로 연결됨"))
+                self._log(f"  [{alias}] 재연결 완료.", color="#4ec9b0")
+            except Exception as exc:
+                hint = self._connection_hint(alias, exc)
+                results.append((False, alias, hint))
+                self._log(f"  [{alias}] 재연결 실패.", color="#f44747")
+                self._log_sweep(f"  ✗ [{alias}] 재연결 실패\n{hint}",
+                                color="#f44747")
+
+        lines = []
+        for ok, alias, msg in results:
+            icon = "✓" if ok else "✗"
+            if ok:
+                lines.append(f"{icon}  {alias}\n    {msg}")
+            else:
+                ind = "\n".join("    " + ln for ln in msg.splitlines())
+                lines.append(f"{icon}  {alias}\n{ind}")
+        body = "\n\n".join(lines)
+        if all(ok for ok, _a, _m in results):
+            QMessageBox.information(self, "장비 재연결 — 완료", body)
+        else:
+            QMessageBox.warning(self, "장비 재연결 — 일부 실패", body)
+
     def _run_connection_test(self, include_second: bool = False,
                              show_success: bool = True,
                              force_idn: bool = False) -> bool:
@@ -1044,8 +1110,7 @@ class MainWindow(QMainWindow):
                     idn = self._session.query_once(alias, "*IDN?")
                     results[alias] = (True, idn.strip())
                 except Exception as exc:
-                    from core.visa_errors import humanize_error
-                    results[alias] = (False, humanize_error(exc))
+                    results[alias] = (False, self._connection_hint(alias, exc))
 
         all_ok = all(ok for ok, _ in results.values())
 
@@ -1053,8 +1118,12 @@ class MainWindow(QMainWindow):
             lines = []
             for alias, (ok, msg) in results.items():
                 icon = "✓" if ok else "✗"
-                short = msg if ok else (msg[:200] + ("…" if len(msg) > 200 else ""))
-                lines.append(f"{icon}  {alias}\n    {short}")
+                if ok:
+                    lines.append(f"{icon}  {alias}\n    {msg}")
+                else:
+                    # 실패는 조치 안내까지 그대로 보여 준다 — 잘라내면 쓸모가 없다
+                    ind = "\n".join("    " + ln for ln in msg.splitlines())
+                    lines.append(f"{icon}  {alias}\n{ind}")
             body = "\n\n".join(lines)
             if all_ok:
                 QMessageBox.information(self, "Connection Test — OK", body)
