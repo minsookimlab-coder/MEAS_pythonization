@@ -2278,6 +2278,12 @@ class GraphWindow(QWidget):
     # Redraw ------------------------------------------------------------------
 
     def _redraw_all(self) -> None:
+        # 창이 보이지 않으면 그릴 이유가 없다. 렌더는 GUI 스레드에서 도는데,
+        # 이 스레드가 GIL 을 쥐는 만큼 워커의 VISA 측정 시간이 부풀려진다.
+        # (실측: GUI 부하 80% 에서 write/measure 보고값이 최대 4배)
+        # 데이터는 DataStore 에 계속 쌓이므로 다시 열면 그대로 보인다.
+        if not self.isVisible():
+            return
         for panel in self._panels:
             panel.redraw()
 
@@ -2295,6 +2301,12 @@ class GraphWindow(QWidget):
         if not pixmap.save(path, "PNG"):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Save Failed", f"Could not save image to:\n{path}")
+
+    def showEvent(self, event) -> None:
+        # 숨어 있는 동안 건너뛴 갱신을 다시 열 때 한 번에 반영한다
+        super().showEvent(event)
+        for panel in self._panels:
+            panel.redraw()
 
     def keyPressEvent(self, event) -> None:
         if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
