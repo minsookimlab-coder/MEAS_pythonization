@@ -2508,6 +2508,31 @@ class VnaWindow(QDialog):
     # Acquire
     # ------------------------------------------------------------------
 
+    def _check_param_problems(self) -> bool:
+        """실행할 명령들이 지금 라이브러리로 조립 가능한지 미리 확인한다.
+
+        예전에는 측정이 시작된 뒤 Step 1 에서 'Command format error ... trace2' 로
+        죽었다 — 이미 몇 개는 장비에 보낸 뒤였다. 장비를 건드리기 전에 막는다.
+        """
+        from gui.vna_models import collect_param_problems
+        acq = self._cfg.acquire
+        problems = []
+        for group in (acq.sweep_cmds, acq.start_cmds, acq.wait_cmds, acq.read_cmds):
+            problems += collect_param_problems(self._lib_reg, group)
+        if not problems:
+            return True
+        body = "\n\n".join(problems)
+        self._set_status("명령 파라미터 불일치 — 측정을 시작하지 않았습니다.",
+                         color="#f78166")
+        QMessageBox.warning(
+            self, "VISA Library 변경 — 다시 등록이 필요한 명령",
+            "VISA Library 의 명령이 바뀌어 아래 항목을 그대로 쓸 수 없습니다.\n"
+            "장비를 건드리기 전에 멈췄습니다.\n\n"
+            f"{body}\n\n"
+            "VNA Config 에서 해당 명령을 Edit 해 빠진 값을 채우거나, "
+            "지우고 다시 등록하면 해결됩니다.")
+        return False
+
     def _on_single_acquire(self):
         self._start_acquire(sweep_values=None)
 
@@ -2752,6 +2777,8 @@ class VnaWindow(QDialog):
                        resume_folder: Optional[Path] = None):
         if self._acq_thread and self._acq_thread.isRunning():
             self._set_status("Acquire already running.", color="#888")
+            return
+        if not self._check_param_problems():
             return
 
         is_sweep = sweep_values is not None or ds_plan is not None

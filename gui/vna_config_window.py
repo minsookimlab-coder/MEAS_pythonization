@@ -723,12 +723,20 @@ class _CmdListWidget(QWidget):
         self._refresh()
 
     def _refresh(self):
+        from gui.vna_models import entry_param_problem
         self._lst.clear()
         for e in self._cmds:
-            item = QListWidgetItem(self._label(e))
-            # 여기서 토글할 수 없는 목록은 활성 상태를 표시하지도 않는다 —
-            # 끌 수 없는 자리에 'OFF' 만 보이면 어디서 켜는지 알 수 없다.
-            if self._with_onoff and not e.enabled:
+            # 라이브러리 명령이 바뀌어 지금 조립할 수 없는 항목은 먼저 눈에 띄게 한다.
+            # (예전엔 측정 도중 Step 1 에서 Command format error 로 터졌다)
+            problem = entry_param_problem(self._lib_reg, e)
+            label = ("⚠ " if problem else "") + self._label(e)
+            item = QListWidgetItem(label)
+            if problem:
+                item.setForeground(QColor("#f44747"))
+                item.setToolTip(problem)
+            elif self._with_onoff and not e.enabled:
+                # 여기서 토글할 수 없는 목록은 활성 상태를 표시하지도 않는다 —
+                # 끌 수 없는 자리에 'OFF' 만 보이면 어디서 켜는지 알 수 없다.
                 item.setForeground(QColor("#6e7681"))   # 비활성: 회색 표시
             self._lst.addItem(item)
 

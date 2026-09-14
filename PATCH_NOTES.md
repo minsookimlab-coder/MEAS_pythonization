@@ -2,6 +2,45 @@
 
 ---
 
+## v1.07.12 — 2026-09-14 (버그픽스)
+
+### [치명] VISA Library 를 고치면 VNA 측정이 Step 1 에서 죽던 문제
+
+    Step 1: ValueError: Command format error
+    ':CALC{ch}:PAR{trace}:SEL; :CALC{ch}:FILT:TIME:STAR {start};
+     :CALC{ch}:PAR{trace2}:SEL; ...': 'trace2'
+
+VNA 항목(`VnaCommandEntry`)은 라이브러리 명령을 **이름으로** 참조하고 파라미터 값은
+항목에 따로 저장한다. 라이브러리 쪽 명령에 placeholder 를 추가하면(`{trace2}`) 기존
+항목에는 그 값이 없어 `build_cmd` 가 KeyError 로 죽는다.
+
+문제는 **터지는 시점**이었다. 검증 없이 측정을 시작해 sweep 명령을 순서대로 보내다가
+문제 명령에서 멈추므로, **이미 일부 명령이 장비에 나간 뒤**였다. 장비는 중간 상태로
+남고 측정은 실패한다.
+
+v1.07.3 에서 같은 종류의 문제를 `main_ui` 에 대해 고쳤지만 **VNA 는 범위에서 뺐었다.**
+이번에 VNA 에도 적용한다.
+
+- `gui/vna_models.py` — `entry_param_problem(lib_reg, entry)` / `collect_param_problems()`
+  신설. 라이브러리 템플릿의 placeholder 를 항목의 `params` 로 채울 수 있는지 판정하고,
+  라이브러리에서 명령이 사라진 경우도 잡는다. **판정은 저장하지 않고 그때그때 계산한다**
+  — 저장하면 라이브러리가 바뀐 뒤에도 옛 판정이 남는다(v1.07.6 에서 겪은 문제).
+- `_start_acquire()` 가 시작 직후 `_check_param_problems()` 로 sweep/start/wait/read
+  명령을 전부 검사하고, 문제가 있으면 **장비를 건드리기 전에** 멈추고 무엇이 빠졌는지
+  알린다. Single / Sweep / Double sweep / 재개 경로가 모두 이 함수를 지난다.
+- VNA Config 의 명령 목록에서 문제 항목을 **빨간 ⚠** 로 표시하고 툴팁에 사유를 단다
+  (라이브러리 파라미터 / 이 항목의 값 / 빠진 값).
+
+검증: 실제 프로파일(`gihong`)에서 `VNA_TimeDomainGating_start`·`_stop` 2건을 정확히
+검출. 재현 설정으로 ① 판정 ② 측정 시작 시 **장비에 나간 명령 0개**로 차단 + 경고
+③ 빠진 값을 채우면 정상 실행 ④ Config 목록의 ⚠ 표시와 툴팁 확인.
+
+**참고**: Single Acquire 는 sweep 명령이 user_input 파라미터를 가지면 '값이 없으니
+보내지 않는다' 규칙으로 건너뛰므로 증상이 안 보일 수 있다. 같은 설정이라도 Sweep
+Acquire 에서는 값이 채워져 실행되므로 거기서 터진다.
+
+---
+
 ## v1.07.11 — 2026-09-14 (버그픽스)
 
 ### [치명] 창을 마우스로 끄는 동안 측정이 멈추던 문제

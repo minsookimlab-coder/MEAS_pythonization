@@ -465,3 +465,62 @@ def save_vna_calibration(cfg: VnaCalibrationConfig, path: Optional[Path] = None)
             encoding="utf-8")
     except Exception as e:
         print(f"[vna_calibration] save failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# 라이브러리 변경 추적 — 파라미터가 안 맞는 항목 찾기
+# ---------------------------------------------------------------------------
+
+def entry_param_problem(lib_reg, entry: "VnaCommandEntry") -> str:
+    """이 항목을 지금 라이브러리로 실행할 수 있는지 판정한다.
+
+    VNA 항목은 라이브러리 명령을 **이름으로** 참조하고 파라미터 값은 항목에
+    따로 저장한다. 라이브러리 쪽 명령에 placeholder 가 추가되면 항목에는 그 값이
+    없으므로 `build_cmd` 가 KeyError 로 죽는다. 예전에는 그게 측정 도중
+    'Step 1: ValueError: Command format error ... trace2' 로 터졌다 — 이미 일부
+    명령을 장비에 보낸 뒤였다.
+
+    반환: 문제가 없으면 빈 문자열, 있으면 사용자에게 보일 사유.
+
+    판정은 저장하지 않고 그때그때 계산한다. 저장하면 라이브러리가 바뀐 뒤에도
+    옛 판정이 남아 멀쩡한 항목이 막히는 문제가 생긴다.
+    """
+    import re as _re
+    try:
+        lib = lib_reg.get_library(entry.alias)
+    except Exception:
+        return f"[{entry.alias}] 장비의 VISA Library 를 읽을 수 없습니다."
+    template = get_template(lib, entry)
+    if template is None:
+        return (f"[{entry.alias}] '{entry.description}' 명령을 VISA Library 에서 "
+                f"찾을 수 없습니다 (이름이 바뀌었거나 삭제됨).")
+    need = []
+    seen = set()
+    for name in _re.findall(r"\{(\w+)\}", template):
+        if name not in seen:
+            seen.add(name)
+            need.append(name)
+    have = {p.name for p in entry.params}
+    missing = [n for n in need if n not in have]
+    if not missing:
+        return ""
+    lines = [
+        f"[{entry.alias}] '{entry.description}' — 라이브러리 명령의 파라미터가 "
+        f"늘어 이 항목을 그대로 쓸 수 없습니다.",
+        "  라이브러리: " + ", ".join("{" + n + "}" for n in need),
+        "  이 항목   : " + (", ".join(sorted(have)) or "(없음)"),
+        "  빠진 값   : " + ", ".join("{" + n + "}" for n in missing),
+    ]
+    return "\n".join(lines)
+
+
+def collect_param_problems(lib_reg, entries) -> list:
+    """활성 항목들 중 실행할 수 없는 것들의 사유 목록."""
+    out = []
+    for entry in entries or []:
+        if not getattr(entry, "enabled", True):
+            continue
+        why = entry_param_problem(lib_reg, entry)
+        if why:
+            out.append(why)
+    return out
