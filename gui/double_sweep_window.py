@@ -1671,7 +1671,7 @@ class DoubleSweepWindow(QDialog):
     def _on_advance_timeout(self, msg: str):
         """second advance 워치독 타임아웃 — 자동재개 없이 즉시 측정 중지 + 알람.
 
-        threshold 미도달(20분, 재전송 1회 후)·feedback 안정화 지연(5분) 모두 여기로 온다.
+        threshold 미도달(1시간, 재전송 1회 후)·feedback 안정화 지연(5분) 모두 여기로 온다.
         comm 오류와 달리 재시도하지 않는다(이미 worker가 재전송을 시도함).
         """
         self._main_win._log(

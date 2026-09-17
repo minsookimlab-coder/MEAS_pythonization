@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 # threshold(목표 도달)까지 너무 오래 걸리면 명령이 무시됐을 가능성을 의심해 1회
 # 재전송 후 다시 대기하고, 그래도 안 되면 실패 처리한다. feedback(안정화) 과정이
 # 너무 오래 지속돼도 실패 처리한다. 실패 시 측정 중지 + 알람.
-_PHASE1_TIMEOUT_S = 20 * 60   # threshold 도달 최대 대기 (재전송 시 1회 더 → 총 최대 40분)
+_PHASE1_TIMEOUT_S = 60 * 60   # threshold 도달 최대 대기 (재전송 시 1회 더 → 총 최대 2시간)
 _PHASE2_TIMEOUT_S = 5 * 60    # feedback 안정화 과정 최대 지속
 
 
@@ -238,7 +238,7 @@ class SecondChannelWorker(QObject):
                 raw = self._session.query(alias, ch.feedback_read_cmd).strip()
                 v_read = _parse_float(raw)
             except Exception as e:
-                # 통신 오류는 20분 워치독까지 묵히지 말고 ~3회 연속이면 끊어,
+                # 통신 오류는 1시간 워치독까지 묵히지 말고 ~3회 연속이면 끊어,
                 # 상위(advance)의 error 경로 → 빠른 자동재개로 보낸다.
                 from core.visa_errors import is_comm_error
                 if is_comm_error(e):
@@ -248,7 +248,7 @@ class SecondChannelWorker(QObject):
                 continue
             comm_fails = 0
             if not math.isfinite(v_read):
-                # 비유한값(NaN/Inf)이 계속 오면 40분 워치독 대신 즉시 명확한 실패로.
+                # 비유한값(NaN/Inf)이 계속 오면 2시간 워치독 대신 즉시 명확한 실패로.
                 nonfinite += 1
                 if nonfinite >= 5:
                     raise SecondAdvanceTimeout(
