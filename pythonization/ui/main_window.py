@@ -1,0 +1,2872 @@
+import math
+import time
+
+from PySide6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QDoubleValidator, QFont, QPainter, QPixmap
+import os
+import subprocess
+from datetime import datetime
+
+from pythonization.measurement.data_saver import DataSaver
+from pythonization.measurement.derivative import (
+    DerivativeChannel,
+    DerivativeConfig,
+    OUTPUT_KEY as _DERIV_KEY,
+    OUTPUT_KEY_2 as _DERIV2_KEY,
+    OUTPUT_KEY_3 as _DERIV3_KEY,
+)
+from pythonization.measurement.metadata import MetaDataManager
+from pythonization.instruments.registry import InstrumentRegistry
+from pythonization.instruments.session import InstrumentSession
+from pythonization.measurement.sweep import SweepConfig, calculate_next_step
+from pythonization.measurement.channel import (
+    TIME_CHANNEL,
+    sweep_channel_from_instantiated,
+)
+from pythonization.measurement.sweep_worker import StepRequest, StepResult, SweepWorker
+from pythonization.instruments.command_library import VisaLibraryRegistry
+from pythonization.profiles.registry import ProfileRegistry
+from pythonization.config.app_config import AppConfig, load_app_config, save_app_config
+from pythonization.config.models import DerivConfigData, MainUIProfile, MeasType
+from pythonization.ui.assets import WHALE_BACKGROUND, asset_path
+from pythonization.ui.panels.console_handler import (
+    ConsoleCommand,
+    ConsoleCommandHandler,
+)
+from pythonization.ui.panels.debug_window import DebugWindow
+from pythonization.ui.panels.sweep_array_window import SweepArrayWindow
+from pythonization.app.logging_setup import get_logger
+from pythonization.instruments.errors import humanize_error, is_comm_error
+from pythonization.measurement.resume_log import ResumeLog, ResumePoint
+from pythonization.ui.dialogs.app_config import ConfigWindow
+from pythonization.ui.dialogs.instrument_settings import InstrumentSettingsUI
+from pythonization.ui.dialogs.meta_data import MetaDataConfigWindow
+from pythonization.ui.dialogs.parameter_manager import ParameterManagerWindow
+from pythonization.ui.dialogs.resume import ResumePickerDialog
+from pythonization.ui.dialogs.visa_library import VisaLibraryWindow
+from pythonization.ui.modules.cycle_double_sweep.window import CycleDoubleSweepWindow
+from pythonization.ui.modules.cycle_sweep.window import CycleSweepWindow
+from pythonization.ui.modules.double_sweep.window import DoubleSweepWindow
+from pythonization.ui.modules.mfli.window import MfliWindow
+from pythonization.ui.modules.vna.window import VnaWindow
+from pythonization.ui.panels.command_window import CommandWindow
+from pythonization.ui.panels.data_window import DataWindow
+from pythonization.ui.panels.graph_window import GraphDataPoint, GraphWindow
+from pythonization.ui.panels.timing_window import TimingWindow
+from pythonization.ui.widgets.glow_frame import GlowFrame, glow_color
+from pythonization.ui.widgets.help_button import make_help_button
+
+_MONO = QFont("Consolas", 10)
+
+_ALIAS_PALETTE = [
+    "#79c0ff",  # blue
+    "#f78166",  # salmon
+    "#ffa657",  # orange
+    "#d2a8ff",  # lavender
+    "#7ee787",  # green
+    "#ff7b72",  # red
+    "#56d364",  # bright green
+    "#a5f3fc",  # cyan
+    "#fde68a",  # yellow
+]
+
+
+class _WhaleBgFrame(QFrame):
+    """배경에 이미지를 반투명하게 채워 그리는 QFrame."""
+    def __init__(self, image_path: str, opacity: float = 0.3, parent=None):
+        super().__init__(parent)
+        self._pixmap = QPixmap(image_path)
+        self._opacity = opacity  # 0.0 ~ 1.0
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._pixmap.isNull():
+            return
+        painter = QPainter(self)
+        painter.setOpacity(self._opacity)
+        scaled = self._pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = (self.width()  - scaled.width())  // 2
+        y = (self.height() - scaled.height()) // 2
+        painter.drawPixmap(x, y, scaled)
+        painter.end()
+
+
+class MainWindow(QMainWindow):
+    """
+    메인 애플리케이션 윈도우.
+    - Sweep 파라미터 입력 및 Start/Stop 제어
+    - 루프 동작 중 테두리 글로우 애니메이션
+    - Debug/SweepArray 는 별도 창으로 분리
+    """
+
+    # Worker 스레드로 step 요청 전달
+    request_step = Signal(object)   # StepRequest
+    # VISA 로그를 메인 스레드로 릴레이 (worker 스레드에서 호출되므로 Signal 경유)
+    _visa_log_relay = Signal(str, str, str, str, object)  # alias, addr, cmd_type, cmd, result
+
+    def __init__(self, profile_registry: ProfileRegistry = None):
+        super().__init__()
+        self.setWindowTitle("Measurement System")
+        self.resize(1120, 660)
+
+        self._app_config: AppConfig = load_app_config()
+        self._init_registries(profile_registry)
+        self._init_measurement_state()
+        self._init_child_window_slots()
+        self._init_worker_thread()
+        self._init_timers()
+        self._init_child_windows()
+
+        self._setup_menu()
+        self._setup_ui()
+
+        self._log("System ready.")
+        self._log("등록된 장비: " + ", ".join(self._registry.list_aliases() or ["(없음)"]))
+
+        # 마지막으로 사용한 프로파일 전체 복원 (sweep params, 폴더, sweep channel 포함)
+        self._apply_active_profile()
+
+    # ── __init__ 의 단계별 초기화 ─────────────────────────────────────────
+
+    def _init_registries(self, profile_registry: ProfileRegistry = None):
+        """설정 저장소와 계측기 세션. 이후 거의 모든 것이 여기에 의존한다."""
+        self._registry = InstrumentRegistry()
+        self._visa_lib_registry = VisaLibraryRegistry()
+        self._session = InstrumentSession(self._registry)
+        self._cmd_handler = ConsoleCommandHandler(self._session)
+        self._param_manager_reg = (profile_registry if profile_registry is not None
+                                   else ProfileRegistry())
+
+    def _init_measurement_state(self):
+        """sweep 진행 상태와 프로파일에서 채워질 항목들."""
+        self._sweep_config = SweepConfig()
+        self._sweep_channel = None
+        self._active_profile: MainUIProfile = MainUIProfile()
+        self._running = False
+        self._loading_profile = False
+        self._sweep_step_count = 0
+        self._tick_start: float = 0.0
+        self._last_write_value: "float | None" = None
+        self._step_context: str = ""   # 마지막 sweep tick 컨텍스트 (오류 시 참조)
+
+        # 프로파일 적용 시 _rebuild_meas_panel 이 채우는 위젯 목록
+        self._meas_checkboxes: list[QCheckBox] = []
+        self._meas_suffix_edits: list = []
+        self._meas_type_combos: list = []
+        self._active_meas_indices: list[int] = []
+        self._alias_color_map: dict = {}
+
+        self._deriv_channel: DerivativeChannel = DerivativeChannel(DerivativeConfig(order=1))
+        self._deriv_channel2: DerivativeChannel = DerivativeChannel(DerivativeConfig(order=2))
+        self._deriv_channel3: DerivativeChannel = DerivativeChannel(DerivativeConfig(order=3))
+
+        self._data_saver = DataSaver()
+        self._data_saver.set_error_callback(
+            lambda msg: self._log(f"  [DataSaver] {msg}", color="#f44747"))
+        self._meta_manager = MetaDataManager(self._session)
+
+        # 그래프는 창이 없어도 계속 쌓아 두었다가 창이 열릴 때 replay 한다
+        self._graph_history: list = []
+        self._graph_columns: list = []
+
+        # 통신 오류 자동 재개
+        self._resume_log = ResumeLog()
+        self._last_step_request = None    # 재개 시 다시 보낼 StepRequest
+        self._auto_retry_used = False     # 연속 자동 재개 1회 제한 (성공 시 리셋)
+
+    def _init_child_window_slots(self):
+        """자식 창은 처음 열 때 만든다 — 여기서는 자리만 비워 둔다."""
+        self._settings_window = None
+        self._visa_lib_window = None
+        self._double_sweep_window = None
+        self._cycle_sweep_window = None
+        self._cycle_double_sweep_window = None
+        self._graph_window = None
+        self._param_manager_window = None
+        self._meta_data_window = None
+        self._command_window = None
+        self._vna_window = None
+        self._mfli_window = None
+        self._config_window = None
+
+    def _init_worker_thread(self):
+        """VISA I/O 를 담당할 워커 스레드.
+
+        워커 → GUI 는 반드시 bound @Slot 으로 연결한다. lambda 에 연결하면 큐잉되지
+        않고 워커 스레드에서 바로 실행돼 QWidget 접근 시 네이티브 크래시가 난다.
+        """
+        self._worker = SweepWorker()
+        self._worker.set_session(self._session)
+        self._worker.set_threshold(self._app_config.global_threshold)
+        self._worker.set_parallel(self._app_config.parallel_measurement)
+
+        self._worker_thread = QThread(self)
+        self._worker.moveToThread(self._worker_thread)
+        self.request_step.connect(self._worker.run_step)
+        self._worker.step_done.connect(self._on_step_done)
+        self._worker.step_error.connect(self._on_step_error)
+        self._worker_thread.start()
+
+    def _init_timers(self):
+        self._glow_phase = 0.0
+        self._glow_timer = QTimer(self)
+        self._glow_timer.setInterval(30)
+        self._glow_timer.timeout.connect(self._update_glow)
+
+        # 스텝 타이머 — time_per_point 마다 한 스텝 (single-shot 재장전)
+        self._sweep_step_timer = QTimer(self)
+        self._sweep_step_timer.setSingleShot(True)
+        # 기본값(CoarseTimer)은 Windows 에서 간격을 최대 5% 조정하고 다른 타이머와
+        # 묶어서 발사한다(coalescing). 렌더 5fps·glow 30ms 와 뭉치면 스텝이 몰려
+        # 나가 측정 주기가 흔들린다. 측정 시퀀스는 일정해야 하므로 정밀 타이머를 쓴다.
+        self._sweep_step_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._sweep_step_timer.timeout.connect(self._sweep_tick)
+
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._auto_resume_step)
+
+    def _init_child_windows(self):
+        """항상 존재하는 보조 창들과 로그 배선."""
+        self._debug_window = DebugWindow(self)
+        self._sweep_status_window = SweepArrayWindow(self)
+        # parent 를 주지 않음 → 독립 top-level → 작업표시줄에 개별 표시
+        self._timing_window = TimingWindow(None)
+        self._data_window = DataWindow(None)
+
+        self._debug_window.set_visa_log_callback(self._session.set_log_enabled)
+        self._debug_window.set_submit_callback(self._handle_command)
+
+        # VISA 로그는 워커 스레드에서도 올라온다 → 릴레이 Signal 을 거쳐
+        # 메인 스레드에서 디버그 창을 갱신한다
+        self._visa_log_relay.connect(self._apply_visa_log)
+        self._session.add_log_callback(self._on_visa_log)
+
+    def _setup_menu(self):
+        menubar = self.menuBar()
+
+        # 단축키는 '창 열기' 전용 — 측정 Start/Stop/Resume에는 의도적으로 부여하지 않음
+        # (키보드 실수로 장비가 구동되는 것을 막기 위함). Ctrl+S는 프로파일 저장이라 회피.
+        settings_menu = menubar.addMenu("Settings")
+        act_instruments = QAction("Instrument Settings...", self)
+        act_instruments.setShortcut("Ctrl+I")
+        act_instruments.triggered.connect(self._open_instrument_settings)
+        settings_menu.addAction(act_instruments)
+        act_visa_lib = QAction("VISA Library...", self)
+        act_visa_lib.setShortcut("Ctrl+L")
+        act_visa_lib.triggered.connect(self._open_visa_library)
+        settings_menu.addAction(act_visa_lib)
+        act_pm = QAction("Parameter Manager...", self)
+        act_pm.setShortcut("Ctrl+M")
+        act_pm.triggered.connect(self._open_parameter_manager)
+        settings_menu.addAction(act_pm)
+        settings_menu.addSeparator()
+        act_config = QAction("Config...", self)
+        act_config.setShortcut("Ctrl+,")
+        act_config.triggered.connect(self._open_config)
+        settings_menu.addAction(act_config)
+
+        view_menu = menubar.addMenu("View")
+        act_debug = QAction("Debug Window", self)
+        act_debug.setShortcut("Ctrl+Shift+D")
+        act_debug.triggered.connect(lambda: self._debug_window.show())
+        view_menu.addAction(act_debug)
+        act_status = QAction("Sweep Status", self)
+        act_status.setShortcut("Ctrl+Shift+S")
+        act_status.triggered.connect(lambda: self._sweep_status_window.show())
+        view_menu.addAction(act_status)
+        act_timing = QAction("Timing", self)
+        act_timing.setShortcut("Ctrl+T")
+        act_timing.triggered.connect(lambda: self._timing_window.show())
+        view_menu.addAction(act_timing)
+        act_data = QAction("Data", self)
+        act_data.setShortcut("Ctrl+Shift+A")
+        act_data.triggered.connect(lambda: self._data_window.show())
+        view_menu.addAction(act_data)
+        act_graph = QAction("Graph...", self)
+        act_graph.setShortcut("Ctrl+G")
+        act_graph.triggered.connect(self._open_graph_window)
+        view_menu.addAction(act_graph)
+        view_menu.addSeparator()
+        act_double = QAction("Double Sweep...", self)
+        act_double.setShortcut("Ctrl+D")
+        act_double.triggered.connect(self._open_double_sweep)
+        view_menu.addAction(act_double)
+        act_meta = QAction("Meta Data Config...", self)
+        act_meta.setShortcut("Ctrl+Shift+M")
+        act_meta.triggered.connect(self._open_meta_data_config)
+        view_menu.addAction(act_meta)
+        act_cmd = QAction("Command Window...", self)
+        act_cmd.setShortcut("Ctrl+K")
+        act_cmd.triggered.connect(self._open_command_window)
+        view_menu.addAction(act_cmd)
+        act_vna = QAction("VNA Control...", self)
+        act_vna.setShortcut("Ctrl+Shift+V")
+        act_vna.triggered.connect(self._open_vna_window)
+        view_menu.addAction(act_vna)
+        act_mfli = QAction("MFLI Noise Sweep...", self)
+        act_mfli.setShortcut("Ctrl+Shift+F")
+        act_mfli.triggered.connect(self._open_mfli_window)
+        view_menu.addAction(act_mfli)
+        act_cycle = QAction("Cycle Sweep...", self)
+        act_cycle.setShortcut("Ctrl+Shift+C")
+        act_cycle.triggered.connect(self._open_cycle_sweep)
+        view_menu.addAction(act_cycle)
+        act_cycle2d = QAction("Double Sweep+ (Cycle)...", self)
+        act_cycle2d.setShortcut("Ctrl+Shift+B")
+        act_cycle2d.triggered.connect(self._open_cycle_double_sweep)
+        view_menu.addAction(act_cycle2d)
+
+    def _setup_ui(self):
+        self._glow_frame = GlowFrame("glowFrame")
+        self.setCentralWidget(self._glow_frame)
+
+        outer = QVBoxLayout(self._glow_frame)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.addWidget(self._build_profile_panel())
+        outer.addWidget(self._build_sequence_panel())
+
+    def _build_profile_panel(self) -> QWidget:
+        panel = QWidget()
+        row = QHBoxLayout(panel)
+        row.setContentsMargins(0, 2, 0, 2)
+        row.setSpacing(4)
+
+        row.addWidget(QLabel("Profile:"))
+        self._combo_profile = QComboBox()
+        self._combo_profile.setMinimumWidth(160)
+        self._combo_profile.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        row.addWidget(self._combo_profile, stretch=1)
+
+        btn_add = QPushButton("Add")
+        btn_add.setFixedWidth(46)
+        btn_add.clicked.connect(self._profile_add)
+        btn_dup = QPushButton("Copy")
+        btn_dup.setFixedWidth(46)
+        btn_dup.clicked.connect(self._profile_duplicate)
+        btn_ren = QPushButton("Rename")
+        btn_ren.setFixedWidth(60)
+        btn_ren.clicked.connect(self._profile_rename)
+        btn_del = QPushButton("Delete")
+        btn_del.setFixedWidth(52)
+        btn_del.clicked.connect(self._profile_delete)
+        row.addWidget(btn_add)
+        row.addWidget(btn_dup)
+        row.addWidget(btn_ren)
+        row.addWidget(btn_del)
+
+        self._refresh_profile_combo()
+        self._combo_profile.currentTextChanged.connect(self._on_profile_combo_changed)
+        return panel
+
+    def _refresh_profile_combo(self):
+        self._combo_profile.blockSignals(True)
+        self._combo_profile.clear()
+        for name in self._param_manager_reg.list_profiles():
+            self._combo_profile.addItem(name)
+        idx = self._combo_profile.findText(self._param_manager_reg.active_name)
+        self._combo_profile.setCurrentIndex(max(idx, 0))
+        self._combo_profile.blockSignals(False)
+
+    def _notify_profile_changed_windows(self):
+        """프로파일 전환 후, 보조 창들도 새 활성 프로파일 기준으로 다시 읽게 한다.
+
+        - VNA / Double Sweep 창은 보관형(한 번 만들어 재사용)이라 show 시 자동
+          재로딩되지 않으므로 여기서 명시적으로 다시 읽힌다. (Double Sweep은
+          숨겨져 있어도 갱신 — 안 하면 옛 프로파일 값에 고정되어 덮어쓴다.)
+        - Meta Data / Parameter Manager 창은 showEvent에서 재로딩되므로,
+          전환 시점에 떠 있는 경우에만 즉시 갱신한다.
+        """
+        if self._vna_window is not None:
+            self._vna_window.on_profile_changed()
+        if self._mfli_window is not None:
+            self._mfli_window.on_profile_changed()
+        if self._double_sweep_window is not None:
+            self._double_sweep_window.reload_from_profile()
+        if self._cycle_sweep_window is not None:
+            self._cycle_sweep_window.reload_from_profile()
+        if self._cycle_double_sweep_window is not None:
+            self._cycle_double_sweep_window.reload_from_profile()
+        if self._meta_data_window is not None and self._meta_data_window.isVisible():
+            self._meta_data_window._populate()
+        if self._param_manager_window is not None and self._param_manager_window.isVisible():
+            self._param_manager_window._load_from_profile()
+
+    def _on_profile_combo_changed(self, name: str):
+        if not name or name == self._param_manager_reg.active_name:
+            return
+        self._save_current_to_active_profile()
+        self._param_manager_reg.set_active(name)
+        self._apply_active_profile()
+        self._notify_profile_changed_windows()
+
+    def _profile_add(self):
+        name, ok = QInputDialog.getText(self, "Add Profile", "프로파일 이름:")
+        if not ok or not name.strip():
+            return
+        actual = self._param_manager_reg.add_profile(name.strip())
+        self._save_current_to_active_profile()   # 이전 프로파일 저장 (VNA 포함)
+        self._param_manager_reg.set_active(actual)
+        self._refresh_profile_combo()
+        self._combo_profile.blockSignals(True)
+        self._combo_profile.setCurrentText(actual)
+        self._combo_profile.blockSignals(False)
+        self._apply_active_profile()
+        self._notify_profile_changed_windows()
+
+    def _profile_duplicate(self):
+        new_name = self._param_manager_reg.duplicate_profile(
+            self._param_manager_reg.active_name
+        )
+        self._save_current_to_active_profile()   # 이전 프로파일 저장 (VNA 포함)
+        self._param_manager_reg.set_active(new_name)
+        self._refresh_profile_combo()
+        self._combo_profile.blockSignals(True)
+        self._combo_profile.setCurrentText(new_name)
+        self._combo_profile.blockSignals(False)
+        self._notify_profile_changed_windows()
+
+    def _profile_rename(self):
+        old = self._param_manager_reg.active_name
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Profile", "새 이름:", text=old
+        )
+        if not ok or not new_name.strip() or new_name.strip() == old:
+            return
+        actual = self._param_manager_reg.rename_profile(old, new_name.strip())
+        self._refresh_profile_combo()
+        self._combo_profile.blockSignals(True)
+        self._combo_profile.setCurrentText(actual)
+        self._combo_profile.blockSignals(False)
+
+    def _profile_delete(self):
+        name = self._param_manager_reg.active_name
+        reply = QMessageBox.question(
+            self, "프로파일 삭제",
+            f"'{name}' 프로파일을 삭제하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._param_manager_reg.delete_profile(name)
+        except ValueError as e:
+            QMessageBox.warning(self, "삭제 불가", str(e))
+            return
+        self._refresh_profile_combo()
+        self._apply_active_profile()
+
+    def _save_current_to_active_profile(self):
+        """현재 UI 상태를 활성 프로파일에 저장 (VNA 포함)."""
+        if self._loading_profile:
+            return
+        # VNA 설정도 함께 저장 (profiles/vna/{name}.yaml)
+        if self._vna_window is not None:
+            self._vna_window._save_ui_state()
+        # MFLI 설정도 함께 저장 (profiles/mfli/{name}.yaml)
+        if self._mfli_window is not None:
+            self._mfli_window._save_ui_state()
+        # Cycle Sweep 은 저장 폴더·파일명을 자체 보관하므로 프로파일에 함께 남긴다.
+        # (창을 닫지 않고 프로그램을 끄면 창의 closeEvent 가 안 불리기 때문)
+        if self._cycle_sweep_window is not None:
+            self._cycle_sweep_window._save_config()
+        if self._cycle_double_sweep_window is not None:
+            self._cycle_double_sweep_window._save_config()
+        fp = self._param_manager_reg.get_active_profile()
+        fp.main_ui = self._active_profile
+        fp.sweep_to = self._sweep_config.sweep_to
+        fp.sweep_rate = self._sweep_config.sweep_rate
+        fp.time_per_point = self._sweep_config.time_per_point
+        fp.main_folder = self._le_main_folder.text()
+        fp.custom_folder = self._le_custom_folder.text()
+        fp.custom_word = self._le_custom_word.text()
+        fp.include_date = self._cb_save_date.isChecked()
+        fp.save_enabled = self._cb_save_enable.isChecked()
+        fp.active_sweep_channel_idx = self._sweep_radio_group.checkedId()
+        # Derivative channel settings
+        for order, attr in [(1, "deriv1"), (2, "deriv2"), (3, "deriv3")]:
+            if hasattr(self, "_cb_deriv_enable"):
+                cfg = self._build_deriv_config(order)
+                setattr(fp, attr, DerivConfigData(
+                    enabled=cfg.enabled,
+                    numerator_key=cfg.numerator_key,
+                    denominator_key=cfg.denominator_key,
+                    output_label=cfg.output_label,
+                    output_unit=cfg.output_unit,
+                    window_size=cfg.window_size,
+                    method=cfg.method,
+                    min_delta=cfg.min_delta,
+                ))
+        self._param_manager_reg.save_active_profile(fp)
+        save_app_config(self._app_config)
+
+    def _apply_active_profile(self):
+        """활성 프로파일 설정을 UI에 적용."""
+        self._loading_profile = True
+        try:
+            fp = self._param_manager_reg.get_active_profile()
+            mui = fp.main_ui
+            # needs_fix 는 파생 상태다 — 저장된 값을 믿지 말고 라이브러리 기준으로
+            # 다시 계산한다. 안 그러면 옛 판정이 남아 멀쩡한 항목이 잠긴 채 보인다.
+            try:
+                self._param_manager_reg.refresh_needs_fix(mui, self._visa_lib_registry)
+            except Exception as e:
+                self._log(f"  needs_fix 재계산 경고: {e}", color="#d7ba7d")
+            if mui.sweep_values or mui.measurements or mui.write_cmds:
+                self._on_selection_applied(mui)
+            else:
+                self._rebuild_sweep_channel_panel([])
+            # Apply sweep params (block signals to avoid recursive saves)
+            for le, val in [
+                (self._le_sweep_to,       fp.sweep_to),
+                (self._le_sweep_rate,     fp.sweep_rate),
+                (self._le_time_per_point, fp.time_per_point),
+            ]:
+                le.blockSignals(True)
+                le.setText(f"{val:g}")
+                le.blockSignals(False)
+            self._sweep_config.sweep_to       = fp.sweep_to
+            self._sweep_config.sweep_rate     = fp.sweep_rate
+            self._sweep_config.time_per_point = fp.time_per_point
+            self._timing_window.set_time_per_point(fp.time_per_point)
+            self._update_step_size_label()
+            # Apply save settings
+            self._le_main_folder.blockSignals(True)
+            self._le_custom_folder.blockSignals(True)
+            self._le_custom_word.blockSignals(True)
+            self._le_main_folder.setText(fp.main_folder)
+            self._le_custom_folder.setText(fp.custom_folder)
+            self._le_custom_word.setText(fp.custom_word)
+            self._le_main_folder.blockSignals(False)
+            self._le_custom_folder.blockSignals(False)
+            self._le_custom_word.blockSignals(False)
+            self._cb_save_date.setChecked(fp.include_date)
+            self._cb_save_enable.setChecked(fp.save_enabled)
+            self._update_save_preview()
+            # Restore sweep channel selection
+            btn = self._sweep_radio_group.button(fp.active_sweep_channel_idx)
+            if btn:
+                btn.setChecked(True)
+            # Restore derivative channel settings (combos populated by _rebuild_deriv_combos above)
+            if hasattr(self, "_cb_deriv_enable"):
+                for order, attr in [(1, "deriv1"), (2, "deriv2"), (3, "deriv3")]:
+                    d = getattr(fp, attr)
+                    suffix = "" if order == 1 else str(order)
+                    cb = getattr(self, f"_cb_deriv{suffix}_enable")
+                    cb.blockSignals(True)
+                    cb.setChecked(d.enabled)
+                    cb.blockSignals(False)
+                    getattr(self, f"_le_deriv{suffix}_label").setText(d.output_label)
+                    getattr(self, f"_le_deriv{suffix}_unit").setText(d.output_unit)
+                    getattr(self, f"_sb_deriv{suffix}_window").setValue(d.window_size)
+                    getattr(self, f"_le_deriv{suffix}_min_delta").setText(f"{d.min_delta:g}")
+                    if order == 1:
+                        method_idx = {"linear": 0, "savgol": 1}.get(d.method, 0)
+                        getattr(self, "_cmb_deriv_method").setCurrentIndex(method_idx)
+                    for cmb_key, key in [("a1", d.numerator_key), ("a2", d.denominator_key)]:
+                        cmb = getattr(self, f"_cmb_deriv{suffix}_{cmb_key}")
+                        idx = cmb.findData(key)
+                        if idx >= 0:
+                            cmb.setCurrentIndex(idx)
+                    setting_widgets = getattr(self, f"_deriv{suffix}_setting_widgets")
+                    for w in setting_widgets:
+                        w.setEnabled(d.enabled and not self._running)
+        finally:
+            self._loading_profile = False
+
+    def _build_sequence_panel(self) -> QWidget:
+        """메인 탭 전체 — 좌측은 측정 설정, 우측은 프로파일이 채우는 채널 목록."""
+        panel = QWidget()
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+        outer.addLayout(self._build_sequence_title_row())
+
+        content_row = QHBoxLayout()
+        content_row.setSpacing(10)
+        outer.addLayout(content_row, stretch=1)
+        content_row.addWidget(self._build_left_column())
+        content_row.addWidget(self._build_right_column(), stretch=1)
+        return panel
+
+    def _build_sequence_title_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        title = QLabel("Measurement Sequence")
+        title.setStyleSheet("font-size: 15px; font-weight: bold;")
+        row.addWidget(title)
+        row.addStretch()
+
+        btn_debug = QPushButton("Debug")
+        btn_debug.setFixedWidth(70)
+        btn_debug.clicked.connect(lambda: self._debug_window.show())
+        row.addWidget(btn_debug)
+
+        btn_status = QPushButton("Status")
+        btn_status.setFixedWidth(70)
+        btn_status.clicked.connect(lambda: self._sweep_status_window.show())
+        row.addWidget(btn_status)
+        return row
+
+    # ── 좌측 열: 측정 설정 ────────────────────────────────────────────────
+
+    def _build_left_column(self) -> QWidget:
+        column = QWidget()
+        column.setMinimumWidth(320)
+        column.setMaximumWidth(420)
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        layout.addWidget(self._build_sweep_params_box())
+        layout.addLayout(self._build_action_row())
+        layout.addLayout(self._build_quick_access_row())
+        layout.addWidget(self._build_save_settings_box())
+        for order in (1, 2, 3):
+            layout.addWidget(self._build_deriv_panel(order))
+        layout.addStretch()
+        return column
+
+    def _build_sweep_params_box(self) -> QWidget:
+        """sweep 목표·속도·주기 입력. 배경에 고래 그림이 반투명하게 깔린다."""
+        box = _WhaleBgFrame(asset_path(WHALE_BACKGROUND), opacity=0.3)
+        box.setFrameShape(QFrame.Shape.StyledPanel)
+        box_layout = QVBoxLayout(box)
+
+        title = QLabel("Sweep Parameters")
+        title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        box_layout.addWidget(title)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(12)
+        box_layout.addLayout(form)
+
+        # 배경 그림이 비쳐 보이도록 입력칸은 반투명 흰색으로 덮는다
+        self._le_source_value = QLineEdit("—")
+        self._le_source_value.setReadOnly(True)
+        self._le_source_value.setStyleSheet(
+            "QLineEdit { background-color: transparent;"
+            " color: #444444; border: none; }"
+        )
+        self._le_source_value.setFixedWidth(120)
+        form.addRow("Source Value:", self._le_source_value)
+
+        self._le_sweep_to = self._make_sweep_field("0")
+        self._lbl_sweep_to_unit = QLabel("")
+        form.addRow("Sweep To:",
+                    self._field_with_unit(self._le_sweep_to, self._lbl_sweep_to_unit))
+
+        self._le_sweep_rate = self._make_sweep_field("1")
+        self._lbl_sweep_rate_unit = QLabel("units/min")
+        form.addRow("Sweep Rate:",
+                    self._field_with_unit(self._le_sweep_rate, self._lbl_sweep_rate_unit))
+
+        self._le_time_per_point = self._make_sweep_field("1")
+        form.addRow("Time / Point:",
+                    self._field_with_unit(self._le_time_per_point, QLabel("sec")))
+
+        for label, attr in (("Step Size:", "_lbl_step_size"),
+                            ("Idle:", "_lbl_idle"),
+                            ("Remaining:", "_lbl_remaining")):
+            value = QLabel("—")
+            value.setStyleSheet("color: #555555;")
+            setattr(self, attr, value)
+            form.addRow(label, value)
+        return box
+
+    def _make_sweep_field(self, placeholder: str) -> QLineEdit:
+        """sweep 파라미터 입력칸. 값이 바뀌면 스텝 크기 표시와 sweep 설정을 갱신한다."""
+        field = QLineEdit(placeholder)
+        field.setFont(_MONO)
+        field.setMinimumWidth(280)
+        field.setStyleSheet(
+            "QLineEdit { background-color: rgba(255, 255, 255, 179);"
+            " color: #000000; border: 1px solid #aaa; border-radius: 3px; }"
+            "QLineEdit:focus { border: 1px solid #1a73e8; }"
+        )
+        field.setValidator(QDoubleValidator(-1e18, 1e18, 10, field))
+        field.textChanged.connect(self._update_step_size_label)
+        field.editingFinished.connect(self._on_sweep_params_confirmed)
+        return field
+
+    @staticmethod
+    def _field_with_unit(field: QLineEdit, unit: QLabel) -> QWidget:
+        """입력칸 + 단위 라벨을 한 줄로 묶는다."""
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(field)
+        layout.addWidget(unit)
+        layout.addStretch()
+        return row
+
+    def _build_action_row(self) -> QHBoxLayout:
+        """Start / Stop / Resume."""
+        self._btn_start = QPushButton("Start")
+        self._btn_start.setMinimumHeight(44)
+        self._btn_start.setStyleSheet(
+            "QPushButton { font-weight: bold; font-size: 14px;"
+            "background-color: #2e7d32; color: white; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #1a3a1a; color: #3d553d; border-radius: 4px; }"
+        )
+        self._btn_start.clicked.connect(self._on_start)
+
+        self._btn_stop = QPushButton("Stop")
+        self._btn_stop.setMinimumHeight(44)
+        self._btn_stop.setStyleSheet(
+            "QPushButton { font-weight: bold; font-size: 14px;"
+            "background-color: #c62828; color: white; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #3a1a1a; color: #553d3d; border-radius: 4px; }"
+        )
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.clicked.connect(self._on_stop_clicked)
+
+        # 통신 오류로 중단된 측정을 저장된 지점부터 재개
+        self._btn_resume = QPushButton("Resume")
+        self._btn_resume.setMinimumHeight(44)
+        self._btn_resume.setToolTip("통신 오류로 중단된 측정을 저장된 지점부터 재개")
+        self._btn_resume.setStyleSheet(
+            "QPushButton { font-weight: bold; font-size: 14px;"
+            "background-color: #b8860b; color: white; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #3a3010; color: #55502d; border-radius: 4px; }"
+        )
+        self._btn_resume.clicked.connect(self._on_resume_clicked)
+        self._update_resume_btn_enabled()
+
+        row = QHBoxLayout()
+        row.addWidget(self._btn_start)
+        row.addWidget(self._btn_stop)
+        row.addWidget(self._btn_resume)
+        return row
+
+    def _build_quick_access_row(self) -> QHBoxLayout:
+        """자주 쓰는 창 바로가기."""
+        row = QHBoxLayout()
+        row.setSpacing(4)
+
+        btn_graph = QPushButton("Graph")
+        btn_graph.setToolTip("Open Graph window")
+        btn_graph.clicked.connect(self._open_graph_window)
+        row.addWidget(btn_graph)
+
+        btn_double_sweep = QPushButton("Double Sweep")
+        btn_double_sweep.setToolTip("Open Double Sweep window")
+        btn_double_sweep.clicked.connect(self._open_double_sweep)
+        row.addWidget(btn_double_sweep)
+
+        btn_conn = QPushButton("Connection Test")
+        btn_conn.setToolTip(
+            "Test *IDN? on all active instruments\n"
+            "(sweep channel + active measurements + second channel if DS open)"
+        )
+        btn_conn.clicked.connect(self._on_connection_test)
+        row.addWidget(btn_conn)
+
+        btn_reconn = QPushButton("장비 재연결")
+        btn_reconn.setToolTip(
+            "활성 기기의 세션을 끊고 다시 연결합니다.\n"
+            "우리 쪽 세션이 꼬였을 때 쓰는 수단이며, 다른 프로그램이 잡은 세션은\n"
+            "여기서 끊을 수 없습니다 (장비 전면/웹의 LAN Reset 등이 필요)."
+        )
+        btn_reconn.clicked.connect(self._on_reconnect_instruments)
+        row.addWidget(btn_reconn)
+        return row
+
+    def _build_save_settings_box(self) -> QFrame:
+        """저장 경로 구성 + 실제 저장될 경로 미리보기."""
+        box = QFrame()
+        box.setFrameShape(QFrame.Shape.StyledPanel)
+        self._save_settings_frame = box
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        title = QLabel("Save Settings")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #e3b341;")
+        layout.addWidget(title)
+        layout.addLayout(self._build_save_form())
+        layout.addLayout(self._build_save_preview_row())
+
+        self._cb_save_enable = QCheckBox("Auto-save 활성화")
+        self._cb_save_enable.setChecked(False)
+        self._cb_save_enable.stateChanged.connect(self._update_save_preview)
+        layout.addWidget(self._cb_save_enable)
+        return box
+
+    def _build_save_form(self) -> QFormLayout:
+        form = QFormLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(3)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self._le_main_folder = QLineEdit()
+        self._le_main_folder.setFont(_MONO)
+        self._le_main_folder.setPlaceholderText("Main 폴더")
+        self._le_main_folder.textChanged.connect(self._update_save_preview)
+        self._btn_save_browse = QPushButton("Browse")
+        self._btn_save_browse.setFixedWidth(60)
+        self._btn_save_browse.clicked.connect(self._browse_save_folder)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(self._le_main_folder)
+        folder_row.addWidget(self._btn_save_browse)
+        form.addRow("Main Folder:", folder_row)
+
+        self._le_custom_folder = QLineEdit()
+        self._le_custom_folder.setFont(_MONO)
+        self._le_custom_folder.setPlaceholderText("하위 폴더 (선택)")
+        self._le_custom_folder.textChanged.connect(self._update_save_preview)
+        form.addRow("Sub Folder:", self._le_custom_folder)
+
+        self._le_custom_word = QLineEdit()
+        self._le_custom_word.setFont(_MONO)
+        self._le_custom_word.setPlaceholderText("접두어 (선택)")
+        self._le_custom_word.textChanged.connect(self._update_save_preview)
+        self._cb_save_date = QCheckBox("날짜")
+        self._cb_save_date.setChecked(True)
+        self._cb_save_date.stateChanged.connect(self._update_save_preview)
+        name_row = QHBoxLayout()
+        name_row.addWidget(self._le_custom_word)
+        name_row.addWidget(self._cb_save_date)
+        form.addRow("Filename:", name_row)
+        return form
+
+    def _build_save_preview_row(self) -> QHBoxLayout:
+        self._lbl_save_preview = QLabel("—")
+        self._lbl_save_preview.setFont(_MONO)
+        self._lbl_save_preview.setStyleSheet("color: #555555; font-size: 9px;")
+        self._lbl_save_preview.setWordWrap(True)
+        # 긴 경로가 잘리지 않도록 약 3줄 높이 확보 + 위쪽 정렬
+        self._lbl_save_preview.setMinimumHeight(46)
+        self._lbl_save_preview.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._lbl_save_preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+
+        self._btn_copy_path = QPushButton("Copy")
+        self._btn_copy_path.setFixedSize(46, 20)
+        self._btn_copy_path.setFont(QFont("Consolas", 8))
+        self._btn_copy_path.clicked.connect(self._copy_save_path)
+
+        self._btn_open_folder = QPushButton("Open Folder")
+        self._btn_open_folder.setFixedHeight(20)
+        self._btn_open_folder.setFont(QFont("Consolas", 8))
+        self._btn_open_folder.clicked.connect(self._open_save_folder)
+
+        arrow = QLabel("→")
+        arrow.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        row = QHBoxLayout()
+        row.addWidget(arrow)
+        row.addWidget(self._lbl_save_preview, stretch=1)
+        row.addWidget(self._btn_copy_path, alignment=Qt.AlignmentFlag.AlignTop)
+        row.addWidget(self._btn_open_folder, alignment=Qt.AlignmentFlag.AlignTop)
+        return row
+
+    # ── 우측 열: 프로파일이 채우는 채널 목록 ──────────────────────────────
+
+    def _build_right_column(self) -> QWidget:
+        """세 패널 모두 프로파일 적용 전에는 비어 있어 숨긴 채로 시작한다."""
+        column = QWidget()
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._build_sweep_channel_panel(), stretch=1)
+        layout.addWidget(self._build_measurements_panel(), stretch=2)
+        layout.addWidget(self._build_write_panel())
+        return column
+
+    @staticmethod
+    def _make_channel_scroll() -> QScrollArea:
+        """채널 목록용 투명 스크롤 영역 (가로 스크롤바 없음)."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background: transparent;")
+        return scroll
+
+    def _build_sweep_channel_panel(self) -> QFrame:
+        """sweep 대상 채널 라디오 목록 — _rebuild_sweep_channel_panel 이 채운다."""
+        self._sweep_channel_panel = QFrame()
+        self._sweep_channel_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(self._sweep_channel_panel)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        title = QLabel("Sweep Channel")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #79c0ff;")
+        layout.addWidget(title)
+
+        self._sweep_ch_scroll = self._make_channel_scroll()
+        layout.addWidget(self._sweep_ch_scroll, stretch=1)
+
+        self._sweep_radio_group = QButtonGroup(self)
+        self._sweep_radio_group.setExclusive(True)
+        self._sweep_radio_group.idToggled.connect(self._on_sweep_radio_toggled)
+
+        self._sweep_channel_panel.setVisible(False)
+        return self._sweep_channel_panel
+
+    def _build_measurements_panel(self) -> QFrame:
+        """측정 항목 체크박스 목록 — _rebuild_meas_panel 이 채운다."""
+        self._meas_panel = QFrame()
+        self._meas_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(self._meas_panel)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        title_row = QHBoxLayout()
+        title = QLabel("Active Measurements")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #56d364;")
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(make_help_button(self._meas_help_html(),
+                                             "Active Measurements 도움말"))
+        layout.addLayout(title_row)
+
+        self._meas_scroll = self._make_channel_scroll()
+        layout.addWidget(self._meas_scroll, stretch=1)
+
+        self._meas_panel.setVisible(False)
+        return self._meas_panel
+
+    def _build_write_panel(self) -> QFrame:
+        """write 명령 목록. 현재 UI 에서는 숨겨져 있고 하위호환용으로만 남아 있다."""
+        self._write_panel = QFrame()
+        self._write_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        self._write_layout = QVBoxLayout(self._write_panel)
+        self._write_layout.setContentsMargins(8, 6, 8, 6)
+
+        title = QLabel("Write Commands")
+        title.setStyleSheet("font-weight: bold; font-size: 12px; color: #e3b341;")
+        self._write_layout.addWidget(title)
+
+        self._write_panel.setVisible(False)
+        return self._write_panel
+
+    # ------------------------------------------------------------------
+    # Glow animation
+    # ------------------------------------------------------------------
+
+    def _update_glow(self):
+        self._glow_phase += 0.07
+        self._glow_frame.set_glow(glow_color(self._glow_phase))
+
+    def _stop_glow(self):
+        self._glow_timer.stop()
+        self._glow_frame.set_glow(None)
+
+    # ------------------------------------------------------------------
+    # Parameter Manager
+    # ------------------------------------------------------------------
+
+    def _open_parameter_manager(self):
+        if self._param_manager_window is None or not self._param_manager_window.isVisible():
+            self._param_manager_window = ParameterManagerWindow(
+                self._visa_lib_registry, self._param_manager_reg, self
+            )
+            self._param_manager_window.selection_applied.connect(self._on_selection_applied)
+        self._param_manager_window.show()
+        self._param_manager_window.raise_()
+
+    def _open_config(self):
+        if self._config_window is None or not self._config_window.isVisible():
+            self._config_window = ConfigWindow(self._app_config, self)
+            self._config_window.apply_requested.connect(self._on_config_applied)
+        self._config_window.show()
+        self._config_window.raise_()
+
+    def _on_config_applied(self, cfg: AppConfig):
+        self._app_config = cfg
+        self._worker.set_threshold(cfg.global_threshold)
+        self._worker.set_parallel(cfg.parallel_measurement)
+        # Double Sweep의 자체 worker에도 동일 적용
+        if self._double_sweep_window is not None:
+            self._double_sweep_window._sweep_worker.set_threshold(cfg.global_threshold)
+            self._double_sweep_window._sweep_worker.set_parallel(cfg.parallel_measurement)
+        # Cycle Sweep / Double Sweep+ 의 자체 worker 에도 동일 적용
+        for window in (self._cycle_sweep_window, self._cycle_double_sweep_window):
+            if window is not None:
+                window._sweep_worker.set_threshold(cfg.global_threshold)
+                window._sweep_worker.set_parallel(cfg.parallel_measurement)
+
+    def _open_graph_window(self):
+        if self._graph_window is None:
+            self._graph_window = GraphWindow()
+            if self._graph_columns:
+                # 컬럼 스키마 + 지금까지 쌓인 데이터를 한 번에 replay
+                # (측정 중·측정 후 모두 올바르게 표시)
+                self._graph_window.begin_session(self._graph_columns)
+                for pt in self._graph_history:
+                    self._graph_window.append_point(pt)
+        self._graph_window.show()
+        self._graph_window.raise_()
+
+    def _build_graph_columns(self) -> list:
+        """Build [(key, label, unit)] for the current sweep + active measurements + derivative."""
+        profile = self._active_profile
+        cols = []
+        sv_id = self._sweep_radio_group.checkedId()
+        if sv_id == self._TIME_ID:
+            cols.append(("__sweep__", "time", ""))
+        elif 0 <= sv_id < len(profile.sweep_values):
+            sv = profile.sweep_values[sv_id]
+            cols.append(("__sweep__", sv.figure_axis or sv.description, sv.unit))
+        else:
+            cols.append(("__sweep__", "target", ""))
+        for idx in self._active_meas_indices:
+            m = profile.measurements[idx]
+            cols.append((m.description, self._meas_label_for(idx, m), m.unit))
+        for ch in (self._deriv_channel, self._deriv_channel2, self._deriv_channel3):
+            if ch._cfg.enabled:
+                cols.append(ch.col_info())
+        return cols
+
+    def _open_meta_data_config(self):
+        if self._meta_data_window is None:
+            self._meta_data_window = MetaDataConfigWindow(self)
+        self._meta_data_window.show()
+        self._meta_data_window.raise_()
+
+    def _open_command_window(self):
+        if self._command_window is None:
+            self._command_window = CommandWindow(self._session, self._visa_lib_registry, self)
+        self._command_window.show()
+        self._command_window.raise_()
+
+    def _open_vna_window(self):
+        if self._vna_window is None:
+            # parent=None → 독립 top-level → 작업표시줄에 개별 표시
+            self._vna_window = VnaWindow(
+                self._session, self._visa_lib_registry,
+                param_manager_reg=self._param_manager_reg, parent=None)
+        self._vna_window.show()
+        self._vna_window.raise_()
+
+    def _open_mfli_window(self):
+        if self._mfli_window is None:
+            # parent=None → 독립 top-level (VNA Control과 동일한 패턴)
+            self._mfli_window = MfliWindow(
+                self._session, self._visa_lib_registry,
+                param_manager_reg=self._param_manager_reg, parent=None)
+        self._mfli_window.show()
+        self._mfli_window.raise_()
+
+    def _open_double_sweep(self):
+        if self._double_sweep_window is None:
+            # 3rd arg(parent)=None → 독립 top-level → 작업표시줄에 개별 표시 (main_win은 1st arg로 전달)
+            self._double_sweep_window = DoubleSweepWindow(self, self._param_manager_reg, None)
+            self._double_sweep_window.sweep_started.connect(self._on_double_sweep_started)
+            self._double_sweep_window.sweep_finished.connect(self._on_double_sweep_finished)
+        self._double_sweep_window.show()
+        self._double_sweep_window.raise_()
+
+    def _open_cycle_sweep(self):
+        if self._cycle_sweep_window is None:
+            # 3rd arg(parent)=None → 독립 top-level → 작업표시줄에 개별 표시
+            self._cycle_sweep_window = CycleSweepWindow(self, self._param_manager_reg, None)
+            # 잠금/복원 동작이 Double Sweep 과 같아 슬롯을 그대로 재사용한다
+            self._cycle_sweep_window.sweep_started.connect(self._on_double_sweep_started)
+            self._cycle_sweep_window.sweep_finished.connect(self._on_double_sweep_finished)
+        self._cycle_sweep_window.show()
+        self._cycle_sweep_window.raise_()
+
+    def _open_cycle_double_sweep(self):
+        if self._cycle_double_sweep_window is None:
+            # 3rd arg(parent)=None → 독립 top-level → 작업표시줄에 개별 표시
+            self._cycle_double_sweep_window = CycleDoubleSweepWindow(
+                self, self._param_manager_reg, None)
+            # 잠금/복원 동작이 Double Sweep 과 같아 슬롯을 그대로 재사용한다
+            self._cycle_double_sweep_window.sweep_started.connect(
+                self._on_double_sweep_started)
+            self._cycle_double_sweep_window.sweep_finished.connect(
+                self._on_double_sweep_finished)
+        self._cycle_double_sweep_window.show()
+        self._cycle_double_sweep_window.raise_()
+
+    def _on_double_sweep_started(self):
+        """Double sweep 시작 → main UI Start 비활성화."""
+        self._btn_start.setEnabled(False)
+
+    def _on_double_sweep_finished(self):
+        """Double sweep 종료 → main UI Start 복원 (single sweep 실행 중이 아닐 때만)."""
+        if not self._running:
+            self._btn_start.setEnabled(True)
+
+    # ------------------------------------------------------------------
+    # Connection Test
+    # ------------------------------------------------------------------
+
+    def collect_active_aliases(self, include_second: bool = False,
+                               include_cycle: bool = False,
+                               include_cycle2d: bool = False) -> list:
+        """활성 기기(alias)를 중복 없이 순서대로 반환.
+
+        include_second=True이면 Double Sweep 창이 열려 있을 때
+        second_sweep_channels의 alias도 포함합니다.
+        include_cycle=True이면 Cycle Sweep 창이 자체 선택한 sweep channel의
+        alias도 포함합니다 (그 창은 메인 UI와 다른 채널을 고를 수 있으므로,
+        포함하지 않으면 정작 구동할 장비가 연결 테스트에서 빠집니다).
+        include_cycle2d=True이면 Double Sweep+ 창이 자체 선택한 first/second
+        채널의 alias도 같은 이유로 포함합니다.
+        """
+        seen: set = set()
+        aliases: list = []
+
+        def _add(alias: str):
+            if alias and alias not in seen:
+                seen.add(alias)
+                aliases.append(alias)
+
+        # Sweep channel
+        sv_id = self._sweep_radio_group.checkedId()
+        if sv_id != self._TIME_ID and 0 <= sv_id < len(self._active_profile.sweep_values):
+            _add(self._active_profile.sweep_values[sv_id].alias)
+
+        # Active measurement checkboxes
+        for m, cb in zip(self._active_profile.measurements, self._meas_checkboxes):
+            if cb.isChecked():
+                _add(m.alias)
+
+        # Second sweep channels (only if double sweep window is open)
+        if include_second and self._double_sweep_window is not None and \
+                self._double_sweep_window.isVisible():
+            for ch in self._active_profile.second_sweep_channels:
+                _add(ch.alias)
+
+        # Cycle Sweep이 자체 선택한 sweep channel
+        if include_cycle and self._cycle_sweep_window is not None:
+            _add(self._cycle_sweep_window.selected_alias())
+
+        # Double Sweep+ 가 자체 선택한 first/second channel
+        if include_cycle2d and self._cycle_double_sweep_window is not None:
+            for alias in self._cycle_double_sweep_window.selected_aliases():
+                _add(alias)
+
+        return aliases
+
+    def _connection_hint(self, alias: str, exc: Exception) -> str:
+        """연결 실패를 '원인 + 이 인터페이스에서 할 수 있는 조치' 로 풀어 준다."""
+        from pythonization.instruments.errors import connection_failure_hint
+        cfg = self._registry.get_config(alias)
+        return connection_failure_hint(
+            exc, alias=alias,
+            interface_type=getattr(cfg, "interface_type", "") if cfg else "",
+            address=getattr(cfg, "address", "") if cfg else "",
+            port=getattr(cfg, "port", None) if cfg else None,
+        )
+
+    def _on_reconnect_instruments(self):
+        """활성 장비의 세션을 끊고 다시 연결한다.
+
+        우리 쪽 세션이 꼬였을 때(응답은 오는데 상태가 이상하거나, timeout 이라
+        _evict_broken 이 세션을 유지한 경우) 쓰는 수동 수단이다.
+        남의 프로그램이 잡은 세션은 여기서 끊을 수 없다 — 그건 장비 쪽 조치가 필요하다.
+        """
+        if self._running:
+            QMessageBox.warning(self, "측정 중",
+                                "측정 중에는 재연결할 수 없습니다. 먼저 중단하세요.")
+            return
+        aliases = self.collect_active_aliases(include_second=True)
+        if not aliases:
+            QMessageBox.information(self, "장비 재연결", "활성화된 기기가 없습니다.")
+            return
+
+        results = []
+        for alias in aliases:
+            was_open = self._session.is_open(alias)
+            try:
+                if was_open:
+                    self._session.close(alias)
+                self._session.open(alias)
+                results.append((True, alias,
+                                "재연결됨" if was_open else "새로 연결됨"))
+                self._log(f"  [{alias}] 재연결 완료.", color="#4ec9b0")
+            except Exception as exc:
+                hint = self._connection_hint(alias, exc)
+                results.append((False, alias, hint))
+                self._log(f"  [{alias}] 재연결 실패.", color="#f44747")
+                self._log_sweep(f"  ✗ [{alias}] 재연결 실패\n{hint}",
+                                color="#f44747")
+
+        lines = []
+        for ok, alias, msg in results:
+            icon = "✓" if ok else "✗"
+            if ok:
+                lines.append(f"{icon}  {alias}\n    {msg}")
+            else:
+                ind = "\n".join("    " + ln for ln in msg.splitlines())
+                lines.append(f"{icon}  {alias}\n{ind}")
+        body = "\n\n".join(lines)
+        if all(ok for ok, _a, _m in results):
+            QMessageBox.information(self, "장비 재연결 — 완료", body)
+        else:
+            QMessageBox.warning(self, "장비 재연결 — 일부 실패", body)
+
+    def _run_connection_test(self, include_second: bool = False,
+                             show_success: bool = True,
+                             force_idn: bool = False,
+                             include_cycle: bool = False,
+                             include_cycle2d: bool = False) -> bool:
+        """활성 기기의 연결 상태를 확인합니다.
+
+        force_idn=False (기본, 스윕 자동 호출):
+            이미 열려있는 장비는 *IDN? 없이 "already connected"로 처리.
+            → raw socket 장비(M81 등)의 응답이 측정 버퍼를 오염시키는 것을 방지.
+        force_idn=True (수동 Connection Test 버튼):
+            모든 장비에 *IDN?를 보내 실제 응답을 확인.
+
+        show_success=False이면 오류가 있을 때만 다이얼로그를 표시합니다.
+        반환값: 모두 성공이면 True, 하나라도 실패하면 False.
+        """
+        aliases = self.collect_active_aliases(include_second=include_second,
+                                              include_cycle=include_cycle,
+                                              include_cycle2d=include_cycle2d)
+        if not aliases:
+            if show_success:
+                QMessageBox.information(self, "Connection Test", "활성화된 기기가 없습니다.")
+            return True
+
+        results: dict = {}  # alias → (ok: bool, message: str)
+        for alias in aliases:
+            if not force_idn and self._session.is_open(alias):
+                # 이미 열려있는 장비 — *IDN? 전송 없이 연결 확인
+                # raw socket 장비(M81 등)에서 *IDN?를 보내면 응답이 버퍼에 잔류해
+                # 이후 측정값 read를 오염시킬 수 있음.
+                results[alias] = (True, "already connected")
+            else:
+                try:
+                    idn = self._session.query_once(alias, "*IDN?")
+                    results[alias] = (True, idn.strip())
+                except Exception as exc:
+                    results[alias] = (False, self._connection_hint(alias, exc))
+
+        all_ok = all(ok for ok, _ in results.values())
+
+        if not all_ok or show_success:
+            lines = []
+            for alias, (ok, msg) in results.items():
+                icon = "✓" if ok else "✗"
+                if ok:
+                    lines.append(f"{icon}  {alias}\n    {msg}")
+                else:
+                    # 실패는 조치 안내까지 그대로 보여 준다 — 잘라내면 쓸모가 없다
+                    ind = "\n".join("    " + ln for ln in msg.splitlines())
+                    lines.append(f"{icon}  {alias}\n{ind}")
+            body = "\n\n".join(lines)
+            if all_ok:
+                QMessageBox.information(self, "Connection Test — OK", body)
+            else:
+                QMessageBox.critical(self, "Connection Test — 실패", body)
+
+        return all_ok
+
+    def _on_connection_test(self):
+        """Connection Test 버튼 핸들러 — 항상 *IDN? 전송 후 요약 창 표시."""
+        self._run_connection_test(include_second=True, show_success=True, force_idn=True)
+
+    # ------------------------------------------------------------------
+    # Derivative Channel UI
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _deriv_help_html() -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>Derivative — 두 값의 기울기(미분) 자동 계산</b><hr>"
+            "측정하는 동안 두 값 A₁, A₂의 <b>기울기(A₁을 A₂로 미분한 값)</b>를 매 단계 계산해 "
+            "데이터·그래프에 함께 기록합니다. 패널 3개 = 1·2·3차(기울기·기울기의 기울기 …).<hr>"
+            "<b>A₁ (위) / A₂ (아래)</b><br>"
+            "가로축으로 쓰는 sweep 값, 또는 체크된 측정값 중에서 고릅니다.<br>"
+            "&nbsp;&nbsp;예: A₁=전압, A₂=전류로 고르면 <b>dV/dI</b>(미분 저항)이 됩니다.<hr>"
+            "<b>Window (몇 점을 묶어 볼지, 3~50)</b><br>"
+            "가장 최근 몇 개 점을 묶어 기울기를 구합니다.<br>"
+            "크게 하면 매끄럽지만(노이즈에 강함) 변화에 늦게 반응합니다. 처음 몇 단계는 값이 없습니다(—).<hr>"
+            "<b>Method (계산 방식)</b><br>"
+            "&nbsp;&nbsp;• <b>Linear Regression</b>: 묶은 점들에 직선·곡선을 맞춰 기울기를 구함 (모든 차수 가능).<br>"
+            "&nbsp;&nbsp;• <b>Savitzky-Golay</b>: 매끄럽게 다듬어 기울기를 구하는 방식 (1차 전용).<br>"
+            "신호에 노이즈가 많으면 SG 방식이나 Window를 키우면 도움이 됩니다.<hr>"
+            "<b>Min delta (아래값 최소 변화)</b><br>"
+            "아래값(A₂)이 거의 안 변하면(이 값보다 작게 변하면) 기울기를 계산하지 않고 — 로 둡니다. "
+            "(거의 0으로 나눠 값이 튀는 것을 막기 위함)<hr>"
+            "<b>Label / Unit</b><br>"
+            "그래프·파일에 쓸 이름과 단위. 비워두면 자동으로 만듭니다(예: dV/dI).<hr>"
+            "<b>참고</b><br>"
+            "• Enable을 켜야 계산·저장됩니다.<br>"
+            "• 2·3차는 점이 더 많이 쌓여야 값이 나오기 시작합니다."
+            "</body></html>"
+        )
+
+    def _build_deriv_panel(self, order: int) -> QWidget:
+        """d^n A1/dA2^n 실시간 파생 채널 설정 패널 (order = 1/2/3).
+
+        세 패널이 같은 모양이라 위젯을 order 접미사 붙인 이름으로 self 에 달아 둔다
+        (`_cmb_deriv_a1`, `_cmb_deriv2_a1`, …). 이후 코드는 그 이름으로 접근한다.
+        """
+        title_text = self._deriv_title(order)
+
+        box = QFrame()
+        box.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        cb_enable = QCheckBox("Enable")
+        layout.addLayout(self._build_deriv_title_row(title_text, cb_enable))
+
+        widgets = {}
+        controls = QVBoxLayout()
+        controls.setSpacing(3)
+        controls.addWidget(self._build_deriv_source_form(widgets))
+        controls.addLayout(self._build_deriv_label_row(widgets, title_text))
+        controls.addLayout(self._build_deriv_method_row(widgets, order))
+        layout.addLayout(controls)
+
+        # Enable 체크가 풀리면 잠글 위젯 목록.
+        # method 콤보는 order>1 에서 이미 비활성이라 목록에서 뺀다.
+        setting_widgets = [widgets["a1"], widgets["a2"], widgets["label"],
+                           widgets["unit"], widgets["window"], widgets["min_delta"]]
+        if order == 1:
+            setting_widgets.append(widgets["method"])
+
+        suffix = "" if order == 1 else str(order)
+        setattr(self, f"_cb_deriv{suffix}_enable", cb_enable)
+        setattr(self, f"_cmb_deriv{suffix}_a1", widgets["a1"])
+        setattr(self, f"_cmb_deriv{suffix}_a2", widgets["a2"])
+        setattr(self, f"_le_deriv{suffix}_label", widgets["label"])
+        setattr(self, f"_le_deriv{suffix}_unit", widgets["unit"])
+        setattr(self, f"_sb_deriv{suffix}_window", widgets["window"])
+        setattr(self, f"_cmb_deriv{suffix}_method", widgets["method"])
+        setattr(self, f"_le_deriv{suffix}_min_delta", widgets["min_delta"])
+        setattr(self, f"_deriv{suffix}_setting_widgets", setting_widgets)
+
+        cb_enable.toggled.connect(
+            lambda checked, w=setting_widgets:
+                self._on_deriv_enable_toggled_widgets(checked, w)
+        )
+        return box
+
+    @staticmethod
+    def _deriv_title(order: int) -> str:
+        """차수에 맞는 표시 이름 — dA₁/dA₂, d²A₁/d²A₂², d³A₁/d³A₂³."""
+        prefix = {1: "d", 2: "d²", 3: "d³"}
+        superscript = {1: "", 2: "²", 3: "³"}
+        return f"{prefix[order]}A₁/{prefix[order]}A₂{superscript[order]}"
+
+    def _build_deriv_title_row(self, title_text: str, cb_enable: QCheckBox) -> QHBoxLayout:
+        row = QHBoxLayout()
+        title = QLabel(f"Derivative  {title_text}")
+        title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        row.addWidget(title)
+        row.addStretch()
+        row.addWidget(make_help_button(self._deriv_help_html(), "Derivative 도움말"))
+        row.addWidget(cb_enable)
+        return row
+
+    @staticmethod
+    def _build_deriv_source_form(widgets: dict) -> QWidget:
+        """분자(A₁) / 분모(A₂) 로 쓸 측정 열 선택. 항목은 _rebuild_deriv_combos 가 채운다."""
+        container = QWidget()
+        form = QFormLayout(container)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        for key, label in (("a1", "A₁ (numerator):"),
+                           ("a2", "A₂ (denominator):")):
+            combo = QComboBox()
+            combo.setFont(_MONO)
+            combo.setMinimumWidth(160)
+            widgets[key] = combo
+            form.addRow(label, combo)
+        return container
+
+    @staticmethod
+    def _build_deriv_label_row(widgets: dict, title_text: str) -> QHBoxLayout:
+        """결과 열의 이름과 단위 (비우면 차수로 자동 생성)."""
+        widgets["label"] = QLineEdit()
+        widgets["label"].setPlaceholderText(f"e.g. {title_text}")
+        widgets["label"].setFixedWidth(100)
+        widgets["unit"] = QLineEdit()
+        widgets["unit"].setPlaceholderText("unit")
+        widgets["unit"].setFixedWidth(70)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Label:"))
+        row.addWidget(widgets["label"])
+        row.addSpacing(8)
+        row.addWidget(QLabel("Unit:"))
+        row.addWidget(widgets["unit"])
+        row.addStretch()
+        return row
+
+    @staticmethod
+    def _build_deriv_method_row(widgets: dict, order: int) -> QHBoxLayout:
+        """슬라이딩 윈도우 길이 / 계산 방식 / 분모 변화 하한."""
+        widgets["window"] = QSpinBox()
+        widgets["window"].setRange(3, 50)
+        widgets["window"].setValue(10)
+        widgets["window"].setFixedWidth(60)
+
+        widgets["method"] = QComboBox()
+        widgets["method"].addItems(["Linear Regression", "Savitzky-Golay"])
+        if order > 1:
+            widgets["method"].setEnabled(False)   # savgol 은 1차 미분 전용
+            widgets["method"].setToolTip(
+                "Savitzky-Golay는 1차 미분 전용; 고차 미분은 Polynomial Fit 사용")
+
+        widgets["min_delta"] = QLineEdit("1e-10")
+        widgets["min_delta"].setFixedWidth(80)
+        widgets["min_delta"].setFont(_MONO)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Window:"))
+        row.addWidget(widgets["window"])
+        row.addSpacing(8)
+        row.addWidget(QLabel("Method:"))
+        row.addWidget(widgets["method"])
+        row.addSpacing(8)
+        row.addWidget(QLabel("Min |ΔA₂|:"))
+        row.addWidget(widgets["min_delta"])
+        row.addStretch()
+        return row
+
+    def _rebuild_deriv_combos(self):
+        """파라미터가 변경될 때 모든 파생 채널 A1/A2 콤보박스 재구성."""
+        if not hasattr(self, "_cmb_deriv_a1"):
+            return
+        profile = self._active_profile
+        items = [("__sweep__", "— sweep channel —")]
+        for m in profile.measurements:
+            items.append((m.description, f"{m.figure_axis or m.description} [{m.unit}]"))
+
+        for suffix in ("", "2", "3"):
+            cmb_a1 = getattr(self, f"_cmb_deriv{suffix}_a1")
+            cmb_a2 = getattr(self, f"_cmb_deriv{suffix}_a2")
+            for cmb in (cmb_a1, cmb_a2):
+                prev = cmb.currentData()
+                cmb.blockSignals(True)
+                cmb.clear()
+                for key, display in items:
+                    cmb.addItem(display, userData=key)
+                idx = cmb.findData(prev)
+                cmb.setCurrentIndex(idx if idx >= 0 else 0)
+                cmb.blockSignals(False)
+
+    def _on_deriv_enable_toggled_widgets(self, checked: bool, widgets: list):
+        for w in widgets:
+            w.setEnabled(checked and not self._running)
+
+    def _build_deriv_config(self, order: int = 1) -> DerivativeConfig:
+        """현재 UI 상태에서 DerivativeConfig 생성 (order = 1/2/3)."""
+        suffix = "" if order == 1 else str(order)
+        method_map = {0: "linear", 1: "savgol"}
+        try:
+            min_delta = float(getattr(self, f"_le_deriv{suffix}_min_delta").text())
+        except ValueError:
+            min_delta = 1e-10
+        cmb_method = getattr(self, f"_cmb_deriv{suffix}_method")
+        method = method_map.get(cmb_method.currentIndex(), "linear") if order == 1 else "linear"
+        return DerivativeConfig(
+            enabled=getattr(self, f"_cb_deriv{suffix}_enable").isChecked(),
+            order=order,
+            numerator_key=getattr(self, f"_cmb_deriv{suffix}_a1").currentData() or "",
+            denominator_key=getattr(self, f"_cmb_deriv{suffix}_a2").currentData() or "",
+            output_label=getattr(self, f"_le_deriv{suffix}_label").text().strip(),
+            output_unit=getattr(self, f"_le_deriv{suffix}_unit").text().strip(),
+            window_size=getattr(self, f"_sb_deriv{suffix}_window").value(),
+            method=method,
+            min_delta=min_delta,
+        )
+
+    def _deriv_channels(self) -> tuple:
+        """(채널, 그래프/저장 컬럼 키) 3쌍 — 1·2·3차 미분.
+
+        세 채널을 나란히 다루는 곳이 여러 군데라 순서를 여기 한 곳에서 정한다.
+        """
+        return (
+            (self._deriv_channel,  _DERIV_KEY),
+            (self._deriv_channel2, _DERIV2_KEY),
+            (self._deriv_channel3, _DERIV3_KEY),
+        )
+
+    def _deriv_val_for_order(self, result, meas_map: dict, channel: DerivativeChannel) -> "float | None":
+        """공통: A1/A2 값 추출 후 채널에 push."""
+        cfg = channel._cfg
+        if not cfg.enabled:
+            return None
+
+        def _get(key):
+            if key == "__sweep__":
+                return result.next_v
+            for idx in self._active_meas_indices:
+                if self._active_profile.measurements[idx].description == key:
+                    return meas_map.get(idx)
+            return None
+
+        a1 = _get(cfg.numerator_key)
+        a2 = _get(cfg.denominator_key)
+        if a1 is None or a2 is None:
+            return None
+        if math.isnan(a1) or math.isnan(a2):
+            return None
+        return channel.push(a1, a2)
+
+    def _collect_meas_ui_state(self) -> tuple:
+        """현재 UI 위젯에서 (prev_checked, prev_suffix, prev_type) 딕셔너리를 수집."""
+        prev_checked: dict = {}
+        prev_suffix: dict = {}
+        prev_type: dict = {}
+        if self._active_profile is None:
+            return prev_checked, prev_suffix, prev_type
+        for m, cb in zip(self._active_profile.measurements, self._meas_checkboxes):
+            key = (m.alias, m.description)
+            prev_checked[key] = cb.isChecked()
+        for m, le in zip(self._active_profile.measurements, self._meas_suffix_edits):
+            key = (m.alias, m.description)
+            prev_suffix[key] = le.text()
+        for m, ct in zip(self._active_profile.measurements, self._meas_type_combos):
+            key = (m.alias, m.description)
+            prev_type[key] = ct.currentData()
+        return prev_checked, prev_suffix, prev_type
+
+    def _on_selection_applied(self, profile: MainUIProfile):
+        prev_checked, prev_suffix, prev_type = self._collect_meas_ui_state()
+        self._active_profile = profile
+        self._rebuild_sweep_channel_panel(profile.sweep_values)
+        self._rebuild_meas_panel(profile.measurements, prev_checked, prev_suffix, prev_type)
+        self._rebuild_write_panel(profile.write_cmds)
+        self._rebuild_deriv_combos()
+        if self._double_sweep_window is not None:
+            # 더블스위프 실행 중에는 재빌드 금지 (상태머신이 second 채널을 라이브로 읽음)
+            from pythonization.ui.modules.double_sweep.window import DoubleSweepPhase
+            if self._double_sweep_window._phase == DoubleSweepPhase.IDLE:
+                self._double_sweep_window._rebuild_second_channel_radios()
+        if self._cycle_sweep_window is not None and self._cycle_sweep_window.is_idle():
+            # 실행 중 재빌드 금지 — 상태머신이 선택된 채널을 라이브로 읽는다
+            self._cycle_sweep_window._rebuild_channel_radios()
+        if (self._cycle_double_sweep_window is not None
+                and self._cycle_double_sweep_window.is_idle()):
+            self._cycle_double_sweep_window._rebuild_first_channel_radios()
+            self._cycle_double_sweep_window._rebuild_second_channel_radios()
+
+    _TIME_ID = -2   # QButtonGroup ID for the fixed Time channel
+
+    def _get_alias_color(self, alias: str) -> str:
+        """Return a consistent color for the given alias (instrument)."""
+        if alias not in self._alias_color_map:
+            n = len(self._alias_color_map)
+            self._alias_color_map[alias] = _ALIAS_PALETTE[n % len(_ALIAS_PALETTE)]
+        return self._alias_color_map[alias]
+
+    @staticmethod
+    def _meas_help_html() -> str:
+        return (
+            "<html><body style='white-space:normal;'>"
+            "<b>Active Measurements — 무엇을 읽어 기록할지</b><hr>"
+            "여기서 <b>체크한 측정</b>들이 매 측정 단계마다 읽혀서 데이터 파일·그래프에 기록됩니다.<br>"
+            "각 줄: <code>[장비] 이름 (단위)</code> + <b>Class</b> 선택 + <b>Suffix</b> 입력칸.<hr>"
+            "<b>Suffix — 이름 뒤에 붙이는 꼬리말</b><br>"
+            "데이터 열 이름과 그래프 축 이름 뒤에 <b>_꼬리말</b>이 붙습니다.<br>"
+            "&nbsp;&nbsp;예: 이름이 <code>smua_current</code>이고 꼬리말이 <code>ch1</code>이면 → "
+            "<code>smua_current_ch1</code><br>"
+            "같은 명령으로 여러 채널을 잴 때 서로 구분하려고 씁니다.<br>"
+            "&nbsp;&nbsp;• 꼬리말이 비어 있으면 원래 이름 그대로 씁니다.<br>"
+            "&nbsp;&nbsp;• Class가 <b>Contact</b>일 때는 특별합니다:<br>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;– 꼬리말이 <b>비어 있으면</b> 원래 이름(figure_axis) 그대로 저장됩니다.<br>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;– 꼬리말에 <b>내용이 있으면</b> 이름이 그 꼬리말 <b>한 단어로 완전히 바뀝니다</b>. "
+            "예: 꼬리말이 <code>A1</code>이면 열 이름·축 이름이 그냥 <code>A1</code> (← <code>contact_A1</code> 아님).<hr>"
+            "<b>Class (측정 종류) ↔ 메타데이터 연계</b><br>"
+            "Class를 <b>Temperature(온도)</b> 또는 <b>Bfield(자기장)</b>로 지정하면, 그 값은 "
+            "측정 내내 모아져서 <b>끝날 때 평균·표준편차</b>가 자동으로 요약 파일(.json)에 저장됩니다.<br>"
+            "이 자동 평균·표준편차 저장은 아래 <b>3가지를 모두</b> 만족할 때만 됩니다:<br>"
+            "&nbsp;&nbsp;1) Class = 온도 또는 자기장<br>"
+            "&nbsp;&nbsp;2) 그 측정이 <b>여기서 체크</b>되어 있음<br>"
+            "&nbsp;&nbsp;3) <b>Meta Data Config</b> 창에서 해당 항목 체크 + 메타데이터 켜짐<br>"
+            "&nbsp;&nbsp;→ 조건이 안 맞으면, '끝날 때 한 번 읽은 값'으로만 저장될 수 있습니다.<hr>"
+            "<b>참고</b><br>"
+            "• 체크 상태는 저장되어 다음 실행 때 그대로 복원됩니다.<br>"
+            "• 측정 항목의 등록·순서는 <b>Parameter Manager</b>에서 관리합니다.<br>"
+            "• Class·메타데이터 설정은 주로 온도·자기장 센서의 통계 기록에 씁니다."
+            "</body></html>"
+        )
+
+    def _meas_label_for(self, idx: int, m) -> str:
+        """Return column header for data-file.
+
+        contact type:
+            suffix 비어있음 → figure_axis (기존 그대로)
+            suffix 있음     → suffix 값으로 통째로 대체 ('contact_' 접두어 없이 xxx 만)
+        other types:
+            figure_axis 에 _suffix 를 덧붙임 (기존 동작)
+        """
+        suffix = ""
+        if idx < len(self._meas_suffix_edits):
+            suffix = self._meas_suffix_edits[idx].text().strip()
+        meas_type_val = MeasType.NONE.value
+        if idx < len(self._meas_type_combos):
+            meas_type_val = self._meas_type_combos[idx].currentData() or MeasType.NONE.value
+        base = m.figure_axis or m.description
+        if meas_type_val == MeasType.CONTACT.value:
+            # contact: suffix 가 있으면 figure_axis 를 그 값으로 완전히 대체
+            return suffix if suffix else base
+        return f"{base}_{suffix}" if suffix else base
+
+    def _rebuild_sweep_channel_panel(self, sweep_values: list):
+        for btn in self._sweep_radio_group.buttons():
+            self._sweep_radio_group.removeButton(btn)
+
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        cl = QVBoxLayout(content)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(2)
+
+        # Time channel: always first
+        rb_time = QRadioButton("Time")
+        rb_time.setFont(_MONO)
+        rb_time.setStyleSheet("QRadioButton { color: #888888; }")
+        self._sweep_radio_group.addButton(rb_time, self._TIME_ID)
+        cl.addWidget(rb_time)
+
+        for idx, sv in enumerate(sweep_values):
+            color = self._get_alias_color(sv.alias)
+            needs_fix = getattr(sv, "needs_fix", "")
+            label = f"[{sv.alias}]  {sv.description}  ({sv.unit})"
+            rb = QRadioButton(("⚠ " + label) if needs_fix else label)
+            rb.setFont(_MONO)
+            if needs_fix:
+                rb.setStyleSheet("QRadioButton { color: #f44747; }")
+                rb.setToolTip(needs_fix)
+                rb.setEnabled(False)
+            else:
+                rb.setStyleSheet(f"QRadioButton {{ color: {color}; }}")
+            self._sweep_radio_group.addButton(rb, idx)
+            cl.addWidget(rb)
+
+        cl.addStretch()
+        self._sweep_ch_scroll.setWidget(content)
+
+        if sweep_values:
+            self._sweep_radio_group.button(0).setChecked(True)
+        else:
+            rb_time.setChecked(True)
+
+        self._sweep_channel_panel.setVisible(True)
+
+    def _on_sweep_radio_toggled(self, btn_id: int, checked: bool):
+        if not checked:
+            return
+        if btn_id == self._TIME_ID:
+            self._sweep_channel = TIME_CHANNEL
+            self._update_sweep_unit_labels("sec")
+            self._sync_data_window_columns()
+            return
+        svs = self._active_profile.sweep_values
+        if 0 <= btn_id < len(svs):
+            self._sweep_channel = sweep_channel_from_instantiated(svs[btn_id])
+            self._update_sweep_unit_labels(svs[btn_id].unit)
+            self._sync_data_window_columns()
+
+    def _update_sweep_unit_labels(self, unit: str):
+        self._lbl_sweep_to_unit.setText(unit)
+        self._lbl_sweep_rate_unit.setText(f"{unit}/min" if unit else "units/min")
+
+    def _rebuild_meas_panel(self, measurements: list,
+                             prev_checked: dict = None,
+                             prev_suffix: dict = None,
+                             prev_type: dict = None):
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        cl = QVBoxLayout(content)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(2)
+
+        self._meas_checkboxes = []
+        self._meas_suffix_edits = []
+        self._meas_type_combos = []
+
+        for m in measurements:
+            color = self._get_alias_color(m.alias)
+            row_w = QWidget()
+            row_h = QHBoxLayout(row_w)
+            row_h.setContentsMargins(0, 0, 0, 0)
+            row_h.setSpacing(6)
+
+            key = (m.alias, m.description)
+
+            # ── Checkbox ──────────────────────────────────────────────
+            needs_fix = getattr(m, "needs_fix", "")
+            label = f"[{m.alias}]  {m.description}  ({m.unit})"
+            cb = QCheckBox(("⚠ " + label) if needs_fix else label)
+            cb.setFont(_MONO)
+            if needs_fix:
+                # 라이브러리 명령이 바뀌어 다시 만들 수 없는 항목 — 측정에 못 쓴다.
+                # 지우지 않고 비활성화만 해서, 사용자가 어디를 고쳐야 하는지 보이게 둔다.
+                cb.setStyleSheet("QCheckBox { color: #f44747; }")
+                cb.setToolTip(needs_fix)
+                cb.setChecked(False)
+                cb.setEnabled(False)
+                m.checked = False
+            else:
+                cb.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
+                init_checked = prev_checked.get(key, m.checked) if prev_checked else m.checked
+                cb.setChecked(init_checked)
+                m.checked = init_checked  # write-back: 프로파일과 동기화
+
+            def _make_cb_wb(meas, _cb):
+                def _wb():
+                    meas.checked = _cb.isChecked()
+                    self._refresh_meta_data_preview()
+                return _wb
+            cb.stateChanged.connect(_make_cb_wb(m, cb))
+            self._meas_checkboxes.append(cb)
+            row_h.addWidget(cb)
+
+            # ── Type selector ─────────────────────────────────────────
+            cb_type = QComboBox()
+            cb_type.setFont(_MONO)
+            cb_type.setFixedWidth(88)
+            for t in MeasType:
+                cb_type.addItem(t.value, t.value)
+            init_type = prev_type.get(key, m.meas_type.value) if prev_type else m.meas_type.value
+            idx_t = cb_type.findData(init_type)
+            if idx_t >= 0:
+                cb_type.setCurrentIndex(idx_t)
+            try:
+                m.meas_type = MeasType(init_type)  # write-back
+            except Exception:
+                pass
+
+            def _make_type_wb(meas, widget):
+                def _wb():
+                    try:
+                        meas.meas_type = MeasType(widget.currentData())
+                    except Exception:
+                        pass
+                    self._on_meas_type_changed()
+                return _wb
+            cb_type.currentIndexChanged.connect(_make_type_wb(m, cb_type))
+            self._meas_type_combos.append(cb_type)
+            row_h.addWidget(cb_type)
+
+            # ── Suffix edit ───────────────────────────────────────────
+            le_suffix = QLineEdit()
+            le_suffix.setFont(_MONO)
+            le_suffix.setFixedWidth(110)
+            le_suffix.setPlaceholderText("suffix")
+            init_suffix = prev_suffix.get(key, m.axis_suffix) if prev_suffix else m.axis_suffix
+            le_suffix.setText(init_suffix)
+            m.axis_suffix = init_suffix  # write-back
+
+            def _make_suffix_wb(meas, widget):
+                def _wb(text):
+                    meas.axis_suffix = text
+                    self._sync_data_window_columns()
+                return _wb
+            le_suffix.textChanged.connect(_make_suffix_wb(m, le_suffix))
+            le_suffix.setToolTip(
+                "기타 type: 컬럼명 = {figure_axis}_{suffix}\n"
+                "contact: 비어있으면 {figure_axis}, 내용 있으면 {suffix} 한 단어로 완전 대체"
+            )
+            self._meas_suffix_edits.append(le_suffix)
+            row_h.addWidget(le_suffix)
+            row_h.addStretch()
+
+            cl.addWidget(row_w)
+
+        cl.addStretch()
+        self._meas_scroll.setWidget(content)
+        self._meas_panel.setVisible(bool(measurements))
+        self._sync_data_window_columns()
+
+    def _rebuild_write_panel(self, write_cmds: list):
+        while self._write_layout.count() > 1:
+            item = self._write_layout.takeAt(1)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for wc in write_cmds:
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+
+            lbl = QLabel(f"[{wc.alias}]  {wc.description}  ({wc.unit})")
+            lbl.setFont(_MONO)
+            lbl.setStyleSheet("color: #e3b341;")
+            row.addWidget(lbl)
+            row.addStretch()
+
+            has_v = "{v}" in wc.cmd_set
+            if has_v:
+                le_val = QLineEdit()
+                le_val.setFont(_MONO)
+                le_val.setFixedWidth(90)
+                le_val.setPlaceholderText("값")
+                row.addWidget(le_val)
+                btn = QPushButton("Send")
+                btn.setFixedWidth(60)
+                btn.clicked.connect(
+                    lambda *_, a=wc.alias, cmd=wc.cmd_set, le=le_val: self._send_write_cmd(a, cmd, le)
+                )
+            else:
+                btn = QPushButton("Send")
+                btn.setFixedWidth(60)
+                btn.clicked.connect(
+                    lambda *_, a=wc.alias, cmd=wc.cmd_set: self._send_write_cmd(a, cmd, None)
+                )
+            row.addWidget(btn)
+            self._write_layout.addWidget(row_widget)
+
+        self._write_panel.setVisible(bool(write_cmds))
+
+    def _send_write_cmd(self, alias: str, cmd: str, value_edit):
+        if value_edit is not None:
+            val_text = value_edit.text().strip()
+            if not val_text:
+                self._log(f"  [{alias}] Send 실패: 값을 입력하세요.", color="#f44747")
+                return
+            try:
+                cmd = cmd.format(v=float(val_text))
+            except ValueError:
+                cmd = cmd.format(v=val_text)
+        try:
+            self._session.write(alias, cmd)
+            self._log(f"  [{alias}] write: {cmd}", color="#e3b341")
+        except Exception as e:
+            self._log(f"  ERROR: {e}", color="#f44747")
+
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+
+    def _open_instrument_settings(self):
+        if self._settings_window is None or not self._settings_window.isVisible():
+            self._settings_window = InstrumentSettingsUI()
+        self._settings_window.show()
+        self._settings_window.raise_()
+
+    def _open_visa_library(self):
+        if self._visa_lib_window is None or not self._visa_lib_window.isVisible():
+            self._visa_lib_window = VisaLibraryWindow(
+                self._visa_lib_registry, self._registry, self
+            )
+            self._visa_lib_window.library_saved.connect(self._on_library_saved)
+        self._visa_lib_window.show()
+        self._visa_lib_window.raise_()
+
+    def _on_library_saved(self):
+        """라이브러리 저장 후, 그 명령을 쓰는 **모든 프로파일**을 재인스턴스화한다.
+
+        활성 프로파일만 고치면 다른 프로파일은 옛 명령을 든 채 남는다.
+        파라미터 개수가 맞지 않아 다시 만들 수 없는 항목은 needs_fix 가 붙고,
+        UI 에서 비활성화 + 빨간 ⚠ 표시 + 툴팁으로 안내된다.
+        """
+        problems = self._param_manager_reg.propagate_library_change(
+            self._visa_lib_registry
+        )
+        new_mui = self._param_manager_reg.rebuild_main_ui_from_library(
+            self._visa_lib_registry, drop_orphans=False
+        )
+        self._on_selection_applied(new_mui)
+        self._report_library_problems(problems)
+        # Parameter Manager 창이 열려 있으면 라이브러리 뷰 갱신
+        if self._param_manager_window is not None and self._param_manager_window.isVisible():
+            self._param_manager_window.refresh_library()
+
+    def _report_library_problems(self, problems: dict) -> None:
+        """라이브러리 변경으로 못 쓰게 된 항목을 로그와 다이얼로그로 알린다."""
+        if not problems:
+            self._log("  라이브러리 변경을 모든 프로파일에 적용했습니다.", color="#4ec9b0")
+            return
+        lines = []
+        for name, items in problems.items():
+            lines.append(f"[{name}]")
+            lines.extend(f"    - {it}" for it in items)
+        body = "\n".join(lines)
+        for ln in ["  라이브러리 변경으로 사용할 수 없게 된 항목이 있습니다:"] + lines:
+            self._log(ln, color="#f44747")
+        active = self._param_manager_reg.active_name
+        QMessageBox.warning(
+            self, "라이브러리 변경 — 다시 등록이 필요한 항목",
+            "명령의 파라미터 개수가 달라져서 아래 항목을 그대로 쓸 수 없습니다.\n"
+            "측정에 쓰이지 않도록 비활성화했습니다 (목록에 빨간 ⚠ 표시).\n\n"
+            f"{body}\n\n"
+            f"Parameter Manager 에서 해당 항목을 지우고 다시 등록하면 해결됩니다.\n"
+            f"(현재 활성 프로파일: {active})",
+        )
+
+    def _on_start(self):
+        """Start 버튼 — 검증 → 상태 준비 → 초기 상태 측정 요청.
+
+        검증을 모두 통과한 뒤에만 UI 를 잠그고 파일을 연다. 파일 열기에 실패하면
+        (저장이 켜져 있는 경우) 측정을 시작하지 않고 되돌린다.
+        """
+        if self._running:
+            return
+        if not self._validate_start():
+            return
+
+        self._worker.reset_stop()   # 이전 sweep 의 Stop 잔류 플래그 제거
+        get_logger().info("sweep _on_start: ch=%s to=%s rate=%s tpp=%s",
+                          getattr(self._sweep_channel, "alias", "?"),
+                          self._sweep_config.sweep_to, self._sweep_config.sweep_rate,
+                          self._sweep_config.time_per_point)
+
+        self._begin_run_state()
+        if not self._open_data_file():
+            return
+
+        self._prepare_derivative_channels()
+        self._prepare_graph_session()
+        self._configure_metadata()
+        self._log_sweep_start()
+        self._request_initial_measurement()
+
+    # ── _on_start 의 단계별 처리 ──────────────────────────────────────────
+
+    def _validate_start(self) -> bool:
+        """시작 전 확인. 하나라도 걸리면 안내하고 False."""
+        if self._sweep_channel is None:
+            QMessageBox.warning(self, "No Sweep Channel",
+                                "Parameter Manager에서 Paired Command를 선택하세요.")
+            return False
+
+        # rate/tpp 가 0 이하이면 무한정지·역방향 폭주 위험. core 가 막긴 하지만
+        # 시작 전에 명확히 알려준다.
+        cfg = self._sweep_config
+        if cfg.sweep_rate <= 0 or cfg.time_per_point <= 0:
+            QMessageBox.warning(
+                self, "잘못된 Sweep 파라미터",
+                f"Rate({cfg.sweep_rate:g})와 Time/Point({cfg.time_per_point:g})는 "
+                "0보다 커야 합니다.")
+            return False
+
+        # 장시간 측정이 저장 없이 진행되는 사고 방지
+        if not self._cb_save_enable.isChecked():
+            answer = QMessageBox.question(
+                self, "Auto-save 비활성화",
+                "Auto-save가 꺼져 있습니다. 측정 데이터가 파일로 저장되지 않습니다.\n\n"
+                "저장 없이 진행하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+
+        return self._run_connection_test(include_second=False, show_success=False)
+
+    def _begin_run_state(self):
+        """측정 중 상태로 전환 — 버튼·패널 잠금, 카운터 초기화, 채널 스냅샷."""
+        self._running = True
+        self._sweep_step_count = 0
+        self._overrun_count = 0   # Time/Point 초과 횟수 (진단용)
+        self._btn_start.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        self._btn_resume.setEnabled(False)
+        self._glow_phase = 0.0
+        self._glow_timer.start()
+        self._sweep_status_window.reset()
+        self._last_write_value = None
+
+        # 체크된 measurement 인덱스를 여기서 고정한다 — sweep 도중 바뀌면 저장된
+        # .dat 의 열 구성과 어긋난다.
+        self._active_meas_indices = [
+            i for i, (_, cb) in enumerate(
+                zip(self._active_profile.measurements, self._meas_checkboxes))
+            if cb.isChecked()
+        ]
+        self._sync_data_window_columns()
+
+        # 측정 중 구성 변경 차단. Copy / Open Folder 는 계속 쓸 수 있게 남긴다.
+        self._sweep_channel_panel.setEnabled(False)
+        self._meas_panel.setEnabled(False)
+        self._set_save_inputs_enabled(False)
+        for window in (self._double_sweep_window, self._cycle_sweep_window,
+                       self._cycle_double_sweep_window, self._meta_data_window):
+            if window is not None:
+                window.lock_ui(True)
+        for window in (self._double_sweep_window, self._cycle_sweep_window,
+                       self._cycle_double_sweep_window):
+            if window is not None:
+                window._btn_start.setEnabled(False)
+
+        self._data_window.clear_values()
+        self._lbl_idle.setText("—")
+        self._lbl_idle.setStyleSheet("color: #555555;")
+        self._lbl_remaining.setText("—")
+
+    def _open_data_file(self) -> bool:
+        """.dat 세션 시작. 저장이 켜져 있는데 실패하면 측정을 취소하고 False.
+
+        여기서 그냥 진행하면 장시간 측정이 통째로 유실된다.
+        """
+        self._update_save_preview()
+        filepath = self._data_saver.start_session()
+        if filepath:
+            self._log(f"  Data → {filepath}", color="#888888")
+            return True
+
+        error = self._data_saver.start_error()
+        if error is None:
+            return True     # 저장을 의도적으로 끈 상태
+
+        self._log(f"  ✗ 데이터 저장 시작 실패 — 측정 취소: {error}", color="#f44747")
+        self._on_stop()
+        QMessageBox.critical(
+            self, "데이터 저장 실패 — 측정 취소",
+            f"데이터 파일을 시작할 수 없어 측정을 시작하지 않았습니다.\n\n"
+            f"사유: {error}\n\n"
+            "Main Folder 경로·권한·디스크 공간을 확인하세요.",
+        )
+        return False
+
+    def _prepare_derivative_channels(self):
+        """미분 채널을 현재 설정으로 다시 만들고 버퍼를 비운다. 측정 중 편집은 잠근다."""
+        for order, (channel, _key) in enumerate(self._deriv_channels(), start=1):
+            channel.reconfigure(self._build_deriv_config(order))
+            channel.reset()
+        for suffix in ("", "2", "3"):
+            getattr(self, f"_cb_deriv{suffix}_enable").setEnabled(False)
+            for widget in getattr(self, f"_deriv{suffix}_setting_widgets"):
+                widget.setEnabled(False)
+
+    def _prepare_graph_session(self):
+        self._graph_history.clear()
+        self._graph_columns = self._build_graph_columns()
+        if self._graph_window is not None:
+            self._graph_window.begin_session(self._graph_columns)
+
+    def _configure_metadata(self):
+        """이번 sweep 의 T/B 버퍼 구성 — 화면에서 고른 측정 타입이 우선한다."""
+        labels = [
+            self._meas_label_for(idx, self._active_profile.measurements[idx])
+            for idx in self._active_meas_indices
+        ]
+        type_overrides = {}
+        for idx in self._active_meas_indices:
+            if idx >= len(self._meas_type_combos):
+                continue
+            try:
+                type_overrides[idx] = MeasType(self._meas_type_combos[idx].currentData())
+            except Exception:
+                pass    # 알 수 없는 값이면 모델 기본 타입을 쓴다
+
+        self._meta_manager.configure(
+            self._active_meas_indices,
+            self._active_profile.measurements,
+            labels,
+            meas_type_overrides=type_overrides,
+        )
+
+    def _log_sweep_start(self):
+        self._log("Sweep started.", color="#4ec9b0")
+        self._log_sweep(
+            f"━━ Sweep started  target={self._sweep_config.sweep_to:.4g}  "
+            f"rate={self._sweep_config.sweep_rate:.4g}  "
+            f"tpp={self._sweep_config.time_per_point:.3g}s",
+            color="#4ec9b0",
+        )
+
+    def _request_initial_measurement(self):
+        """이동 없이 현재 위치에서 measurement 만 한 번 — sweep 시작점 기록."""
+        measurements = self._active_profile.measurements
+        active = [
+            (row, measurements[row].alias, measurements[row].description,
+             measurements[row].resolved_cmd)
+            for row in self._active_meas_indices
+        ]
+        self._auto_retry_used = False
+        request = StepRequest(
+            sweep_channel=self._sweep_channel,
+            sweep_to=self._sweep_config.sweep_to,
+            sweep_rate=self._sweep_config.sweep_rate,
+            time_per_point=self._sweep_config.time_per_point,
+            t_emit=time.perf_counter(),
+            last_write_value=None,
+            active_measurements=active,
+            measure_only=True,
+        )
+        self._last_step_request = request
+        self.request_step.emit(request)
+
+    def _on_stop_clicked(self):
+        """사용자가 Stop 버튼을 누른 경우 — 직전 지점을 resume 로그에 저장 후 중단."""
+        if self._running and self._last_write_value is not None:
+            self._save_resume_point("사용자 중단(Stop)")
+        self._on_stop()
+
+    def _on_stop(self):
+        if not self._running:
+            return
+        self._running = False
+        self._last_write_value = None
+        self._worker.request_stop()
+        self._sweep_step_timer.stop()
+        self._retry_timer.stop()
+        self._update_resume_btn_enabled()
+        self._btn_start.setEnabled(True)
+        self._btn_stop.setEnabled(False)
+        self._sweep_channel_panel.setEnabled(True)
+        self._meas_panel.setEnabled(True)
+        self._set_save_inputs_enabled(True)
+        # re-enable Double Sweep if it's not actively running
+        if self._double_sweep_window is not None:
+            from pythonization.ui.modules.double_sweep.window import DoubleSweepPhase
+            if self._double_sweep_window._phase == DoubleSweepPhase.IDLE:
+                self._double_sweep_window._btn_start.setEnabled(True)
+                self._double_sweep_window.lock_ui(False)
+        # re-enable Cycle Sweep / Double Sweep+ if they're not actively running
+        for window in (self._cycle_sweep_window, self._cycle_double_sweep_window):
+            if window is not None and window.is_idle():
+                window._btn_start.setEnabled(True)
+                window.lock_ui(False)
+        if self._meta_data_window is not None:
+            self._meta_data_window.lock_ui(False)
+        # Re-enable derivative settings
+        for suffix in ("", "2", "3"):
+            cb = getattr(self, f"_cb_deriv{suffix}_enable")
+            cb.setEnabled(True)
+            enabled = cb.isChecked()
+            for w in getattr(self, f"_deriv{suffix}_setting_widgets"):
+                w.setEnabled(enabled)
+        self._stop_glow()
+        self._log("Sweep stopped.", color="#ce9178")
+
+    def _log_sweep(self, text: str, color: str = "#c9d1d9", verbose: bool = False):
+        """Sweep Log 패널에 기록. verbose=True 항목은 Verbose 체크 시에만 표시."""
+        self._debug_window.log_sweep(text, color=color, verbose=verbose)
+
+    def _sweep_tick(self):
+        """메인 스레드: VISA 작업을 worker에 위임하고 즉시 리턴합니다."""
+        if not self._running:
+            return
+
+        self._tick_start = time.perf_counter()
+
+        # 체크박스 상태는 메인 스레드에서만 읽어야 하므로 여기서 스냅샷
+        active = [
+            (row, m.alias, m.description, m.resolved_cmd)
+            for row, (m, cb) in enumerate(
+                zip(self._active_profile.measurements, self._meas_checkboxes)
+            )
+            if cb.isChecked()
+        ]
+
+        # Sweep Log: 단계 컨텍스트 저장 (오류 발생 시 참조용) + verbose 로그
+        meas_names = ", ".join(desc for _, _, desc, _ in active) or "—"
+        self._step_context = (
+            f"step#{self._sweep_step_count + 1}  "
+            f"target={self._sweep_config.sweep_to:.4g}  "
+            f"meas=[{meas_names}]"
+        )
+        self._log_sweep(
+            f"→ {self._step_context}",
+            color="#555555", verbose=True,
+        )
+
+
+        sv = self._active_profile.sweep_values[
+            self._sweep_radio_group.checkedId()
+        ] if self._sweep_radio_group.checkedId() >= 0 else None
+
+        t_emit = time.perf_counter()
+        req = StepRequest(
+            sweep_channel=self._sweep_channel,
+            sweep_to=self._sweep_config.sweep_to,
+            sweep_rate=self._sweep_config.sweep_rate,
+            time_per_point=self._sweep_config.time_per_point,
+            t_emit=t_emit,
+            last_write_value=self._last_write_value,
+            safety_steps=sv.safety_steps if sv else 0,
+            safety_interval_ms=sv.safety_interval_ms if sv else 0.0,
+            active_measurements=active,
+        )
+        self._last_step_request = req   # 자동 재개 시 재전송용
+        self.request_step.emit(req)
+        # 여기서 즉시 리턴 → Qt 이벤트 루프 반환 → UI 반응 가능
+
+    def _on_step_done(self, result: StepResult):
+        """워커 스텝 완료 → 메인 스레드에서 기록·표시하고 다음 스텝을 예약한다.
+
+        순서가 중요하다: 파일 기록 → 메타데이터 → 그래프. 기록에 실패하면 뒤
+        단계로 넘어가지 않고 측정을 멈춘다(데이터 유실 방지).
+        """
+        t_recv = time.perf_counter()
+        if not self._running:
+            return
+
+        # is_done 인데 측정값이 없다 = 이미 목표에 있었다 → 기록할 것 없이 종료
+        if result.is_done and not result.meas_results:
+            self._finish_sweep()
+            return
+
+        self.set_source_value(result.current)
+        self._sweep_step_count += 1
+
+        # ── 다음 스텝을 UI 작업 '전에' 예약한다 ───────────────────────────────
+        # 기록·그래프·로그·fsync 가 늦어져도 측정 주기가 밀리지 않게 하기 위함이다.
+        # 예약 시각은 t_emit 기준이므로 여기서 걸든 뒤에서 걸든 발사 시각은 같지만,
+        # 미리 걸어 두면 그 사이의 GUI 작업이나 GC 일시정지가 발사를 늦추지 못한다.
+        # 완료/중단 경로에서는 _on_stop() 이 이 타이머를 멈춘다.
+        self._pending_interval_ms = None
+        if not result.is_done and not result.measure_only:
+            tpp_now = self._sweep_config.time_per_point
+            elapsed_ms = int((t_recv - result.timing.t_emit) * 1000)
+            self._pending_interval_ms = max(0, int(tpp_now * 1000) - elapsed_ms)
+            self._sweep_step_timer.start(self._pending_interval_ms)
+
+        meas_map = {row: val for row, val in result.meas_results}
+        row_vals, failed = self._format_measurement_row(result, meas_map)
+        if failed:
+            self._handle_measurement_failure(result, failed)
+            return
+
+        self._auto_retry_used = False        # 정상 스텝 — 자동 재개 예산 리셋
+        self._log_step_summary(result, meas_map)
+
+        deriv_vals = self._push_derivatives(result, meas_map)
+        row_vals += self._derivative_row_cells(deriv_vals)
+
+        self._data_window.update_values(row_vals)
+        if not self._record_row(row_vals):
+            return
+
+        self._meta_manager.record_step(result.meas_results)   # T/B 메타 버퍼 누적
+        self._push_graph_point(result, meas_map, deriv_vals)
+        self._update_step_status(result)
+        self._last_write_value = result.next_v
+        self._update_remaining_time(result)
+
+        self._timing_window.update_timing(result.timing, t_recv, time.perf_counter())
+        self._schedule_next_step(result)
+
+    # ── _on_step_done 의 단계별 처리 ───────────────────────────────────────
+
+    def _finish_sweep(self):
+        """sweep 정상 종료 — 표시 초기화, 메타데이터 저장, 정지."""
+        self._lbl_idle.setText("—")
+        self._lbl_remaining.setText("—")
+        self._log(f"Sweep complete. ({self._sweep_step_count} steps)", color="#4ec9b0")
+        self._log_sweep(f"★ Sweep complete — {self._sweep_step_count} steps",
+                        color="#4ec9b0")
+        # 워커가 끝난 뒤라 VISA 접근이 안전한 시점
+        self._meta_manager.save(
+            self._param_manager_reg.meta_data_config,
+            self._data_saver.get_filepath(),
+        )
+        self._on_stop()
+
+    def _format_measurement_row(self, result, meas_map: dict) -> tuple:
+        """저장/표시용 한 행을 만든다. 반환: (셀 목록, 실패한 measurement 인덱스 목록)
+
+        val=None → 측정 에러(스윕 중단 대상)
+        val=nan  → threshold 초과(스윕은 계속하고 파일에 'nan' 기록)
+        """
+        row_vals = [f"{result.next_v:.6g}"]
+        failed = []
+        for idx in self._active_meas_indices:
+            val = meas_map.get(idx)
+            if val is None:
+                failed.append(idx)
+                row_vals.append("ERR")
+            elif math.isnan(val):
+                row_vals.append("nan")
+            else:
+                row_vals.append(f"{val:.6g}")
+        return row_vals, failed
+
+    def _handle_measurement_failure(self, result, failed: list):
+        """측정 실패 처리 — 통신 오류면 자동 재개 경로로, 그 외(파싱 등)는 즉시 중단."""
+        descs = [
+            self._active_profile.measurements[idx].description
+            + (f": {result.meas_errors[idx]}" if idx in result.meas_errors else "")
+            for idx in failed
+        ]
+        err_msg = f"✗ ERR @ {self._step_context}\n실패 채널: {', '.join(descs)}"
+        self._log_sweep(f"  {err_msg}", color="#f44747")
+
+        if any(is_comm_error(result.meas_errors.get(idx, "")) for idx in failed):
+            self._handle_comm_error("; ".join(descs))
+            return
+
+        self._on_stop()
+        detail = "; ".join(result.meas_errors.get(idx, "") for idx in failed)
+        QMessageBox.critical(self, "Measurement Error",
+                             f"{err_msg}\n\n원인: {humanize_error(detail)}")
+
+    def _log_step_summary(self, result, meas_map: dict):
+        """verbose 로그에 이번 스텝 측정값 요약 (실패·threshold 초과 값은 제외)."""
+        summary = "  ".join(
+            f"{self._active_profile.measurements[idx].description}={meas_map[idx]:.4g}"
+            for idx in self._active_meas_indices
+            if meas_map.get(idx) is not None and not math.isnan(meas_map[idx])
+        )
+        if summary:
+            self._log_sweep(f"  ✓ v={result.next_v:.4g}  {summary}",
+                            color="#888888", verbose=True)
+
+    def _push_derivatives(self, result, meas_map: dict) -> list:
+        """1·2·3차 미분값 계산. ≤50점 numpy 연산이라 GUI 스레드에서 해도 부하가 없다."""
+        return [self._deriv_val_for_order(result, meas_map, ch)
+                for ch, _key in self._deriv_channels()]
+
+    def _derivative_row_cells(self, deriv_vals: list) -> list:
+        """활성화된 미분 채널만 저장 행에 덧붙인다."""
+        return [f"{val:.6g}" if val is not None else "—"
+                for (ch, _key), val in zip(self._deriv_channels(), deriv_vals)
+                if ch._cfg.enabled]
+
+    def _record_row(self, row_vals: list) -> bool:
+        """.dat 에 한 줄 기록. 저장이 켜져 있는데 실패하면 측정을 멈추고 False."""
+        if self._data_saver.append_row(row_vals) or not self._data_saver.is_enabled():
+            return True
+        self._log("  ✗ 데이터 기록 실패 — 측정 중단 (디스크/권한 확인).", color="#f44747")
+        self._on_stop()
+        QMessageBox.critical(
+            self, "데이터 기록 실패 — 측정 중단",
+            "측정값을 파일에 기록하지 못해 측정을 중단했습니다.\n"
+            "디스크 공간·파일 권한을 확인한 뒤 다시 시작하세요.",
+        )
+        return False
+
+    def _push_graph_point(self, result, meas_map: dict, deriv_vals: list):
+        """그래프 히스토리에 한 점 추가. 창이 떠 있지 않아도 계속 쌓아 둔다."""
+        values = {"__sweep__": result.next_v}
+        for idx in self._active_meas_indices:
+            val = meas_map.get(idx)
+            # 측정 실패·threshold 초과는 nan → 그래프에서 선이 끊긴다
+            desc = self._active_profile.measurements[idx].description
+            values[desc] = val if val is not None else float("nan")
+        for (ch, key), val in zip(self._deriv_channels(), deriv_vals):
+            if ch._cfg.enabled:
+                values[key] = val if val is not None else float("nan")
+
+        point = GraphDataPoint(values=values, phase="")
+        self._graph_history.append(point)
+        if self._graph_window is not None:
+            self._graph_window.append_point(point)
+
+    def _update_step_status(self, result):
+        """Sweep Status 창의 스텝 번호와 '다음 예정값' 갱신."""
+        # rate/tpp 가 0이면 calculate_next_step 이 ValueError 를 던진다(안전장치).
+        # 이 슬롯을 감싸는 try 가 없어 그대로 두면 sweep 이 조용히 멈추므로 흡수한다.
+        try:
+            next_display = None if result.is_done else calculate_next_step(
+                result.next_v,
+                self._sweep_config.sweep_to,
+                self._sweep_config.sweep_rate,
+                self._sweep_config.time_per_point,
+            )[0]
+        except ValueError:
+            next_display = None
+        self._sweep_status_window.update_step(
+            self._sweep_step_count, result.current, next_display)
+
+    def _update_remaining_time(self, result):
+        """목표까지 남은 시간 예측 표시."""
+        tpp = self._sweep_config.time_per_point
+        step_size = self._sweep_config.sweep_rate * tpp / 60.0
+        if step_size <= 0 or result.is_done:
+            self._lbl_remaining.setText("—")
+            return
+        distance = abs(self._sweep_config.sweep_to - result.next_v)
+        steps = math.ceil(distance / step_size) if distance > 1e-12 else 0
+        remaining_s = steps * tpp
+        if remaining_s < 60:
+            self._lbl_remaining.setText(f"{remaining_s:.1f} s")
+        else:
+            minutes, seconds = divmod(int(remaining_s), 60)
+            self._lbl_remaining.setText(f"{minutes} min {seconds} s")
+
+    def _schedule_next_step(self, result):
+        """다음 스텝 예약 — 완료면 종료, 초기 측정이면 즉시, 아니면 남은 간격만큼 대기."""
+        if result.is_done:
+            self._finish_sweep()
+            return
+
+        if result.measure_only:
+            # 초기 상태 측정 완료 → 즉시 sweep 타이머 시작
+            self._sweep_step_timer.start(0)
+        else:
+            # 타이머는 이미 위에서 걸었다. 여기서는 남은 여유만 표시한다.
+            # UI 작업까지 끝난 시점의 실제 여유를 보여 줘야 진단에 쓸모가 있다.
+            spare_ms = int((self._sweep_config.time_per_point * 1000)
+                           - (time.perf_counter() - result.timing.t_emit) * 1000)
+            if spare_ms >= 0:
+                self._lbl_idle.setText(f"{spare_ms} ms")
+                self._lbl_idle.setStyleSheet("color: #555555;")
+            else:
+                # 한 스텝이 Time/Point 를 넘겼다 = 이 구간의 실제 sweep rate 가
+                # 설정값보다 느려졌다는 뜻. 조용히 넘기지 않고 알린다.
+                self._lbl_idle.setText(f"overrun {-spare_ms} ms")
+                self._lbl_idle.setStyleSheet("color: #f44747;")
+                self._overrun_count = getattr(self, "_overrun_count", 0) + 1
+                if self._overrun_count in (1, 10, 100, 1000):
+                    self._log_sweep(
+                        f"  ⚠ 스텝이 Time/Point 를 {-spare_ms} ms 초과 "
+                        f"(누적 {self._overrun_count}회) — 이 구간은 설정한 "
+                        f"sweep rate 보다 느리게 진행됩니다.",
+                        color="#d7ba7d")
+
+    def _on_step_error(self, msg: str):
+        """Worker에서 예외 발생 시 메인 스레드에서 처리."""
+        ctx = getattr(self, "_step_context", "unknown step")
+        cause = humanize_error(msg)
+        self._log(f"  ERROR (sweep tick): {cause}", color="#f44747")
+        self._log_sweep(
+            f"  ✗ EXCEPTION @ {ctx}\n    원인: {cause}\n    [상세] {msg}",
+            color="#f44747",
+        )
+        if is_comm_error(msg):
+            self._handle_comm_error(msg)
+        else:
+            self._on_stop()
+
+    # ------------------------------------------------------------------
+    # 통신 오류 자동 재개 / 수동 재개
+    # ------------------------------------------------------------------
+
+    _AUTO_RESUME_DELAY_MS = 10_000   # 통신 오류 후 자동 재개 대기 (10초)
+
+    def _handle_comm_error(self, reason: str):
+        """통신 오류 처리: 1회는 10초 후 자동 재개, 재차 발생 시 중단 + 재개 지점 저장."""
+        if not self._running:
+            return
+        if not self._auto_retry_used:
+            # 1차: 10초 후 자동 재개
+            self._auto_retry_used = True
+            self._sweep_step_timer.stop()
+            self._log(
+                f"  ⏳ 통신 오류 감지 — {self._AUTO_RESUME_DELAY_MS // 1000}초 후 자동 재개합니다.",
+                color="#d7ba7d",
+            )
+            self._log_sweep(
+                f"  ⏳ 통신 오류 — {self._AUTO_RESUME_DELAY_MS // 1000}초 후 자동 재개  ({reason})",
+                color="#d7ba7d",
+            )
+            self._retry_timer.start(self._AUTO_RESUME_DELAY_MS)
+        else:
+            # 2차: 중단 + 재개 지점 저장
+            self._save_resume_point(reason)
+            cause = humanize_error(reason)
+            self._log(
+                "  ✗ 자동 재개 후 재차 통신 오류 — 측정을 중단합니다. "
+                "[Resume] 버튼으로 저장된 지점부터 재개할 수 있습니다.",
+                color="#f44747",
+            )
+            self._log(f"     원인: {cause}", color="#f44747")
+            self._on_stop()
+            QMessageBox.warning(
+                self, "통신 오류 — 측정 중단",
+                "자동 재개 후에도 통신 오류가 반복되어 측정을 중단했습니다.\n\n"
+                f"원인: {cause}\n\n"
+                "현재 지점이 재개 로그에 저장되었습니다.\n"
+                "[Resume] 버튼으로 해당 지점부터 다시 시작할 수 있습니다.",
+            )
+
+    def _auto_resume_step(self):
+        """10초 경과 후 마지막 StepRequest를 재전송하여 측정을 이어간다."""
+        if not self._running or self._last_step_request is None:
+            return
+        self._log("  ▶ 자동 재개 — 측정을 재시작합니다.", color="#4ec9b0")
+        self._log_sweep("  ▶ 자동 재개", color="#4ec9b0")
+        self.request_step.emit(self._last_step_request)
+
+    def _save_resume_point(self, reason: str):
+        """현재 단일 sweep 위치를 재개 로그에 저장."""
+        fp = self._data_saver.get_filepath()
+        pos = self._last_write_value
+        label = (
+            f"step#{self._sweep_step_count}  pos={pos:.6g}  "
+            f"target={self._sweep_config.sweep_to:.4g}  ({reason[:40]})"
+            if pos is not None else
+            f"step#{self._sweep_step_count}  target={self._sweep_config.sweep_to:.4g}"
+        )
+        point = ResumePoint(
+            sweep_type="single",
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            label=label,
+            data_filepath=str(fp) if fp else "",
+            payload={
+                "last_write_value": pos,
+                "step_count": self._sweep_step_count,
+                "sweep_to": self._sweep_config.sweep_to,
+                "sweep_rate": self._sweep_config.sweep_rate,
+                "time_per_point": self._sweep_config.time_per_point,
+                "active_meas_indices": list(self._active_meas_indices),
+            },
+        )
+        self._resume_log.add(point)
+        self._update_resume_btn_enabled()
+
+    def _update_resume_btn_enabled(self):
+        """재개 로그에 단일 sweep 지점이 있고, 현재 측정 중이 아니면 Resume 활성화."""
+        if not hasattr(self, "_btn_resume"):
+            return
+        has_point = self._resume_log.latest("single") is not None
+        self._btn_resume.setEnabled(has_point and not self._running)
+
+    def _on_resume_clicked(self):
+        """[Resume] 버튼: 저장된 지점 목록에서 선택 후 재개."""
+        if self._running:
+            return
+        points = self._resume_log.all()
+        dlg = ResumePickerDialog(points, parent=self, sweep_type="single")
+        if dlg.exec() and dlg.selected_point is not None:
+            self._resume_from_point(dlg.selected_point)
+
+    def _resume_from_point(self, point):
+        """선택된 재개 지점부터 단일 sweep을 이어서 시작한다 (기존 파일 이어쓰기)."""
+        if self._sweep_channel is None:
+            QMessageBox.warning(self, "No Sweep Channel",
+                "Parameter Manager에서 Paired Command를 선택하세요.")
+            return
+        if not self._run_connection_test(include_second=False, show_success=False):
+            return
+
+        p = point.payload
+        # 데이터 파일 이어쓰기 복원
+        resumed_fp = self._data_saver.resume_session(point.data_filepath)
+
+        self._running = True
+        self._auto_retry_used = False
+        self._sweep_step_count = int(p.get("step_count", 0))
+        self._last_write_value = p.get("last_write_value")
+        self._active_meas_indices = list(p.get("active_meas_indices", self._active_meas_indices))
+
+        # _on_start과 동일한 세션 초기화 — 재개 후 컬럼/미분/메타데이터가 일관되도록.
+        # (이걸 안 하면: 미분 deque가 Stop 이전 값을 물고 있어 불연속을 가로질러 기울기를
+        #  계산하고, 메타 T/B 버퍼가 이전 세션 값으로 누적되며, 데이터창 컬럼이 어긋난다.)
+        self._sync_data_window_columns()
+        for order, ch in [(1, self._deriv_channel), (2, self._deriv_channel2),
+                          (3, self._deriv_channel3)]:
+            ch.reconfigure(self._build_deriv_config(order))
+            ch.reset()
+        for suffix in ("", "2", "3"):
+            getattr(self, f"_cb_deriv{suffix}_enable").setEnabled(False)
+            for w in getattr(self, f"_deriv{suffix}_setting_widgets"):
+                w.setEnabled(False)
+        try:
+            _meas_labels = [self._meas_label_for(idx, self._active_profile.measurements[idx])
+                            for idx in self._active_meas_indices]
+            _ov = {}
+            for idx in self._active_meas_indices:
+                if idx < len(self._meas_type_combos):
+                    try:
+                        _ov[idx] = MeasType(self._meas_type_combos[idx].currentData())
+                    except Exception:
+                        pass
+            self._meta_manager.configure(self._active_meas_indices,
+                                         self._active_profile.measurements,
+                                         _meas_labels, meas_type_overrides=_ov)
+        except Exception as e:
+            self._log(f"  ⚠ 재개 메타데이터 설정 경고: {e}", color="#d7ba7d")
+
+        self._btn_start.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        self._btn_resume.setEnabled(False)
+        self._glow_phase = 0.0
+        self._glow_timer.start()
+        self._sweep_channel_panel.setEnabled(False)
+        self._meas_panel.setEnabled(False)
+        self._set_save_inputs_enabled(False)
+        for window in (self._double_sweep_window, self._cycle_sweep_window,
+                       self._cycle_double_sweep_window):
+            if window is not None:
+                window.lock_ui(True)
+                window._btn_start.setEnabled(False)
+
+        self._log(
+            f"  ▶ 수동 재개 — pos={self._last_write_value}, step#{self._sweep_step_count}"
+            + (f", 파일 이어쓰기: {resumed_fp}" if resumed_fp else ""),
+            color="#4ec9b0",
+        )
+        self._log_sweep(f"━━ 재개 (resume) — step#{self._sweep_step_count}", color="#4ec9b0")
+        # 다음 스텝부터 정상 루프 진입
+        self._sweep_step_timer.start(0)
+
+    def _browse_save_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Main Folder 선택", self._le_main_folder.text() or ""
+        )
+        if folder:
+            self._le_main_folder.setText(folder)
+
+    def _copy_save_path(self):
+        path = self._lbl_save_preview.text()
+        if path and path != "—" and not path.startswith("("):
+            QApplication.clipboard().setText(path)
+
+    def _open_save_folder(self):
+        path = self._lbl_save_preview.text()
+        if not path or path == "—" or path.startswith("("):
+            return
+        folder = os.path.dirname(path)
+        if not os.path.isdir(folder):
+            # 아직 생성 안 됐으면 상위 폴더로 올라가기
+            from pathlib import Path
+            p = Path(folder)
+            while p and not p.is_dir():
+                p = p.parent
+            folder = str(p) if p and p.is_dir() else ""
+        if folder:
+            subprocess.Popen(f'explorer "{folder}"')
+
+    def _set_save_inputs_enabled(self, enabled: bool):
+        """저장 설정 입력 위젯만 잠금/해제. Copy/Open Folder 버튼·미리보기는 항상 사용 가능.
+
+        (프레임 전체를 disable하면 자식인 Copy/Open 버튼도 비활성화되므로,
+         입력 위젯만 개별적으로 토글한다.)
+        """
+        for w in (self._le_main_folder, self._btn_save_browse,
+                  self._le_custom_folder, self._le_custom_word,
+                  self._cb_save_date, self._cb_save_enable):
+            w.setEnabled(enabled)
+
+    def _update_save_preview(self):
+        self._data_saver.set_main_folder(self._le_main_folder.text())
+        self._data_saver.set_custom_folder(self._le_custom_folder.text())
+        self._data_saver.set_custom_word(self._le_custom_word.text())
+        self._data_saver.set_include_date(self._cb_save_date.isChecked())
+        self._data_saver.set_enabled(self._cb_save_enable.isChecked())
+        self._lbl_save_preview.setText(self._data_saver.preview_path())
+
+    def _on_meas_type_changed(self):
+        self._sync_data_window_columns()
+        self._refresh_meta_data_preview()
+
+    def _refresh_meta_data_preview(self):
+        if self._meta_data_window and self._meta_data_window.isVisible():
+            self._meta_data_window._refresh_preview()
+
+    def _sync_data_window_columns(self):
+        """선택된 sweep channel + 체크된 measurements로 DataWindow 컬럼 설정."""
+        profile = self._active_profile
+        columns = []
+        # 첫 번째 컬럼: 현재 선택된 sweep channel의 next target value
+        sv_id = self._sweep_radio_group.checkedId()
+        if sv_id == self._TIME_ID:
+            columns.append(("time", ""))
+        elif 0 <= sv_id < len(profile.sweep_values):
+            sv = profile.sweep_values[sv_id]
+            columns.append((sv.figure_axis or "target", sv.unit))
+        else:
+            columns.append(("target", ""))
+        # 이후 컬럼: sweep 중이면 _active_meas_indices 기준, 아니면 현재 체크 상태
+        if self._running:
+            for idx in self._active_meas_indices:
+                m = profile.measurements[idx]
+                columns.append((self._meas_label_for(idx, m), m.unit))
+        else:
+            for i, m in enumerate(profile.measurements):
+                cb = self._meas_checkboxes[i] if i < len(self._meas_checkboxes) else None
+                if cb is None or cb.isChecked():
+                    columns.append((self._meas_label_for(i, m), m.unit))
+        for ch in (self._deriv_channel, self._deriv_channel2, self._deriv_channel3):
+            if ch._cfg.enabled:
+                _, lbl, unit = ch.col_info()
+                columns.append((lbl, unit))
+        self._data_window.configure_columns(columns)
+        self._data_saver.set_columns(columns)
+
+    @staticmethod
+    def _parse_sweep_float(text: str, default: float) -> float:
+        try:
+            return float(text)
+        except (ValueError, TypeError):
+            return default
+
+    def _update_step_size_label(self):
+        tmp = SweepConfig(
+            sweep_rate=self._parse_sweep_float(self._le_sweep_rate.text(), 1.0),
+            time_per_point=self._parse_sweep_float(self._le_time_per_point.text(), 1.0),
+        )
+        self._lbl_step_size.setText(f"{tmp.step_size():.6g}  units/step")
+
+    def _on_sweep_params_confirmed(self):
+        self._sweep_config.sweep_to       = self._parse_sweep_float(self._le_sweep_to.text(), 0.0)
+        self._sweep_config.sweep_rate     = self._parse_sweep_float(self._le_sweep_rate.text(), 1.0)
+        self._sweep_config.time_per_point = self._parse_sweep_float(self._le_time_per_point.text(), 1.0)
+        self._timing_window.set_time_per_point(self._sweep_config.time_per_point)
+        # 측정 중이 아닐 때만 readback 재초기화. 측정 중에는 현재 위치(_last_write_value)를
+        # 보존한다 — null로 만들면 다음 스텝이 불필요한 readback을 하고, readback이 부정확한
+        # 장비에선 위치가 한 스텝 튈 수 있다(파라미터 변경은 그대로 반영됨).
+        if not self._running:
+            self._last_write_value = None
+        self._log("  Sweep params updated.", color="#888888")
+
+    def set_source_value(self, value: float):
+        self._sweep_config.source_value = value
+        self._le_source_value.setText(f"{value:.6g}")
+        self._le_source_value.setStyleSheet("color: #222222;")
+
+    # ------------------------------------------------------------------
+    # VISA log callback
+    # ------------------------------------------------------------------
+
+    def _on_visa_log(self, alias: str, cmd_type: str, cmd: str, result=None):
+        """VISA 콜백 — worker 스레드에서도 호출될 수 있으므로 Signal로 릴레이."""
+        try:
+            addr = self._registry.get_visa_address(alias) or "?"
+        except Exception:
+            addr = "?"
+        self._visa_log_relay.emit(alias, addr, cmd_type, cmd, result)
+
+    def _apply_visa_log(self, alias: str, addr: str, cmd_type: str, cmd: str, result):
+        """메인 스레드에서만 실행: 디버그 창에 VISA 로그 출력."""
+        self._debug_window.log_visa(alias, addr, cmd_type, cmd, result)
+
+    # ------------------------------------------------------------------
+    # Console command handling
+    # ------------------------------------------------------------------
+
+    def _handle_command(self, text: str):
+        self._registry.reload()
+        aliases = self._registry.list_aliases()
+
+        cmd = ConsoleCommand.parse(text)
+        if cmd:
+            try:
+                result = self._cmd_handler.execute(cmd)
+                if cmd.cmd_type == "write":
+                    self._log(f"  [{cmd.alias}] write OK: {cmd.visa_cmd}", color="#4ec9b0")
+                elif cmd.cmd_type == "read":
+                    self._log(f"  [{cmd.alias}] read  → {result}", color="#4ec9b0")
+                elif cmd.cmd_type == "query":
+                    self._log(f"  [{cmd.alias}] query → {result}", color="#4ec9b0")
+            except Exception as e:
+                self._log(f"  ERROR: {e}", color="#f44747")
+            return
+
+        if text.lower() == "help":
+            self._log("명령어 목록:")
+            self._log("  alias:<alias> VISA:<cmd> type:write|query|read")
+            self._log("  close:<alias>  /  list  /  clear")
+            return
+
+        if text.lower() == "list":
+            self._log("등록된 장비: " + (", ".join(aliases) if aliases else "(없음)"))
+            return
+
+        if text.lower() == "clear":
+            self._debug_window._console_output.clear()
+            return
+
+        if text.lower().startswith("close:"):
+            alias = text[6:].strip()
+            if self._session.is_open(alias):
+                self._session.close(alias)
+                self._log(f"  [{alias}] 연결 해제됨.")
+            else:
+                self._log(f"  [{alias}] 연결된 세션이 없습니다.", color="#f44747")
+            return
+
+        config = self._registry.get_config(text)
+        if config:
+            visa = self._registry.get_visa_address(text)
+            connected = "연결됨" if self._session.is_open(text) else "미연결"
+            self._log(f"[{text}]  ({connected})")
+            self._log(f"  VISA: {visa}", color="#4ec9b0")
+            self._log(f"  Driver: {config.class_name}")
+        else:
+            self._log(f"'{text}' 에 해당하는 장비가 없습니다.", color="#f44747")
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _log(self, text: str, color: str = "#d4d4d4"):
+        self._debug_window.log_console(text, color)
+
+    def keyPressEvent(self, event):
+        if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                and event.key() == Qt.Key.Key_S):
+            self._save_current_to_active_profile()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        if self._running:
+            reply = QMessageBox.question(
+                self, "종료 확인",
+                "Sweep이 실행 중입니다. 종료하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                event.ignore()
+                return
+            self._on_stop()
+
+        self._save_current_to_active_profile()
+        self._glow_timer.stop()
+        self._worker_thread.quit()
+        self._worker_thread.wait()
+        if self._double_sweep_window is not None:
+            self._double_sweep_window._worker_thread.quit()
+            self._double_sweep_window._worker_thread.wait()
+            self._double_sweep_window._second_thread.quit()
+            self._double_sweep_window._second_thread.wait()
+        # VNA 창의 acquire/sec/stop 워커도 정지·대기해야 한다 — 안 그러면 (a) running
+        # QThread 파괴로 std::terminate, (b) 워커가 VISA I/O 중인데 아래 session.shutdown()이
+        # ResourceManager를 닫아 use-after-free 크래시가 난다.
+        if self._vna_window is not None:
+            self._vna_window.shutdown_threads()
+        if self._mfli_window is not None:
+            self._mfli_window.shutdown_threads()
+        if self._cycle_sweep_window is not None:
+            self._cycle_sweep_window.shutdown_threads()
+        if self._cycle_double_sweep_window is not None:
+            self._cycle_double_sweep_window.shutdown_threads()
+        self._session.shutdown()
+
+        # 모든 하위 창 닫기
+        for win in (
+            self._vna_window,
+            self._mfli_window,
+            self._graph_window,
+            self._double_sweep_window,
+            self._cycle_sweep_window,
+            self._cycle_double_sweep_window,
+            self._param_manager_window,
+            self._visa_lib_window,
+            self._settings_window,
+        ):
+            if win is not None:
+                win.hide()
+
+        self._debug_window.deleteLater()
+        self._sweep_status_window.deleteLater()
+        self._timing_window.deleteLater()
+        self._data_window.deleteLater()
+
+        QApplication.quit()
+        super().closeEvent(event)

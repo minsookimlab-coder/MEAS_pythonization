@@ -1,7 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec — Pythonization v1.0
+"""PyInstaller spec — Pythonization.
 
-import sys
+빌드:  pyinstaller build_exe.spec
+결과:  dist/Pythonization/Pythonization.exe
+
+사용자 데이터(프로파일·instruments.yaml·로그)는 번들에 넣지 않는다. 실행 시
+~/Documents/pythonization/settings 아래에 만들어지며, 위치는 app_config.yaml 의
+data_dir 로 바꿀 수 있다 (pythonization/app/paths.py 참고).
+"""
 from pathlib import Path
 
 ROOT = Path(SPECPATH)
@@ -11,43 +17,39 @@ a = Analysis(
     pathex=[str(ROOT)],
     binaries=[],
     datas=[
-        # settings 폴더 (프로파일 YAML 등) 를 번들에 포함
-        (str(ROOT / 'settings'), 'settings'),
+        # GUI 정적 자산 (whale.png 등). 소스 레이아웃과 같은 위치에 둬야
+        # pythonization/ui/assets/asset_path() 가 그대로 찾는다.
+        (str(ROOT / 'pythonization' / 'ui' / 'assets'), 'pythonization/ui/assets'),
     ],
     hiddenimports=[
-        # pyvisa 백엔드
+        # pyvisa 백엔드 — 런타임에 문자열로 선택되므로 정적 분석에 안 잡힌다
         'pyvisa',
         'pyvisa.resources',
         'pyvisa.highlevel',
         'pyvisa_py',
-        # PySide6 플러그인
+        # PySide6
         'PySide6.QtCore',
         'PySide6.QtWidgets',
         'PySide6.QtGui',
-        'PySide6.QtCharts',
         'PySide6.QtOpenGL',
         'PySide6.QtOpenGLWidgets',
         # pydantic
         'pydantic',
-        'pydantic.v1',
         # yaml
         'yaml',
-        # matplotlib (graph_window이 사용할 경우 대비)
-        'matplotlib',
-        'matplotlib.backends.backend_qt5agg',
+        # 드라이버는 instruments.yaml 의 문자열로 importlib 로딩된다 →
+        # 정적 분석이 못 보므로 패키지째 포함해야 한다.
+        'pythonization.instruments.drivers',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         'tkinter',
-        'unittest',
-        'email',
-        'html',
-        'http',
-        'urllib',
-        'xmlrpc',
         'test',
+        # 주의: email / urllib / http / smtplib 는 제외하면 안 된다.
+        # notify/alarm_manager.py 가 이메일(smtplib+email.mime)과
+        # 텔레그램(urllib.request)에 쓴다 — 제외하면 알람이 exe 에서만 깨진다.
     ],
     noarchive=False,
     optimize=0,
@@ -65,13 +67,13 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,          # 콘솔 창 없음 (GUI 전용)
+    console=False,          # GUI 전용 — 콘솔 창 없음
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    version='version_info.txt',   # 버전 정보 (아래 파일 생성)
+    version='version_info.txt',
 )
 
 coll = COLLECT(

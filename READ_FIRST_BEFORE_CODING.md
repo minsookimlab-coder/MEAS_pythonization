@@ -3,14 +3,15 @@
 이 저장소에서 **AI 코딩 도구(Claude Code 등)로 작업하기 전에 반드시 읽는다.**
 로컬 기록·대화가 사라져도 이 파일만 읽으면 규칙이 복원되도록 자족적으로 적는다.
 
-작업 브랜치는 **`main`** 이다. `refactor/restructure` 는 별개 계보이며 머지하지 않는다
-(자세한 내용은 맨 아래 참고).
+브랜치는 **`main` 하나뿐이다. 새 브랜치를 만들지 않는다** (자세한 내용은 맨 아래 참고).
+코드는 저장소 루트의 단일 패키지 `pythonization/` 안에 있다.
 
 ---
 
-## 규칙 1 — 수정사항은 반드시 PATCH_NOTES.md 에 남긴다
+## 규칙 1 — 수정사항은 반드시 docs/CHANGELOG.md 에 남긴다
 
-코드를 고쳤으면 **같은 작업 안에서** [PATCH_NOTES.md](PATCH_NOTES.md) 를 갱신한다.
+코드를 고쳤으면 **같은 작업 안에서** [docs/CHANGELOG.md](docs/CHANGELOG.md) 를 갱신한다.
+(예전 이름은 루트의 `PATCH_NOTES.md` 였다.)
 "나중에 몰아서" 는 금지다. 이 파일이 이 프로젝트의 유일한 변경 이력이며,
 git log 보다 먼저 읽히는 문서다.
 
@@ -20,7 +21,8 @@ git log 보다 먼저 읽히는 문서다.
 ## v1.07.2 — 2026-09-09 (버그픽스)
 
 - **[치명] 한 줄 요약** — 무엇이 왜 잘못됐는지, 어떤 조건에서 드러나는지,
-  어떻게 고쳤는지. 파일·함수·줄번호를 적는다 (`gui/vna_window.py:1279`).
+  어떻게 고쳤는지. 파일·함수·줄번호를 적는다
+  (`pythonization/ui/modules/vna/window.py:1279`).
   재현 조건과 실측값이 있으면 함께 적는다.
 ```
 
@@ -31,8 +33,8 @@ git log 보다 먼저 읽히는 문서다.
 - **측정했으면 숫자를 적는다.** before/after 수치는 다음 사람이 회귀를 알아채는 근거다.
 - **[치명]** 은 측정 데이터 유실·장비 오동작·장시간 측정 중단에만 붙인다.
 - 버전을 올렸으면 `version_info.txt` 도 같이 맞춘다.
-- 사용자에게 보이는 동작이 바뀌었으면 [USER_MANUAL.md](USER_MANUAL.md),
-  구조가 바뀌었으면 [STRUCTURE.md](STRUCTURE.md) 도 함께 고친다.
+- 사용자에게 보이는 동작이 바뀌었으면 [docs/USER_MANUAL.md](docs/USER_MANUAL.md),
+  구조가 바뀌었으면 [docs/STRUCTURE.md](docs/STRUCTURE.md) 도 함께 고친다.
 
 ---
 
@@ -82,8 +84,8 @@ session.write(entry.alias, cmd)                 # I/O 는 항상 InstrumentSessi
 - 값이 들어갈 자리는 `{v}`, `{m}` 같은 **placeholder** 로 둔다.
   sweep 축은 `{v}` 로 정규화한다.
 - 장비 고유의 프로토콜 처리(TSP 의 `print()` 감싸기, ISOBUS 접두어, raw socket
-  종단 문자 등)는 **`driver/` 의 드라이버 클래스 안에서만** 한다.
-  드라이버는 `core/instrument_base.py` 외에는 아무것도 모른다.
+  종단 문자 등)는 **`pythonization/instruments/drivers/` 의 드라이버 클래스 안에서만**
+  한다. 드라이버는 `instruments/base.py` 외에는 아무것도 모른다.
 - VISA I/O 는 **`InstrumentSession` 을 통해서만** 한다. `pyvisa` 를 직접 열지 않는다.
 - 워커 스레드에서 GUI 위젯을 만지지 않는다. 값은 Signal 로 넘기고
   bound `@Slot` 에서 받는다.
@@ -109,11 +111,11 @@ session.write(entry.alias, cmd)                 # I/O 는 항상 InstrumentSessi
 | 프로그램 | 저장소 (`APP_DIR`) | 코드, 리소스, 기본값. **git 에 올라간다** |
 | 사용자 데이터 | `SETTINGS_DIR` = `~/Documents/pythonization/settings` | 개인정보·랩 고유 설정. **git 에 올리지 않는다** |
 
-`SETTINGS_DIR` 는 `core/app_dirs.py` 가 확정한다. 경로는 Settings → Config 에서 바꿀 수
+`SETTINGS_DIR` 는 `pythonization/app/paths.py` 가 확정한다. 경로는 Settings → Config 에서 바꿀 수
 있고(`set_data_dir()`, 재시작 후 적용), 새 코드는 이 값을 통해서만 사용자 파일에 접근한다.
 
 ```python
-from core.app_dirs import SETTINGS_DIR
+from pythonization.app.paths import SETTINGS_DIR
 path = SETTINGS_DIR / "profiles" / f"{name}.yaml"     # OK
 
 path = Path(__file__).parent / "my_settings.yaml"     # 금지 — 프로그램 폴더
@@ -177,25 +179,62 @@ path = Path("C:/Users/Main/Desktop/...")              # 금지 — 하드코딩�
 커밋하고 `origin` 에 푸시한다. 로컬만 고쳐두고 끝내지 않는다 — 로컬이 날아가면
 그대로 사라진다.
 
-- **검증 먼저.** 돌려보지 않은 코드는 푸시하지 않는다. `main` 에는 테스트 스위트가
-  없으므로 헤드리스로 직접 확인한다(창 생성, 위젯 상태, 임시 폴더의 `.dat` 내용 등).
+- **검증 먼저.** 돌려보지 않은 코드는 푸시하지 않는다.
+
+  ```
+  python -m unittest discover -s tests -t .     # 표준 라이브러리만 쓴다 (334개)
+  ```
+
+  테스트가 닿지 않는 곳(측정 흐름, 창 동작)은 헤드리스로 직접 확인한다
+  (`QT_QPA_PLATFORM=offscreen`, 창 생성·위젯 상태·임시 폴더의 `.dat` 내용).
+  사용자의 실제 설정(`%USERPROFILE%\Documents\pythonization\settings`)에는 쓰지 않는다 —
+  검증용 `ProfileRegistry(settings_dir=<임시폴더>)` 를 쓴다.
 - **커밋은 의미 단위로 나눈다.** 저장소 정리 / 성능 / 버그픽스 / 문서를 한 덩어리로
   묶지 않는다. 나중에 어느 하나만 되돌릴 수 있어야 한다.
-- **규칙 1 을 같이 지킨다.** `PATCH_NOTES.md` 갱신이 그 커밋에 들어가야 한다.
+- **규칙 1 을 같이 지킨다.** `docs/CHANGELOG.md` 갱신이 그 커밋에 들어가야 한다.
 - 커밋 메시지는 **무엇을 왜** 고쳤는지 적는다. 원인과 수치를 본문에 남긴다.
-- `git push origin main`. 브랜치가 갈라졌으면 강제 푸시하지 말고 먼저 알린다.
+- `git push origin main`. 원격이 앞서 있으면 강제 푸시하지 말고 먼저 알린다.
 - 작업이 아직 끝나지 않았거나 검증에 실패했으면 **커밋하지 않고 상태를 보고한다.**
 
 ---
 
-## 참고 — 브랜치
+## 규칙 6 — 브랜치를 만들지 않는다
 
-- **`main`** : 현재 사용하는 브랜치. `core/ gui/ driver/ config/` 평면 레이아웃.
-- **`refactor/restructure`** : 2026-08-03 에 시작한 단일 `pythonization/` 패키지
-  재구성 계보. **머지하지 않기로 했다.** GitHub(`origin`)에 보존돼 있으므로
-  로컬이 날아가도 `git fetch origin refactor/restructure` 로 되찾을 수 있다.
-  거기에만 있는 것: Cycle Sweep / Cycle Double Sweep 모듈, 테스트 100여 개, `docs/`.
-  필요하면 파일 단위로 가져와 `main` 레이아웃에 맞게 옮긴다.
+**브랜치는 `main` 하나다.** 실험적인 작업이라도 새 브랜치를 파지 않는다.
+관리 비용이 실제 사고로 이어졌기 때문이다 — 2026-08-03 에 갈라진
+`refactor/restructure` 가 7주 동안 따로 자라면서, 한쪽에만 있는 기능과 수정이 쌓여
+**어느 빌드를 켰느냐에 따라 프로그램 동작이 달라졌다**(Cycle Sweep 이 사라진 것처럼
+보인 일). 2026-09-21 `v1.11.0` 에서 두 계보를 합치고 그 브랜치는 지웠다.
 
-`main` 에서 작업할 때 `pythonization/` 경로를 언급하는 지시를 받으면,
-그건 다른 브랜치 이야기다. `gui/` `core/` 쪽에서 대응하는 파일을 찾아 고친다.
+- 큰 변경도 `main` 에서 작은 커밋으로 나눠 진행한다. 되돌릴 수 있게 의미 단위로 쪼개고,
+  끝날 때마다 검증하고 푸시한다(규칙 5).
+- 되돌려야 하면 브랜치가 아니라 `git revert` 를 쓴다.
+- 사용자가 명시적으로 브랜치를 만들라고 하면 그때는 만든다. 그 외에는 만들지 않는다.
+
+---
+
+## 참고 — 레이아웃
+
+코드는 단일 패키지 `pythonization/` 안에 있다. 예전의 `core/ gui/ driver/ config/`
+평면 레이아웃은 `v1.11.0` 에서 없어졌다.
+
+```
+main.py                     얇은 셸 — 실제 기동 순서는 pythonization/app/bootstrap.py
+pythonization/
+  app/          기동·경로·로깅·Windows 이벤트 펌프
+  config/       설정 모델 (models.py = 예전 config/config_models.py)
+  instruments/  세션·레지스트리·파라미터·에러 + drivers/
+  measurement/  sweep 엔진·워커·저장·미분·메타데이터·재개
+  profiles/     프로파일 저장소
+  analysis/     LabOne 병합 등 비-GUI 분석
+  notify/       알람
+  util/         네트워크·TLS
+  ui/           main_window + widgets/ dialogs/ panels/ modules/ assets/
+tests/          표준 라이브러리 unittest (334개)
+docs/           STRUCTURE / USER_MANUAL / CHANGELOG
+```
+
+옛 문서나 대화에서 `gui/vna_window.py` 같은 평면 경로가 나오면
+`pythonization/ui/modules/vna/window.py` 처럼 대응하는 파일을 찾는다.
+사용자 설정(`instruments.yaml` 의 드라이버 경로)은 자동으로 새 경로로 해석된다
+(`instruments/factory.py` 의 `resolve_class_path`).
