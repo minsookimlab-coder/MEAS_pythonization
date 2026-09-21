@@ -93,6 +93,8 @@ class MainWindow(QMainWindow):
         self._settings_window = None
         self._visa_lib_window = None
         self._double_sweep_window = None
+        self._cycle_sweep_window = None
+        self._cycle_double_sweep_window = None
         self._graph_window = None
         self._graph_history: list = []   # GraphDataPoint 누적 — 창 없이도 저장, 열릴 때 replay
         self._graph_columns: list = []   # 현재 세션의 컬럼 스키마 — replay 시 begin_session에 재사용
@@ -264,6 +266,14 @@ class MainWindow(QMainWindow):
         act_mfli.setShortcut("Ctrl+Shift+F")
         act_mfli.triggered.connect(self._open_mfli_window)
         view_menu.addAction(act_mfli)
+        act_cycle = QAction("Cycle Sweep...", self)
+        act_cycle.setShortcut("Ctrl+Shift+C")
+        act_cycle.triggered.connect(self._open_cycle_sweep)
+        view_menu.addAction(act_cycle)
+        act_cycle2d = QAction("Double Sweep+ (Cycle)...", self)
+        act_cycle2d.setShortcut("Ctrl+Shift+B")
+        act_cycle2d.triggered.connect(self._open_cycle_double_sweep)
+        view_menu.addAction(act_cycle2d)
 
     def _setup_ui(self):
         self._glow_frame = GlowFrame("glowFrame")
@@ -331,6 +341,10 @@ class MainWindow(QMainWindow):
             self._mfli_window.on_profile_changed()
         if self._double_sweep_window is not None:
             self._double_sweep_window.reload_from_profile()
+        if self._cycle_sweep_window is not None:
+            self._cycle_sweep_window.reload_from_profile()
+        if self._cycle_double_sweep_window is not None:
+            self._cycle_double_sweep_window.reload_from_profile()
         if self._meta_data_window is not None and self._meta_data_window.isVisible():
             self._meta_data_window._populate()
         if self._param_manager_window is not None and self._param_manager_window.isVisible():
@@ -410,6 +424,12 @@ class MainWindow(QMainWindow):
         # MFLI 설정도 함께 저장 (profiles/mfli/{name}.yaml)
         if self._mfli_window is not None:
             self._mfli_window._save_ui_state()
+        # Cycle Sweep 은 저장 폴더·파일명을 자체 보관하므로 프로파일에 함께 남긴다.
+        # (창을 닫지 않고 프로그램을 끄면 창의 closeEvent 가 안 불리기 때문)
+        if self._cycle_sweep_window is not None:
+            self._cycle_sweep_window._save_config()
+        if self._cycle_double_sweep_window is not None:
+            self._cycle_double_sweep_window._save_config()
         fp = self._param_manager_reg.get_active_profile()
         fp.main_ui = self._active_profile
         fp.sweep_to = self._sweep_config.sweep_to
@@ -897,6 +917,11 @@ class MainWindow(QMainWindow):
         if self._double_sweep_window is not None:
             self._double_sweep_window._sweep_worker.set_threshold(cfg.global_threshold)
             self._double_sweep_window._sweep_worker.set_parallel(cfg.parallel_measurement)
+        # Cycle Sweep / Double Sweep+ 의 자체 worker 에도 동일 적용
+        for window in (self._cycle_sweep_window, self._cycle_double_sweep_window):
+            if window is not None:
+                window._sweep_worker.set_threshold(cfg.global_threshold)
+                window._sweep_worker.set_parallel(cfg.parallel_measurement)
 
     def _open_graph_window(self):
         from gui.graph_window import GraphWindow
@@ -975,6 +1000,31 @@ class MainWindow(QMainWindow):
         self._double_sweep_window.show()
         self._double_sweep_window.raise_()
 
+    def _open_cycle_sweep(self):
+        from gui.cycle_sweep_window import CycleSweepWindow
+        if self._cycle_sweep_window is None:
+            # 3rd arg(parent)=None → 독립 top-level → 작업표시줄에 개별 표시
+            self._cycle_sweep_window = CycleSweepWindow(self, self._param_manager_reg, None)
+            # 잠금/복원 동작이 Double Sweep 과 같아 슬롯을 그대로 재사용한다
+            self._cycle_sweep_window.sweep_started.connect(self._on_double_sweep_started)
+            self._cycle_sweep_window.sweep_finished.connect(self._on_double_sweep_finished)
+        self._cycle_sweep_window.show()
+        self._cycle_sweep_window.raise_()
+
+    def _open_cycle_double_sweep(self):
+        from gui.cycle_double_sweep_window import CycleDoubleSweepWindow
+        if self._cycle_double_sweep_window is None:
+            # 3rd arg(parent)=None → 독립 top-level → 작업표시줄에 개별 표시
+            self._cycle_double_sweep_window = CycleDoubleSweepWindow(
+                self, self._param_manager_reg, None)
+            # 잠금/복원 동작이 Double Sweep 과 같아 슬롯을 그대로 재사용한다
+            self._cycle_double_sweep_window.sweep_started.connect(
+                self._on_double_sweep_started)
+            self._cycle_double_sweep_window.sweep_finished.connect(
+                self._on_double_sweep_finished)
+        self._cycle_double_sweep_window.show()
+        self._cycle_double_sweep_window.raise_()
+
     def _on_double_sweep_started(self):
         """Double sweep 시작 → main UI Start 비활성화."""
         self._btn_start.setEnabled(False)
@@ -988,11 +1038,18 @@ class MainWindow(QMainWindow):
     # Connection Test
     # ------------------------------------------------------------------
 
-    def collect_active_aliases(self, include_second: bool = False) -> list:
+    def collect_active_aliases(self, include_second: bool = False,
+                               include_cycle: bool = False,
+                               include_cycle2d: bool = False) -> list:
         """활성 기기(alias)를 중복 없이 순서대로 반환.
 
         include_second=True이면 Double Sweep 창이 열려 있을 때
         second_sweep_channels의 alias도 포함합니다.
+        include_cycle=True이면 Cycle Sweep 창이 자체 선택한 sweep channel의
+        alias도 포함합니다 (그 창은 메인 UI와 다른 채널을 고를 수 있으므로,
+        포함하지 않으면 정작 구동할 장비가 연결 테스트에서 빠집니다).
+        include_cycle2d=True이면 Double Sweep+ 창이 자체 선택한 first/second
+        채널의 alias도 같은 이유로 포함합니다.
         """
         seen: set = set()
         aliases: list = []
@@ -1017,6 +1074,15 @@ class MainWindow(QMainWindow):
                 self._double_sweep_window.isVisible():
             for ch in self._active_profile.second_sweep_channels:
                 _add(ch.alias)
+
+        # Cycle Sweep이 자체 선택한 sweep channel
+        if include_cycle and self._cycle_sweep_window is not None:
+            _add(self._cycle_sweep_window.selected_alias())
+
+        # Double Sweep+ 가 자체 선택한 first/second channel
+        if include_cycle2d and self._cycle_double_sweep_window is not None:
+            for alias in self._cycle_double_sweep_window.selected_aliases():
+                _add(alias)
 
         return aliases
 
@@ -1080,7 +1146,9 @@ class MainWindow(QMainWindow):
 
     def _run_connection_test(self, include_second: bool = False,
                              show_success: bool = True,
-                             force_idn: bool = False) -> bool:
+                             force_idn: bool = False,
+                             include_cycle: bool = False,
+                             include_cycle2d: bool = False) -> bool:
         """활성 기기의 연결 상태를 확인합니다.
 
         force_idn=False (기본, 스윕 자동 호출):
@@ -1092,7 +1160,9 @@ class MainWindow(QMainWindow):
         show_success=False이면 오류가 있을 때만 다이얼로그를 표시합니다.
         반환값: 모두 성공이면 True, 하나라도 실패하면 False.
         """
-        aliases = self.collect_active_aliases(include_second=include_second)
+        aliases = self.collect_active_aliases(include_second=include_second,
+                                              include_cycle=include_cycle,
+                                              include_cycle2d=include_cycle2d)
         if not aliases:
             if show_success:
                 QMessageBox.information(self, "Connection Test", "활성화된 기기가 없습니다.")
@@ -1326,6 +1396,18 @@ class MainWindow(QMainWindow):
             min_delta=min_delta,
         )
 
+    def _deriv_channels(self) -> tuple:
+        """(채널, 그래프/저장 컬럼 키) 3쌍 — 1·2·3차 미분.
+
+        세 채널을 나란히 다루는 곳(Cycle Sweep / Double Sweep+)이 여러 군데라
+        순서를 여기 한 곳에서 정한다.
+        """
+        return (
+            (self._deriv_channel,  _DERIV_KEY),
+            (self._deriv_channel2, _DERIV2_KEY),
+            (self._deriv_channel3, _DERIV3_KEY),
+        )
+
     def _deriv_val_for_step(self, result, meas_map: dict) -> "float | None":
         """현재 스텝에서 1차 미분값 계산."""
         return self._deriv_val_for_order(result, meas_map, self._deriv_channel)
@@ -1391,6 +1473,13 @@ class MainWindow(QMainWindow):
             from gui.double_sweep_window import DoubleSweepPhase
             if self._double_sweep_window._phase == DoubleSweepPhase.IDLE:
                 self._double_sweep_window._rebuild_second_channel_radios()
+        # 실행 중 재빌드 금지 — 상태머신이 선택된 채널을 라이브로 읽는다
+        if self._cycle_sweep_window is not None and self._cycle_sweep_window.is_idle():
+            self._cycle_sweep_window._rebuild_channel_radios()
+        if (self._cycle_double_sweep_window is not None
+                and self._cycle_double_sweep_window.is_idle()):
+            self._cycle_double_sweep_window._rebuild_first_channel_radios()
+            self._cycle_double_sweep_window._rebuild_second_channel_radios()
 
     _TIME_ID = -2   # QButtonGroup ID for the fixed Time channel
 
@@ -1801,9 +1890,11 @@ class MainWindow(QMainWindow):
         self._sweep_channel_panel.setEnabled(False)
         self._meas_panel.setEnabled(False)
         self._set_save_inputs_enabled(False)
-        # Double Sweep window UI 잠금
-        if self._double_sweep_window is not None:
-            self._double_sweep_window.lock_ui(True)
+        # Double Sweep / Cycle Sweep / Double Sweep+ window UI 잠금
+        for window in (self._double_sweep_window, self._cycle_sweep_window,
+                       self._cycle_double_sweep_window):
+            if window is not None:
+                window.lock_ui(True)
         # Meta Data Config window UI 잠금
         if self._meta_data_window is not None:
             self._meta_data_window.lock_ui(True)
@@ -1827,9 +1918,11 @@ class MainWindow(QMainWindow):
                 "Main Folder 경로·권한·디스크 공간을 확인하세요.",
             )
             return
-        # disable Double Sweep while single sweep is running
-        if self._double_sweep_window is not None:
-            self._double_sweep_window._btn_start.setEnabled(False)
+        # disable Double Sweep / Cycle Sweep / Double Sweep+ while single sweep is running
+        for window in (self._double_sweep_window, self._cycle_sweep_window,
+                       self._cycle_double_sweep_window):
+            if window is not None:
+                window._btn_start.setEnabled(False)
         # Derivative channels — reconfigure and reset buffers
         for order, ch in [(1, self._deriv_channel), (2, self._deriv_channel2), (3, self._deriv_channel3)]:
             ch.reconfigure(self._build_deriv_config(order))
@@ -1919,6 +2012,11 @@ class MainWindow(QMainWindow):
             if self._double_sweep_window._phase == DoubleSweepPhase.IDLE:
                 self._double_sweep_window._btn_start.setEnabled(True)
                 self._double_sweep_window.lock_ui(False)
+        # re-enable Cycle Sweep / Double Sweep+ if they're not actively running
+        for window in (self._cycle_sweep_window, self._cycle_double_sweep_window):
+            if window is not None and window.is_idle():
+                window._btn_start.setEnabled(True)
+                window.lock_ui(False)
         if self._meta_data_window is not None:
             self._meta_data_window.lock_ui(False)
         # Re-enable derivative settings
@@ -2376,9 +2474,11 @@ class MainWindow(QMainWindow):
         self._sweep_channel_panel.setEnabled(False)
         self._meas_panel.setEnabled(False)
         self._set_save_inputs_enabled(False)
-        if self._double_sweep_window is not None:
-            self._double_sweep_window.lock_ui(True)
-            self._double_sweep_window._btn_start.setEnabled(False)
+        for window in (self._double_sweep_window, self._cycle_sweep_window,
+                       self._cycle_double_sweep_window):
+            if window is not None:
+                window.lock_ui(True)
+                window._btn_start.setEnabled(False)
 
         self._log(
             f"  ▶ 수동 재개 — pos={self._last_write_value}, step#{self._sweep_step_count}"
@@ -2620,6 +2720,10 @@ class MainWindow(QMainWindow):
             self._vna_window.shutdown_threads()
         if self._mfli_window is not None:
             self._mfli_window.shutdown_threads()
+        if self._cycle_sweep_window is not None:
+            self._cycle_sweep_window.shutdown_threads()
+        if self._cycle_double_sweep_window is not None:
+            self._cycle_double_sweep_window.shutdown_threads()
         self._session.shutdown()
 
         # 모든 하위 창 닫기
@@ -2628,6 +2732,8 @@ class MainWindow(QMainWindow):
             self._mfli_window,
             self._graph_window,
             self._double_sweep_window,
+            self._cycle_sweep_window,
+            self._cycle_double_sweep_window,
             self._param_manager_window,
             self._visa_lib_window,
             self._settings_window,

@@ -2,6 +2,73 @@
 
 ---
 
+## v1.08.0 — 2026-09-21 (기능 복원)
+
+### Cycle Sweep / Double Sweep+ (Cycle) 모듈을 `main` 에 복원
+
+두 모듈은 `refactor/restructure` 브랜치에서만 만들어졌고(2026-09-07, `d45f609`),
+그 브랜치는 머지하지 않기로 했으므로 `main` 계보에는 한 번도 들어온 적이 없다.
+그쪽 빌드를 쓰다가 `main` 빌드로 돌아오면 메뉴에서 사라진 것처럼 보인다.
+**버전이 밀린 것이 아니라 계보가 다른 것이므로**, 파일 단위로 가져와 `main` 의
+평면 레이아웃(`gui/ core/ config/`)에 맞춰 옮겼다.
+
+- `gui/cycle_sweep_window.py` (신규, 1890줄) — **View → Cycle Sweep…** (`Ctrl+Shift+C`).
+  현재값 → Initial Value 로 먼저 이동한 뒤(데이터 없음) targets 를 순서대로 훑는 것이
+  한 cycle 이고, `Cycles` 만큼 반복한다. 2회차부터는 직전 cycle 의 마지막 target 에서
+  이어 시작한다. Sweep channel 은 **Keithley 2636A 로 등록된 항목만** 고를 수 있고
+  (드라이버 클래스명으로 판정), 저장 폴더·파일명은 이 창이 따로 갖는다 —
+  cycle 하나당 `{File Name}_cycleNNN.dat` 하나.
+- `gui/cycle_double_sweep_window.py` (신규, 2850줄) — **View → Double Sweep+ (Cycle)…**
+  (`Ctrl+Shift+B`). second 축(ITC 온도 / IPS 자기장) 한 점마다 위 cycle 한 세트를 돈다.
+  한 점의 진행 순서는 `first → Initial Value` → `second 설정` → `Settle Wait` →
+  `cycle 1..N` 로 고정 — first 를 먼저 되돌리므로 온도·자기장이 변하는 동안 시료에
+  직전 cycle 의 마지막 target 이 걸려 있지 않다. 파일은 `_{axis}_{2nd값}_cycleNNN.dat`.
+- `config/config_models.py:346,381` — `CycleSweepConfig` / `CycleDoubleSweepConfig`
+  추가, `FullProfile` 에 두 필드 연결. `core/profile_registry.py:369` 에 접근자 4개.
+  기존 프로파일 YAML 은 필드가 없으면 기본값으로 읽히므로 그대로 열린다.
+- `gui/main_window.py` — 메뉴 2개, 창 참조 2개, 프로파일 전환 재로딩, 프로파일 저장
+  (두 창은 저장 경로를 자체 보관한다), App Config 임계값·병렬측정 전파, 단일 sweep
+  실행 중 잠금/복원, Parameter Manager 적용 시 채널 라디오 재빌드, 종료 시 워커 스레드
+  정지. `collect_active_aliases` / `_run_connection_test` 에 `include_cycle`,
+  `include_cycle2d` 추가 — 두 창은 메인 UI 와 **다른** 채널을 고를 수 있어서, 넣지
+  않으면 정작 구동할 장비가 연결 테스트에서 빠진다. `_deriv_channels()` 헬퍼 신설
+  (1·2·3차 미분 채널을 한 곳에서 순서대로 다룬다).
+- `gui/resume_dialog.py:20` — 재개 지점 목록의 종류 표시에 `cycle`→"사이클",
+  `cycle2d`→"더블+" 추가. 없으면 두 모듈의 지점이 "더블" 로 보였다.
+
+**포팅하며 `main` 쪽 변경에 맞춘 것 3가지** (원본은 8/3 시점 코드 기준이었다):
+
+1. `resolve_class_path` 제거 — 그 하위호환 계층은 refactor 브랜치에만 있다.
+   `main` 은 드라이버가 `driver/` 에 그대로 있으므로 `class_name` 의 마지막 조각만
+   떼어 비교한다.
+2. 테두리 애니메이션을 `gui/glow_frame.py` 의 `GlowFrame` 으로 교체 —
+   원본의 30 ms 마다 `setStyleSheet()` 방식은 v1.07.4 에서 측정 중 GUI 점유의
+   원인으로 걷어낸 것이다(갱신 7.55 ms → 0.006 ms).
+3. 채널 라디오에 `needs_fix` 표시 — v1.07.3 에서 들어온 규칙. 라이브러리 명령이 바뀌어
+   다시 만들 수 없는 항목은 ⚠ + 빨강 + 비활성으로 두고, 저장된 선택이 그 항목을
+   가리키면 멀쩡한 첫 항목으로 넘긴다. 전부 고장이면 아무것도 선택하지 않아 Start 가
+   막힌다.
+
+검증 (헤드리스, 가짜 VISA 세션 + 임시 `ProfileRegistry`):
+
+- **Cycle Sweep 실측 실행** — 0→1→-1 V, rate 60 V/min, Time/Point 0.1 s, 2 cycles,
+  return-to-zero. 8.8 초에 완주. `sampleA_cycle001.dat`(31 행: 0→1 10행 + 1→-1 20행),
+  `sampleA_cycle002.dat`(41 행: -1 에서 이어서 시작) + 메타 JSON 2개. 값은 V 와
+  I=V/1 kΩ 로 일치, 마지막 write 는 0.
+- **Double Sweep+ 실측 실행** — second 300→290 K(step −10), 각 점 0→1 V 1 cycle.
+  `sampleB_T_300_cycle001.dat` / `sampleB_T_290_cycle001.dat` 각 11 행.
+- 두 창 생성·`lock_ui` 왕복·`shutdown_threads`, 프로파일 YAML 왕복 저장
+  (`cycle_sweep:` / `cycle_double_sweep:` 기록 확인), 연결 테스트 대상 수집
+  (`include_cycle` → `['K2636']`, `include_cycle2d` → `['K2636','ITC']`),
+  App Config 임계값 전파(12345 → 두 worker), 단일 sweep 잠금 → `_on_stop` 복원,
+  `needs_fix` 항목 비활성화, 재개 지점 저장(`sweep_type="cycle"`) 과 목록 필터.
+
+포팅하지 않은 것: refactor 브랜치의 Double Sweep 창 안에 있던 `Enable Cycle Sweep`
+체크박스. Double Sweep+ 가 같은 일을 하고, 그쪽 `double_sweep/window.py` 는 `main`
+버전과 1400줄 이상 갈라져 있어 합치는 비용 대비 얻는 게 없다.
+
+---
+
 ## v1.07.13 — 2026-09-17 (설정값 조정)
 
 ### second channel 도달 워치독 상한 20분 → 1시간

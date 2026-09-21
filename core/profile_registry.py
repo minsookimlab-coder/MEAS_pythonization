@@ -12,6 +12,7 @@ import yaml
 
 from config.config_models import (
     ParameterManagerProfile, MainUIProfile, FullProfile, DoubleSweepConfig,
+    CycleSweepConfig, CycleDoubleSweepConfig,
     InstantiatedMeasurement, InstantiatedSweepValue, InstantiatedWriteCmd,
     InstantiatedSecondSweepChannel, MetaDataConfig,
 )
@@ -353,6 +354,24 @@ class ProfileRegistry:
     def save_double_sweep_config(self, cfg: DoubleSweepConfig):
         profile = self.get_active_profile()
         profile.double_sweep = cfg
+        self.save_active_profile(profile)
+
+    @property
+    def cycle_sweep_config(self) -> CycleSweepConfig:
+        return self.get_active_profile().cycle_sweep
+
+    def save_cycle_sweep_config(self, cfg: CycleSweepConfig):
+        profile = self.get_active_profile()
+        profile.cycle_sweep = cfg
+        self.save_active_profile(profile)
+
+    @property
+    def cycle_double_sweep_config(self) -> CycleDoubleSweepConfig:
+        return self.get_active_profile().cycle_double_sweep
+
+    def save_cycle_double_sweep_config(self, cfg: CycleDoubleSweepConfig):
+        profile = self.get_active_profile()
+        profile.cycle_double_sweep = cfg
         self.save_active_profile(profile)
 
     @property
