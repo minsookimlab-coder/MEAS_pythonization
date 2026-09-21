@@ -45,6 +45,8 @@ pythonization/
 │   ├── vna_config_window.py        VnaConfigWindow — VNA 명령/advance 설정
 │   ├── vna_models.py               VNA 데이터 모델 + config/resume IO
 │   ├── double_sweep_window.py      DoubleSweepWindow — 레거시 이중 스윕 + 알람
+│   ├── cycle_sweep_window.py       CycleSweepWindow — 다구간 cycle sweep (2636A 전용)
+│   ├── cycle_double_sweep_window.py  CycleDoubleSweepWindow — second 축 한 점마다 cycle 한 세트
 │   ├── mfli_window.py              MfliWindow — MFLI 주파수 noise sweep 측정 창(+per-point 보조 읽기)
 │   ├── mfli_models.py              MFLI 측정 설정 모델 + config IO
 │   ├── second_channel_model.py     SecondChannelModel — 스레드 안전 second 값 테이블 모델
@@ -188,6 +190,11 @@ main.py
      ├─ gui/visa_library_window.py
      ├─ gui/graph_window.py
      ├─ gui/double_sweep_window.py
+     │   ├─ core/sweep_worker.py
+     │   └─ core/second_channel_worker.py
+     ├─ gui/cycle_sweep_window.py
+     │   └─ core/sweep_worker.py
+     ├─ gui/cycle_double_sweep_window.py
      │   ├─ core/sweep_worker.py
      │   └─ core/second_channel_worker.py
      ├─ gui/debug_window.py

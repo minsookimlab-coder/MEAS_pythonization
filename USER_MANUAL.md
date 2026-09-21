@@ -10,13 +10,14 @@
 4. [Parameter Manager — 측정 프로파일 구성](#4-parameter-manager--측정-프로파일-구성)
 5. [메인 창 — 단일 Sweep 측정](#5-메인-창--단일-sweep-측정)
 6. [Double Sweep](#6-double-sweep)
-7. [Command Window — 즉석 명령 실행](#7-command-window--즉석-명령-실행)
-8. [Graph — 실시간 그래프](#8-graph--실시간-그래프)
-9. [Data / Timing / Sweep Status 보조 창](#9-data--timing--sweep-status-보조-창)
-10. [Meta Data Config — 측정 전 메타 기록](#10-meta-data-config--측정-전-메타-기록)
-11. [Debug 창 — 로그 및 콘솔](#11-debug-창--로그-및-콘솔)
-12. [데이터 파일 형식](#12-데이터-파일-형식)
-13. [알람 및 Telegram 알림](#13-알람-및-telegram-알림)
+7. [Cycle Sweep / Double Sweep+ (Cycle)](#7-cycle-sweep--double-sweep-cycle)
+8. [Command Window — 즉석 명령 실행](#8-command-window--즉석-명령-실행)
+9. [Graph — 실시간 그래프](#9-graph--실시간-그래프)
+10. [Data / Timing / Sweep Status 보조 창](#10-data--timing--sweep-status-보조-창)
+11. [Meta Data Config — 측정 전 메타 기록](#11-meta-data-config--측정-전-메타-기록)
+12. [Debug 창 — 로그 및 콘솔](#12-debug-창--로그-및-콘솔)
+13. [데이터 파일 형식](#13-데이터-파일-형식)
+14. [알람 및 Telegram 알림](#14-알람-및-telegram-알림)
 
 ---
 
@@ -354,17 +355,104 @@ Array 크기, Sweep 거리, Rate, Time/Point를 기반으로 전체 소요 시�
 ### 6.8 알람 설정
 
 우측 알람 패널에서 측정 중 특정 조건이 충족되면 알람을 발생시킬 수 있습니다.
-→ 자세한 내용은 [13. 알람 및 Telegram 알림](#13-알람-및-telegram-알림) 참조
+→ 자세한 내용은 [14. 알람 및 Telegram 알림](#14-알람-및-telegram-알림) 참조
 
 ---
 
-## 7. Command Window — 즉석 명령 실행
+## 7. Cycle Sweep / Double Sweep+ (Cycle)
+
+두 창 모두 **Keithley 2636A** 처럼 값을 왕복시키며 이력(hysteresis)을 보는 측정을 위한
+것입니다. 측정 항목·미분 채널은 **메인 창 설정을 시작 시점에 스냅샷**해서 쓰고
+(Double Sweep 과 같은 방식), 저장 폴더·파일명만 각 창이 따로 갖습니다.
+
+### 7.1 Cycle Sweep
+
+**메뉴 → View → Cycle Sweep…** (`Ctrl+Shift+C`)
+
+측정을 시작하면 먼저 현재값에서 **Initial Value** 까지 이동하고(데이터 없음), 거기서부터
+**Targets** 를 위에서 아래 순서로 훑습니다. 이 한 바퀴가 **1 cycle** 입니다.
+
+```
+Initial = 0 V, Targets = [30, -30, 0]
+  → 0→30 V, 30→-30 V, -30→0 V   (세 구간 = 1 cycle)
+Cycles = 3 이면 같은 cycle 을 3번.
+2회차부터는 직전 cycle 의 마지막 target 에서 이어 시작하므로 값이 끊기지 않습니다.
+```
+
+| 항목 | 설명 |
+|------|------|
+| **Sweep Channel** | Keithley 2636A 로 등록된 Paired Command 만 목록에 뜹니다. 비어 있으면 Instrument Settings 의 드라이버 지정과 Parameter Manager 를 확인하세요 |
+| **Initial Value** | cycle 시작 전에 먼저 이동할 값 (이 구간은 기록하지 않음) |
+| **Targets** | 순서대로 훑을 목표값. `[+ target 추가]` 로 칸을 늘립니다 |
+| **Sweep Rate** | units/min — cycle 전체 공통 |
+| **Time/Point** | 측정 간격(초) — cycle 전체 공통 |
+| **Cycles** | 같은 cycle 을 몇 번 반복할지 |
+| **Return to zero** | 모든 cycle 이 끝난 뒤 0 으로 복귀 (기록 없음) |
+
+**저장** — cycle 하나당 파일 하나:
+
+```
+{Main Folder}/{Sub Folder}/[YYYY-MM-DD]/{File Name}{YYYYMMDD}_cycleNNN.dat
+```
+
+메타데이터 JSON 이 같은 이름으로 함께 저장되고, 그래프는 같은 창에 겹쳐 그려
+cycle 간 이력을 바로 비교할 수 있습니다.
+
+### 7.2 Double Sweep+ (Cycle)
+
+**메뉴 → View → Double Sweep+ (Cycle)…** (`Ctrl+Shift+B`)
+
+**second 축(온도·자기장) 한 점마다 위의 cycle 한 세트**를 돕니다.
+
+```
+Targets 30 / -30 / 0, Array 300 → 260 K (step -20), Settle Wait 1시간
+  → first 를 Initial Value 로 → 300 K 설정 → 1시간 대기 → 300 K 에서 cycle 1..N
+  → first 를 Initial Value 로 → 280 K 설정 → 1시간 대기 → 280 K 에서 cycle 1..N
+  → 260 K …
+```
+
+- **장비 필터** — `ITC (온도)` / `IPS (자기장)` / `전체` 라디오로 second channel 목록을
+  거릅니다 (드라이버 클래스로 판정). advance type 은 Parameter Manager 에서 정하고,
+  rate·safety·feedback·wait 세부값은 이 창에서 고칩니다.
+- **Settle Wait** — second 를 설정한 뒤 cycle 시작까지 기다리는 시간(시/분). advance
+  type 자체의 대기(feedback 도달 판정, wait_for_time)와 **별개로 항상 추가 적용**됩니다.
+  `첫 값은 대기 건너뛰기` 를 켜면 첫 array 값에서만 생략합니다.
+- **Array** — From/To/Step (내려가는 방향은 Step 음수). `Array 값 테이블…` 로 임의 목록을
+  넣을 수 있고, 측정 중에도 아직 측정하지 않은 행은 고칠 수 있습니다.
+- **진행 순서는 모든 array 값에서 동일** — first 를 **먼저** Initial Value 로 되돌리므로,
+  온도·자기장이 변하는 동안 시료에 직전 cycle 의 마지막 target 이 걸려 있지 않습니다.
+
+**저장** — second 값 × cycle 마다 파일 하나:
+
+```
+{Main Folder}/{Sub Folder}/[YYYY-MM-DD]/{File Name}{YYYYMMDD}_{axis}_{2nd값}_cycleNNN.dat
+```
+
+그래프는 second 값이 바뀔 때마다 새 세션으로 열고, 같은 값의 cycle 은 겹쳐 그립니다.
+
+### 7.3 오류 · 재개
+
+통신 오류가 나면 10초 뒤 1회 자동 재개하고, 다시 실패하면 측정을 중단하고 재개 지점을
+남깁니다. **[Resume]** 버튼으로 그 지점부터 다시 시작할 수 있습니다
+(목록에서 `[사이클]` / `[더블+]` 표시).
+
+- Cycle Sweep 의 **재개 단위는 cycle**, Double Sweep+ 는 **array 값**입니다. 중단 시점의
+  물리 상태를 알 수 없으므로 cycle 중간부터 이어붙이지 않고 그 cycle(값)을 처음부터
+  다시 하며, 파일도 새로 씁니다.
+- second advance 워치독 타임아웃은 재시도 없이 즉시 중단합니다.
+
+메인 창에서 단일 sweep 이 실행 중이면 두 창의 Start 는 잠기고, 반대로 두 창이 측정 중이면
+메인 창 Start 가 잠깁니다.
+
+---
+
+## 8. Command Window — 즉석 명령 실행
 
 **메뉴 → View → Command Window**
 
 측정 중이 아닐 때 장비에 명령을 직접 보내 테스트하거나 상태를 확인합니다.
 
-### 7.1 사용법
+### 8.1 사용법
 
 1. **Instrument** : 명령을 보낼 장비 선택
 2. **VISA** : 실행할 명령 선택
@@ -379,16 +467,16 @@ Array 크기, Sweep 거리, Rate, Time/Point를 기반으로 전체 소요 시�
 
 ---
 
-## 8. Graph — 실시간 그래프
+## 9. Graph — 실시간 그래프
 
 **메뉴 → View → Graph** 또는 메인 창의 **Graph** 버튼
 
-### 8.1 패널 추가/제거
+### 9.1 패널 추가/제거
 
 - **Add Panel** : 새 그래프 패널 추가
 - 각 패널 우측 **×** 버튼으로 삭제
 
-### 8.2 축 설정 (패널별)
+### 9.2 축 설정 (패널별)
 
 | 항목 | 설명 |
 |------|------|
@@ -396,7 +484,7 @@ Array 크기, Sweep 거리, Rate, Time/Point를 기반으로 전체 소요 시�
 | **Y Axis** | 세로축으로 사용할 데이터 열 |
 | **Phase** | Double Sweep 전용 — `trace` / `retrace` / `dummy` 중 표시할 단계 선택 |
 
-### 8.3 그래프 조작
+### 9.3 그래프 조작
 
 | 동작 | 기능 |
 |------|------|
@@ -407,7 +495,7 @@ Array 크기, Sweep 거리, Rate, Time/Point를 기반으로 전체 소요 시�
 | 스크롤 | 확대/축소 |
 | 드래그 | 이동 (자동으로 Hold 상태로 전환) |
 
-### 8.4 2D Map
+### 9.4 2D Map
 
 Double Sweep 완료 후 폴더의 .dat 파일들을 불러와 2D 컬러맵으로 시각화합니다.
 
@@ -416,9 +504,9 @@ Double Sweep 완료 후 폴더의 .dat 파일들을 불러와 2D 컬러맵으로
 
 ---
 
-## 9. Data / Timing / Sweep Status 보조 창
+## 10. Data / Timing / Sweep Status 보조 창
 
-### 9.1 Data Window (**메뉴 → View → Data**)
+### 10.1 Data Window (**메뉴 → View → Data**)
 
 가장 최근 스텝의 측정값을 실시간으로 표시합니다. 데이터가 누적되지 않으며 매 스텝마다 갱신됩니다.
 
@@ -428,7 +516,7 @@ Double Sweep 완료 후 폴더의 .dat 파일들을 불러와 2D 컬러맵으로
 | Unit | 단위 |
 | Value | 최신 측정값 |
 
-### 9.2 Timing Window (**메뉴 → View → Timing**)
+### 10.2 Timing Window (**메뉴 → View → Timing**)
 
 각 스텝의 처리 시간을 항목별로 측정하여 성능을 분석합니다.
 
@@ -445,32 +533,32 @@ Double Sweep 완료 후 폴더의 .dat 파일들을 불러와 2D 컬러맵으로
 
 Last / Min / Max / Avg 열이 함께 표시됩니다.
 
-### 9.3 Sweep Status Window (**메뉴 → View → Sweep Status**)
+### 10.3 Sweep Status Window (**메뉴 → View → Sweep Status**)
 
 현재 스텝 번호, 현재값, 다음 목표값을 간략하게 표시합니다.
 
 ---
 
-## 10. Meta Data Config — 측정 전 메타 기록
+## 11. Meta Data Config — 측정 전 메타 기록
 
 **메뉴 → View → Meta Data Config**
 
 측정 시작 직전 장비 상태(온도, 자기장 등)를 JSON 파일로 기록하는 기능입니다.
 
-### 10.1 활성화
+### 11.1 활성화
 
 **Enable Meta Data** 체크박스로 전체 기능을 켜고 끕니다.
 
-### 10.2 항목 선택
+### 11.2 항목 선택
 
 Parameter Manager에서 등록된 측정 항목들이 나열됩니다.
 각 항목의 체크박스를 켜면 해당 항목이 메타데이터에 포함됩니다.
 
-### 10.3 자동 통계 (T/B 타입)
+### 11.3 자동 통계 (T/B 타입)
 
 Active Measurements에서 `temperature` 또는 `bfield` 타입으로 분류된 항목이 메타데이터에 포함되면 sweep 동안 측정값을 수집하여 **평균(mean)과 표준편차(std)** 를 자동 계산합니다.
 
-### 10.4 저장 위치
+### 11.4 저장 위치
 
 데이터 .dat 파일과 같은 이름으로 `.json` 확장자로 저장됩니다.
 
@@ -485,11 +573,11 @@ Active Measurements에서 `temperature` 또는 `bfield` 타입으로 분류된 �
 
 ---
 
-## 11. Debug 창 — 로그 및 콘솔
+## 12. Debug 창 — 로그 및 콘솔
 
 **메뉴 → View → Debug**
 
-### 11.1 VISA Log
+### 12.1 VISA Log
 
 장비와 주고받는 모든 VISA 통신을 기록합니다.
 
@@ -497,14 +585,14 @@ Active Measurements에서 `temperature` 또는 `bfield` 타입으로 분류된 �
 - **Verbose** 체크 해제 시 에러만 표시
 - **Clear** 버튼으로 로그 삭제
 
-### 11.2 Sweep Log
+### 12.2 Sweep Log
 
 각 Sweep 스텝의 진행 상황을 기록합니다.
 
 - 측정 성공/실패, 측정값 요약, 에러 메시지 포함
 - **Verbose** 체크 시 스텝별 상세 로그 표시
 
-### 11.3 Console
+### 12.3 Console
 
 장비에 임의 명령을 직접 실행합니다.
 
@@ -517,9 +605,9 @@ Active Measurements에서 `temperature` 또는 `bfield` 타입으로 분류된 �
 
 ---
 
-## 12. 데이터 파일 형식
+## 13. 데이터 파일 형식
 
-### 12.1 파일 구조 (.dat)
+### 13.1 파일 구조 (.dat)
 
 ```
 열이름1    열이름2    열이름3    ...
@@ -533,7 +621,7 @@ Active Measurements에서 `temperature` 또는 `bfield` 타입으로 분류된 �
 - 이후 열: 활성 측정값들
 - Derivative 채널이 켜져 있으면 마지막 열에 추가
 
-### 12.2 저장 경로 규칙
+### 13.2 저장 경로 규칙
 
 | 시나리오 | 경로 예시 |
 |----------|-----------|
@@ -545,15 +633,15 @@ Active Measurements에서 `temperature` 또는 `bfield` 타입으로 분류된 �
 
 ---
 
-## 13. 알람 및 Telegram 알림
+## 14. 알람 및 Telegram 알림
 
 Double Sweep 창 우측 패널에서 설정합니다.
 
-### 13.1 알람 활성화
+### 14.1 알람 활성화
 
 **Alarm Enabled** 체크박스로 전체 알람 기능을 켭니다.
 
-### 13.2 고정 트리거
+### 14.2 고정 트리거
 
 | 항목 | 발동 조건 |
 |------|-----------|
@@ -561,7 +649,7 @@ Double Sweep 창 우측 패널에서 설정합니다.
 | **Measurement Error** | 측정 채널이 ERR 값을 반환했을 때 |
 | **All Complete** | 전체 array 측정이 정상 완료되었을 때 |
 
-### 13.3 측정값 트리거
+### 14.3 측정값 트리거
 
 RETRACE 완료 후 측정값이 조건을 충족하면 알람을 발생시킵니다.
 
@@ -572,7 +660,7 @@ RETRACE 완료 후 측정값이 조건을 충족하면 알람을 발생시킵니
 
 각 트리거는 체크박스로 개별 활성/비활성 가능합니다.
 
-### 13.4 알림 수단
+### 14.4 알림 수단
 
 | 수단 | 설정 |
 |------|------|
@@ -580,7 +668,7 @@ RETRACE 완료 후 측정값이 조건을 충족하면 알람을 발생시킵니
 | **Email** | SMTP 설정 필요 (수신자, 서버, 포트, 계정, 비밀번호) |
 | **Telegram** | Bot Token + Chat ID 필요 |
 
-### 13.5 Telegram 설정
+### 14.5 Telegram 설정
 
 1. **Bot Token** 입력 (BotFather에서 발급)
 2. **Name** 과 **Chat ID** 입력 후 **Save** 버튼
@@ -624,5 +712,9 @@ RETRACE 완료 후 측정값이 조건을 충족하면 알람을 발생시킵니
 
 | 키 | 동작 |
 |----|------|
+| `Ctrl+D` | Double Sweep |
+| `Ctrl+Shift+C` | Cycle Sweep |
+| `Ctrl+Shift+B` | Double Sweep+ (Cycle) |
+| `Ctrl+G` | Graph |
 | `Escape` | 현재 보조 창 닫기 (숨김) |
 | `Enter` | Debug 콘솔에서 명령 전송 |
