@@ -4,6 +4,63 @@
 
 ---
 
+## v1.11.1 — 2026-10-07 (버그픽스)
+
+### [치명] VNA 측정이 '직전 sweep' 을 읽어 데이터가 한 칸 밀리던 문제
+
+Power Sweep 으로 받은 데이터의 power 라벨이 **한 칸 회전**해 있었다. 파일
+`power_-30.dat` 에 실제로는 **+10 dBm** 트레이스가 들어 있었고, `-30` 은
+`power_-29.dat` 에, …, `+9` 가 `power_+10.dat` 에 들어갔다.
+
+원인은 코드 순서가 아니다. `_AcquireWorker` 는 설정값을 먼저 쓰고 측정한다
+(`window.py` power 루프: advance → pre_measure_s → `_acquire_once`). 문제는
+**acquire 설정**이었다:
+
+    start_cmds : :INIT1
+    wait_cmds  : *OPC?
+
+VNA 가 자유 연속 sweep 중이면 `:INIT1` 은 무시되고 `*OPC?` 는 대기 없이 1 을
+돌려준다. 그래서 `:CALC1:DATA:FDAT?` 가 '마지막으로 **완료된** sweep' —
+즉 설정값을 바꾸기 **전** 의 sweep — 을 돌려줬다. sweep 1회가 스텝 간격보다
+길어서 정확히 한 칸씩 밀렸다.
+
+사용자 프로파일의 acquire 순서를 단발 트리거로 바꿨다 (명령은 모두 이미 VISA
+Library 에 있던 것 — 새로 만들지 않았다):
+
+    :TRIG:SOUR BUS  →  :INIT1  →  :INIT2  →  :TRIG:SING  →  *OPC?  →  읽기
+
+이제 `*OPC?` 가 실제로 sweep 완료까지 막으므로, 읽는 트레이스는 설정값 변경
+**뒤에** 시작된 sweep 이다. 데이터를 읽는 채널마다 `:INIT` 가 필요해서(BUS
+모드에서는 arm 되지 않은 채널이 아예 sweep 하지 않는다) ch2 `INIT` 도 켰다 —
+안 켜면 `timedomain` 열이 멈춘 값으로 남는다.
+
+중단 복구: `stop_cmds` 에 `:TRIG:SOUR INT` 를 넣어 Stop/오류 시 연속 sweep 으로
+되돌린다. 정상 완료 뒤에는 새로 만든 'Trigger' 섹션의 Execute 로 되돌린다.
+
+### VNA Control 이 외부에서 바뀐 설정을 덮어쓰던 문제
+
+`VnaWindow` 는 보관형이라 한 번 만들면 계속 살아 있고, 닫을 때
+`_save_ui_state()` 가 메모리의 `_cfg` 를 통째로 저장한다. 창이 숨어 있는 동안
+디스크 쪽 설정이 바뀌면(다른 인스턴스가 저장, 설정 파일 직접 수정) 다음에 닫을
+때 그 변경이 **조용히 사라졌다**. 실제로 v1.07.12 의 `trace2` 수정이 이 경로로
+날아갔다. `VnaConfigWindow` 는 같은 이유로 이미 `reload_from_disk()` 를 하고
+있었는데 이 창에만 없었다.
+
+- `pythonization/ui/modules/vna/window.py` — `VnaWindow.showEvent()` 가 다시 열릴
+  때 `on_profile_changed()` 로 디스크 기준 재로드. 첫 표시(`_shown_once`)와
+  **측정 중**에는 재로드하지 않는다 — 돌고 있는 설정을 갈아끼우면 안 된다.
+
+검증: ① 가짜 세션으로 power 한 스텝을 재생해 장비가 받는 순서가
+`:SOUR1:POW -30 → :TRIG:SOUR BUS → :INIT1 → :INIT2 → :TRIG:SING → *OPC? → FDAT?`
+임을 확인 ② 임시 프로파일로 '숨은 사이 외부 수정 → 다시 열고 닫기' 에서 외부
+수정이 보존됨 ③ 측정 중 show 에서는 재로드하지 않음.
+
+**장비에서 확인이 필요한 것**: 실제 VNA 로는 시험하지 못했다. 다음 측정에서
+`power_-30` 과 `power_+10` 의 트레이스가 서로 달라졌는지, `timedomain` 열이
+스텝마다 변하는지 확인해야 한다.
+
+---
+
 ## v1.11.0 — 2026-09-21 (계보 통합)
 
 ### 2026-08-03 에 갈라졌던 두 계보를 하나로 합쳤다

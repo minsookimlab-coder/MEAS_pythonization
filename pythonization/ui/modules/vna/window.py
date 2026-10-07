@@ -1267,6 +1267,8 @@ class VnaWindow(QDialog):
         self._sec_worker: Optional[_VnaWorker]     = None
         self._acq_worker: Optional[_AcquireWorker] = None
         self._acq_thread: Optional[QThread]        = None
+        #: showEvent 가 처음 올 때는 재로드하지 않는다 (__init__ 이 막 읽었다)
+        self._shown_once: bool = False
         self._section_widgets: List[_SectionWidget] = []
         self._current_sweep_values = None
         self._ds_step_labels = None
@@ -4158,6 +4160,27 @@ class VnaWindow(QDialog):
         self._save_ui_state()
         self._clear_graph_data()
         self.hide()
+
+    def showEvent(self, event):
+        """다시 열 때 디스크의 설정을 기준으로 맞춘다.
+
+        이 창은 보관형이라 한 번 만들면 계속 살아 있고, 닫을 때
+        `_save_ui_state()` 가 메모리의 `_cfg` 를 **통째로** 저장한다. 그래서 창이
+        숨어 있는 동안 디스크 쪽 설정이 바뀌면(다른 인스턴스가 저장했거나 설정
+        파일을 직접 고친 경우) 다음에 닫을 때 그 변경이 옛 내용으로 덮어써진다.
+        VnaConfigWindow 가 같은 이유로 이미 `reload_from_disk()` 를 하고 있는데,
+        이 창에는 그게 없어서 실제로 설정 수정이 조용히 사라진 적이 있다.
+
+        측정 중에는 재로드하지 않는다 — 돌고 있는 설정을 갈아끼우면 안 된다.
+        """
+        if self._shown_once and not (self._acq_thread
+                                     and self._acq_thread.isRunning()):
+            try:
+                self.on_profile_changed()      # 디스크 → UI 전체 재로드
+            except Exception as e:
+                print(f"[VNA] 설정 재로드 실패(기존 설정 유지): {e}")
+        self._shown_once = True
+        super().showEvent(event)
 
     def closeEvent(self, event):
         event.ignore()
