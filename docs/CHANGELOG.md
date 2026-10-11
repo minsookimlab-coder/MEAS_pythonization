@@ -4,6 +4,37 @@
 
 ---
 
+## v1.11.2 — 2026-10-11 (진단성 개선)
+
+### 측정 실패의 진짜 원인이 로그에 남지 않던 문제
+
+Single Acquire 가 아무 것도 저장하지 않고 끝나는데 `app.log` 에는
+`AcquireWorker finished` 만 남아, 원인 추적에 두 세션이 걸렸다. 실제 원인은
+`[ITC] read_ITC_VTI_temperature 실패 — ConnectionResetError 10054` 였다
+(ITC 가 PC 하드 리셋 때의 죽은 TCP 세션을 물고 있어 새 연결을 받자마자 끊었다).
+
+스텝 실패를 `self.error.emit()` 으로 **UI 에만** 보내고 로그에는 남기지 않은 탓이다.
+UI 메시지는 다음 조작에 덮여 사라지고, 장시간 측정이면 아무도 보지 못한다.
+
+- `pythonization/ui/modules/vna/window.py` — `_run_value_mode`·`_run_time_mode`·
+  `_run_double_sweep` 의 스텝 실패에 `get_logger().exception(...)` 추가.
+  동작(중단)은 그대로, 기록만 남긴다.
+
+### 삼킨 예외가 엉뚱한 에러로 둔갑하던 문제
+
+`_read_current()` 의 `except Exception: return None` 이 에러를 통째로 버렸다.
+`session.query` 는 실패 시 `_evict_broken()` 으로 **세션을 떼어내므로**, 삼킨 결과가
+바로 다음 write 에서 `ConnectionError: 'ITC' is not connected` 로 나타난다 —
+진짜 원인(연결 거부/타임아웃)은 사라진 채로. 10/11 01:15 의 fatal 이 이 경우였고,
+"연결이 안 돼 있다" 는 메시지만 보고 연결 설정을 의심하게 만들었다.
+
+- 폴백 흐름은 그대로 두고 `get_logger().warning(..., exc_info=True)` 로 기록한다.
+
+검증: 실제 프로파일 + 가짜 세션(ITC 만 `ConnectionResetError`)으로 Single Acquire 를
+재현 — UI 메시지가 실제 증상과 일치하고, 이제 전체 트레이스백이 로그에 남는 것을 확인.
+
+---
+
 ## v1.11.1 — 2026-10-07 (버그픽스)
 
 ### [치명] VNA 측정이 '직전 sweep' 을 읽어 데이터가 한 칸 밀리던 문제

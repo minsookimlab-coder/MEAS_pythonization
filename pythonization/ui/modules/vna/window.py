@@ -311,6 +311,9 @@ class _AcquireWorker(QObject):
                 self.step_elapsed.emit(i, _time.perf_counter() - t0)
                 self.step_done.emit(i, arrays)
             except Exception as e:
+                # 스텝 실패는 UI 로만 가고 로그에는 'finished' 만 남아, 나중에
+                # 원인을 추적할 수 없었다 (장비 한 대가 죽었을 때 특히). 로그에 남긴다.
+                get_logger().exception("acquire step %d failed", i + 1)
                 self.error.emit(f"Step {i + 1}: {type(e).__name__}: {e}")
                 break
 
@@ -337,6 +340,7 @@ class _AcquireWorker(QObject):
                 arrays = self._normalize_arrays(arrays, first_step=(i == 0))
                 self.step_done.emit(i, arrays)
             except Exception as e:
+                get_logger().exception("time step %d failed", i + 1)
                 self.error.emit(f"Time step {i + 1}: {type(e).__name__}: {e}")
                 break
             elapsed   = _time.perf_counter() - t0
@@ -473,6 +477,7 @@ class _AcquireWorker(QObject):
                         self._sleep_progress(pw["post_measure_s"],
                                              f"{ctx}{axis} {fv:.6g} — 측정 후 대기")
                 except Exception as e:
+                    get_logger().exception("double-sweep step %d failed", idx + 1)
                     self.error.emit(f"Step {idx+1}: {type(e).__name__}: {e}")
                     return
                 idx += 1
@@ -802,6 +807,12 @@ class _AcquireWorker(QObject):
             raw = str(self._session.query(alias, read_cmd)).strip()
             return _parse_float(raw)
         except Exception:
+            # 실패해도 호출부가 폴백하므로 흐름은 그대로 두지만, 에러를 버리면 안 된다.
+            # session.query 는 실패 시 _evict_broken() 으로 세션을 떼어내므로, 여기서
+            # 삼킨 에러의 결과가 다음 write 에서 "'ITC' is not connected" 로 둔갑해
+            # 나타난다 — 진짜 원인(연결 거부/타임아웃)은 사라진 채로.
+            get_logger().warning("현재값 읽기 실패 (%s: %s) — prev 없이 진행",
+                                 cmd_entry.alias, read_cmd, exc_info=True)
             return None
 
     def _make_sec_channel(self, cmd_entry, adv):
