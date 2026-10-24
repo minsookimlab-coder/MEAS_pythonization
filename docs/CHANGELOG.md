@@ -4,6 +4,41 @@
 
 ---
 
+## v1.11.3 — 2026-10-24 (버그픽스)
+
+### Field-Time sweep 이 1점만 찍고 다음 second 로 넘어가던 문제
+
+2026-10-22 시작한 20점 온도 sweep 에서 **55 K 그룹만 데이터가 1점**이었다
+(나머지 20개 그룹은 1192~1206점). 로그에도 그 구간만 짧다 — `second 10 done`
+까지 1:28:39, 정상은 약 2:48. 오류 메시지는 없었고 측정은 그대로 다음 온도로
+넘어갔다.
+
+원인은 **ramp 시작과 상태 폴링의 경합**이다. IPS sweep 명령이
+
+    SET:DEV:GRPZ:PSU:SIG:FSET:{v}; SET:DEV:GRPZ:PSU:ACTN:HOLD; SET:DEV:GRPZ:PSU:ACTN:RTOS
+
+로 **중간에 HOLD 를 거친다.** `_field_time_ramp_acquire` 는 `READ:DEV:GRPZ:PSU:ACTN`
+응답에 `HOLD` 가 있으면 sweep 완료로 보고 루프를 빠져나오는데, RTOS 가 반영되기
+전에 상태를 읽으면 `HOLD` 가 보인다. 그러면 첫 acquire 1회만 찍고 '완료' 로
+처리된다. 전환이 보통 수 초 안에 끝나므로 드물게만 걸렸다 (21회 중 1회).
+
+- `pythonization/ui/modules/vna/window.py` — `_field_time_ramp_acquire()` 가
+  **ramp 시작을 확인하기 전의 HOLD 를 완료로 보지 않는다.** 상태가 HOLD 를 한 번
+  벗어나야(`ramp_started`) 그 뒤의 HOLD 를 완료로 받는다.
+  `_RAMP_START_GRACE_S`(30초) 안에 시작되지 않으면 ramp 명령을 1회 재전송하고,
+  그래도 안 되면 `RuntimeError` 로 올려 **측정을 멈추고 알린다** — 조용히 1점만
+  남기고 지나가지 않는다.
+
+검증(실제 프로파일 + 가짜 IPS, HEAD 와 수정본 비교):
+
+| 상황 | 수정 전 | 수정 후 |
+|---|---|---|
+| HOLD 1회 후 RTOS (= 55 K 상황) | 2점에서 조용히 완료 | 7점, 정상 완료 |
+| HOLD 가 길게 이어짐 | 2점에서 조용히 완료 | 14점, 정상 완료 |
+| ramp 가 아예 시작 안 됨 | 2점에서 조용히 완료 | 재전송 1회 후 RuntimeError |
+
+---
+
 ## v1.11.2 — 2026-10-11 (진단성 개선)
 
 ### 측정 실패의 진짜 원인이 로그에 남지 않던 문제

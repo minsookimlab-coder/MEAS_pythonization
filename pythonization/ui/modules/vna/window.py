@@ -81,6 +81,11 @@ if TYPE_CHECKING:
 
 _DEFAULT_CONFIG_PATH = SETTINGS_DIR / "vna_config.yaml"
 
+#: Field-Time sweep 에서 '자기장 ramp 가 시작됐다' 를 기다리는 유예 시간(초).
+#: 이 시간 안에 상태가 HOLD 를 벗어나지 않으면 ramp 명령을 1회 재전송하고, 그래도
+#: 시작되지 않으면 실패로 올린다 (조용히 1점만 찍고 넘어가지 않도록).
+_RAMP_START_GRACE_S = 30.0
+
 
 @dataclass
 class _FirstChannel:
@@ -671,6 +676,15 @@ class _AcquireWorker(QObject):
         acq_count   = 0
         ramp_t0     = _time.perf_counter()
         last_status = ""
+        # ── ramp 가 시작된 것을 확인하기 전의 HOLD 는 '완료' 가 아니다 ──
+        # sweep 명령 자체가 'FSET -> ACTN:HOLD -> ACTN:RTOS' 순서라(IPS 라이브러리),
+        # RTOS 가 반영되기 전에 ACTN 을 읽으면 HOLD 가 보인다. 그걸 완료로 받으면
+        # 첫 acquire 1회만 찍고 다음 second 로 넘어간다 — 2026-10-24 실제 측정에서
+        # 55 K 그룹이 1점만 남고 지나갔다(나머지 20개 그룹은 1192~1206점).
+        # 전환이 보통 수 초 안에 끝나 드물게만 걸리므로, 조용히 지나가지 않게 한다.
+        ramp_started   = False
+        start_deadline = ramp_t0 + _RAMP_START_GRACE_S
+        resent         = False
         now = ramp_t0
         next_acq  = now            # 첫 acquire는 즉시
         next_stat = now + stat_intv
@@ -691,15 +705,38 @@ class _AcquireWorker(QObject):
                 idx += 1
                 next_acq = _time.perf_counter() + interval
             if status_cmd and now >= next_stat:
+                raw = None
                 try:
                     raw = str(self._session.query(alias, status_cmd)).strip()
-                    last_status = (raw.split(":")[-1] or raw)[:16]   # 표시용 짧은 토큰
-                    if hold in raw.upper():
-                        self.progress.emit(
-                            f"{ctx}④ HOLD 도달 — sweep 완료 (총 {acq_count}회 측정)")
-                        break
                 except Exception:
                     pass               # 일시적 읽기 실패 → 계속 폴링
+                if raw is not None:
+                    last_status = (raw.split(":")[-1] or raw)[:16]   # 표시용 짧은 토큰
+                    if hold in raw.upper():
+                        if ramp_started:
+                            self.progress.emit(
+                                f"{ctx}④ HOLD 도달 — sweep 완료 (총 {acq_count}회 측정)")
+                            break
+                        # 아직 ramp 시작을 못 봤다 → 완료가 아니라 '시작 대기' 다.
+                        if _time.perf_counter() > start_deadline:
+                            if resent:
+                                raise RuntimeError(
+                                    f"자기장 ramp 가 시작되지 않았습니다 — 목표 "
+                                    f"{target:.6g}, 상태 '{last_status}'. 명령을 1회 "
+                                    f"재전송하고 {_RAMP_START_GRACE_S:.0f}초씩 두 번 "
+                                    f"기다렸지만 HOLD 를 벗어나지 않았습니다.")
+                            resent = True
+                            self.progress.emit(
+                                f"{ctx}② ramp 가 시작되지 않음(상태 '{last_status}') "
+                                f"— 명령 재전송 후 재대기")
+                            self._advance(first, None, target, None)
+                            self._run_cmd_list(ft.get("forward_cmds", []), target)
+                            start_deadline = _time.perf_counter() + _RAMP_START_GRACE_S
+                    else:
+                        if not ramp_started:
+                            self.progress.emit(
+                                f"{ctx}② ramp 시작 확인 (상태 '{last_status}')")
+                        ramp_started = True
                 next_stat = _time.perf_counter() + stat_intv
             wait = max(0.0, min(next_acq, next_stat) - _time.perf_counter())
             _time.sleep(min(0.1, wait) if wait > 0 else 0.01)
