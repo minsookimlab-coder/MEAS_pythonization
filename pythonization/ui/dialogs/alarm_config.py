@@ -596,14 +596,18 @@ class AlarmConfigWindow(QDialog):
         return cfg.model_copy(update={**tg, "telegram_contacts": contacts})
 
     def _save_delivery_global(self, cfg: AlarmConfig):
-        """전송 수단을 전역 공유 저장소에 기록 → 다른 창(VNA/Double Sweep)과 동기화."""
-        save_alarm_delivery(AlarmDeliveryConfig(
+        """전송 수단을 전역 공유 저장소에 기록 → 다른 창(VNA/Double Sweep)과 동기화.
+
+        이 창이 다루는 필드만 바꾸고 나머지(ntfy 설정 등)는 그대로 둔다 — 새로 만들어
+        덮어쓰면 Settings → 알림 (ntfy) 에서 저장한 값이 지워진다.
+        """
+        save_alarm_delivery(load_alarm_delivery().model_copy(update=dict(
             use_sound=cfg.use_sound, use_email=cfg.use_email, email_to=cfg.email_to,
             smtp_host=cfg.smtp_host, smtp_port=cfg.smtp_port, smtp_user=cfg.smtp_user,
             smtp_password=cfg.smtp_password, use_telegram=cfg.use_telegram,
             telegram_bot_token=cfg.telegram_bot_token, telegram_chat_id=cfg.telegram_chat_id,
             telegram_contacts=list(cfg.telegram_contacts),
-        ))
+        )))
 
     def _on_apply(self):
         self._cfg = self.get_config()
