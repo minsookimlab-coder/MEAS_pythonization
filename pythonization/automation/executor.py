@@ -95,6 +95,11 @@ class LabBackend(Protocol):
     def run_main_sweep(self, spec: MainSweepSpec) -> MainSweepOutcome: ...
     def busy_reason(self) -> str: ...
     def main_state(self) -> dict: ...
+    # VNA Control 창 (부가 측정 모듈)
+    def vna_state(self) -> dict: ...
+    def vna_run_section(self, name: str) -> dict: ...
+    def vna_acquire(self, mode: str, wait: bool, timeout_s: float) -> dict: ...
+    def vna_stop(self) -> dict: ...
 
 
 class StepFailed(Exception):
@@ -388,6 +393,12 @@ class LabExecutor:
             return f"실험 지식 조회: {a.get('query', '')}"
         if name == "analyze_data_file":
             return f"데이터 파일 분석: {a.get('file', '')}"
+        if name == "vna_run_section":
+            return f"VNA 묶음 명령 실행: {a.get('name', '')}"
+        if name == "vna_acquire":
+            mode = a.get("mode", "single")
+            return ("VNA 측정 실행: " + ("sweep 전체" if mode == "sweep" else "단일 acquire")
+                    + f" (최대 {a.get('timeout_min', 60)}분)")
         return f"{name}: {a}"
 
     # ── 도구 ───────────────────────────────────────────────────────────
@@ -756,6 +767,35 @@ class LabExecutor:
         self._emit(AgentEvent("knowledge", f"관찰 기록: {obs.summary[:120]}", {"id": obs.id}))
         return ToolOutcome({"recorded": obs.id, "linked_supports": obs.supports,
                             "linked_contradicts": obs.contradicts})
+
+    # ── VNA (부가 측정 모듈) ───────────────────────────────────────────
+    def _tool_vna_get_state(self, _a: dict) -> ToolOutcome:
+        return ToolOutcome({"vna": self._backend.vna_state()})
+
+    def _tool_vna_run_section(self, a: dict) -> ToolOutcome:
+        self._check_not_busy()
+        name = str(a.get("name", "")).strip()
+        if not name:
+            return ToolOutcome({"error": "섹션 이름이 비어 있습니다."}, True)
+        res = self._backend.vna_run_section(name)
+        return ToolOutcome({"vna_section": res}, not res.get("ok", False))
+
+    def _tool_vna_acquire(self, a: dict) -> ToolOutcome:
+        self._check_not_busy()
+        mode = str(a.get("mode", "single")).strip()
+        wait = bool(a.get("wait", True))
+        timeout_min = float(a.get("timeout_min", 60) or 60)
+        if wait:
+            # 남은 실행 예산을 넘는 측정은 시작하지 않는다 (다른 장시간 도구와 동일)
+            self._check_budget(timeout_min * 60.0, "VNA 측정")
+        self._status(f"VNA {mode} acquire 시작")
+        res = self._backend.vna_acquire(mode=mode, wait=wait,
+                                        timeout_s=timeout_min * 60.0)
+        return ToolOutcome({"vna_acquire": res}, not res.get("ok", False))
+
+    def _tool_vna_stop(self, _a: dict) -> ToolOutcome:
+        res = self._backend.vna_stop()
+        return ToolOutcome({"vna_stop": res}, not res.get("ok", False))
 
     def _tool_analyze_data_file(self, a: dict) -> ToolOutcome:
         if not self._save_root:

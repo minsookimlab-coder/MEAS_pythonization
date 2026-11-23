@@ -22,6 +22,9 @@ _KNOWLEDGE_RULES = """\
 - 사용자가 현상의 의미를 알려 주거나 기억하라고 하면 save_knowledge(user_requested=true).
   네가 세운 해석은 여러 관찰로 뒷받침될 때만 저장한다 (확인 전까지 가설로 표시된다).
 - 과거 데이터에 대한 질문에는 recall_knowledge 의 관찰과 analyze_data_file 로 답한다.
+- VNA 측정은 vna_* 도구로 한다. 먼저 vna_get_state 로 모드·축·섹션·설정 문제를 보고,
+  필요한 묶음 명령은 vna_run_section 으로 실행한 뒤 vna_acquire 를 부른다.
+  VNA 설정(축·범위·명령)은 사용자가 VNA Config 에서 정한 것을 그대로 쓴다 — 바꾸지 않는다.
 """
 
 SYSTEM_PROMPT = """\

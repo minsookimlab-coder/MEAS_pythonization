@@ -4,6 +4,46 @@
 
 ---
 
+## v1.12.3 — 2026-11-23 (기능 추가)
+
+### AI 모드가 VNA 도 다룬다
+
+지금까지 AI 도구 13개는 전부 **메인 창 sweep 엔진**만 조작했다. VNA Control 은
+AI 가 손댈 수 없어서, VNA 로 하는 측정은 사람이 직접 눌러야 했다. 도구 4개를 더해
+AI 가 VNA 측정을 보고·실행·중지할 수 있게 했다.
+
+- `pythonization/automation/tools.py` — 도구 4개 등록
+  - `vna_get_state` (읽기 전용) — 실행 여부, 모드(double sweep / with Time /
+    power sweep), First·Second 축과 범위, 섹션 이름, 저장 폴더, 마지막 저장 파일,
+    **시작을 막는 설정 문제**까지.
+  - `vna_run_section` — VNA Config 에 등록된 묶음 명령 실행 (OPC 대기 포함).
+  - `vna_acquire` — `single`(한 장) / `sweep`(설정된 sweep 전체). 완료까지 대기.
+  - `vna_stop` — 실행 중인 VNA 측정 중지.
+  - `vna_run_section` 과 `vna_acquire` 는 **ACTUATING** 이다 — 실제 장비를 움직이고
+    수십 시간 돌 수 있으므로 '실행 전 승인' 모드에서 승인을 받는다. 조회와 중지는 아니다.
+  - LLM 은 여전히 VISA 명령을 만들 수 없다(규칙 2). 사용자가 VNA Config 에 등록해 둔
+    섹션·명령만 이름으로 고를 수 있다.
+- `pythonization/ui/modules/auto_measure/bridge.py` — VNA 창 조작을 GUI 스레드로
+  넘기는 메서드. 완료는 신호 대신 **폴링**으로 본다 — 메인 sweep 과 달리 단계별
+  데이터를 받아 판정할 필요가 없어서, 새 신호를 만들 이유가 없다.
+  - **시작 전에 설정 문제를 대화상자 없이 미리 본다.** VNA 창의 기존 검사는
+    `QMessageBox` 를 띄우는데, AI 실행 중에 모달이 뜨면 GUI 스레드가 막혀
+    `call()` 이 통째로 타임아웃된다. 같은 판정(`collect_param_problems`)을 먼저
+    돌려 문제가 있으면 **시작 자체를 하지 않고** 사유를 돌려준다.
+  - 대기 중 사용자가 AI 실행을 중지하면 VNA 에 중지를 전달하고, `timeout_min` 을
+    넘기면 중지한 뒤 사유를 돌려준다.
+- `pythonization/automation/executor.py` — `LabBackend` 에 VNA 4개 추가, 핸들러 4개.
+  `vna_acquire` 는 **남은 실행 예산**을 넘는 측정을 시작하지 않는다(다른 장시간
+  도구와 동일). 다른 측정이 돌고 있으면 `_check_not_busy` 가 막는다 — 중지는 예외.
+- `pythonization/automation/mcp_server.py`, `prompts.py` — 도구 노출과 사용 안내.
+  VNA 설정(축·범위·명령)은 사용자가 정한 것을 그대로 쓰라고 명시했다.
+
+검증: `tests/test_automation_vna.py` 20개 — 도구 등록·승인 분류·스키마, 실행기의
+분·초 변환과 실패 표시, 다른 측정 중 차단, 예산 초과 차단, 브리지의 시작 거부
+(설정 문제·알 수 없는 mode·이미 실행 중)와 중지. 전체 514개 통과.
+
+---
+
 ## v1.12.2 — 2026-11-23 (기능 추가)
 
 ### 측정 갱신마다 리포트를 자동으로 — 설정·주기·전송 연결

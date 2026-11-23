@@ -48,6 +48,7 @@ _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 CONCURRENT_OK = frozenset({
     "get_lab_state", "recall_knowledge", "save_knowledge", "record_observation",
     "analyze_data_file", "send_message",
+    "vna_get_state", "vna_run_section", "vna_acquire", "vna_stop",
 })
 _READ_ONLY = frozenset({"get_lab_state", "read_values", "recall_knowledge",
                         "analyze_data_file", "wait_job", "check_user_messages"})

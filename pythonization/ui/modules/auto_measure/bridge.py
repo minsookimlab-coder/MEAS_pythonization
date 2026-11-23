@@ -122,6 +122,192 @@ class MainWindowBridge(QObject):
                     except Exception:
                         pass
 
+
+    # ── VNA 창 (부가 측정 모듈) ────────────────────────────────────────
+    # 메인 sweep 과 달리 단계별 데이터를 받아 판정할 필요가 없어서, 완료는
+    # 신호 대신 **폴링**으로 본다 — 새 신호를 만들지 않고 GUI 스레드에서
+    # _acq_thread 상태만 물어보면 된다.
+    _VNA_POLL_S = 0.5
+
+    def _vna_win(self, create: bool = False):
+        """VNA Control 창 (없으면 create 일 때만 연다). GUI 스레드에서 부를 것."""
+        mw = self._main_win
+        win = getattr(mw, "_vna_window", None)
+        if win is None and create:
+            mw._open_vna_window()
+            win = getattr(mw, "_vna_window", None)
+        return win
+
+    def vna_state(self) -> dict:
+        return self.call(self._vna_state)
+
+    def _vna_state(self) -> dict:
+        win = self._vna_win()
+        if win is None:
+            return {"open": False,
+                    "hint": "VNA Control 창이 아직 열려 있지 않습니다. "
+                            "vna_acquire 를 부르면 자동으로 엽니다."}
+        cfg = win._cfg
+        ds = cfg.ds_control
+        acq = cfg.acquire
+        th = getattr(win, "_acq_thread", None)
+        if ds.power.enabled:
+            mode = "power_sweep"
+        elif ds.field_time.enabled:
+            mode = "double_sweep_with_time"
+        else:
+            mode = "double_sweep"
+
+        def axis(idx):
+            if 0 <= idx < len(acq.sweep_cmds):
+                e = acq.sweep_cmds[idx]
+                return "[" + e.alias + "] " + e.description
+            return ""
+
+        return {
+            "open": True,
+            "running": bool(th is not None and th.isRunning()),
+            "mode": mode,
+            "first_axis": axis(ds.first_idx),
+            "first_range": [ds.first_start, ds.first_stop, ds.first_n],
+            "second_enabled": bool(ds.second_enabled),
+            "second_axis": axis(ds.second_idx) if ds.second_enabled else "",
+            "second_range": ([ds.second_start, ds.second_stop, ds.second_n]
+                             if ds.second_enabled else []),
+            "sections": [s.name for s in cfg.sections],
+            "read_cmds_enabled": sum(1 for e in acq.read_cmds if e.enabled),
+            "sweep_cmds_enabled": sum(1 for e in acq.sweep_cmds if e.enabled),
+            "save_enabled": bool(cfg.save_enabled),
+            "save_folder": str(win._get_save_dir()),
+            "filename": win._le_filename.text().strip(),
+            "last_saved": str(getattr(win, "_last_saved_path", "") or ""),
+            "problems": self._vna_problems(win),
+        }
+
+    @staticmethod
+    def _vna_problems(win) -> list:
+        """시작 전에 걸릴 설정 문제 — 대화상자를 띄우지 않고 미리 본다.
+
+        VNA 창의 검사는 QMessageBox 를 띄우는데, AI 실행 중에 모달이 뜨면 GUI
+        스레드가 막혀 call() 이 통째로 타임아웃된다. 그래서 같은 판정을
+        대화상자 없이 먼저 돌려 **문제가 있으면 시작 자체를 하지 않는다.**
+        """
+        try:
+            from pythonization.ui.modules.vna.models import collect_param_problems
+            acq = win._cfg.acquire
+            out = []
+            for group in (acq.sweep_cmds, acq.start_cmds, acq.wait_cmds, acq.read_cmds):
+                out += collect_param_problems(win._lib_reg, group)
+            return out
+        except Exception as e:                    # noqa: BLE001
+            return ["설정 검사 실패: " + type(e).__name__ + ": " + str(e)]
+
+    def vna_run_section(self, name: str) -> dict:
+        return self.call(lambda: self._vna_run_section(name))
+
+    def _vna_run_section(self, name: str) -> dict:
+        win = self._vna_win(create=True)
+        if win is None:
+            return {"ok": False, "error": "VNA Control 창을 열 수 없습니다."}
+        for sec in win._cfg.sections:
+            if sec.name == name:
+                cmds = [c for c in sec.commands if c.enabled]
+                if not cmds:
+                    return {"ok": False,
+                            "error": "섹션 '" + name + "' 에 켜진 명령이 없습니다."}
+                win._on_execute_section(cmds, list(sec.opc_cmds))
+                return {"ok": True, "section": name, "commands": len(cmds),
+                        "opc_wait": bool(sec.opc_cmds)}
+        return {"ok": False,
+                "error": "'" + name + "' 섹션이 없습니다. 있는 것: "
+                         + ", ".join(s.name for s in win._cfg.sections)}
+
+    def vna_stop(self) -> dict:
+        return self.call(self._vna_stop)
+
+    def _vna_stop(self) -> dict:
+        win = self._vna_win()
+        if win is None:
+            return {"ok": False, "error": "VNA Control 창이 없습니다."}
+        th = getattr(win, "_acq_thread", None)
+        if th is None or not th.isRunning():
+            return {"ok": True, "note": "실행 중인 VNA 측정이 없습니다."}
+        win._on_stop_acquire()
+        return {"ok": True, "note": "중지를 요청했습니다."}
+
+    def vna_acquire(self, mode: str = "single", wait: bool = True,
+                    timeout_s: float = 3600.0) -> dict:
+        """VNA 측정을 시작한다 (mode: single | sweep). wait 면 끝날 때까지 기다린다."""
+        import time as _t
+        start = self.call(lambda: self._vna_start(mode))
+        if not start.get("ok"):
+            return start
+        if not wait:
+            return dict(start, waited=False)
+
+        deadline = _t.monotonic() + max(1.0, float(timeout_s))
+        stop_sent = False
+        while True:
+            if not self.call(self._vna_running, timeout=30.0):
+                break
+            if self._stop.is_set() and not stop_sent:
+                stop_sent = True
+                try:
+                    self.call(self._vna_stop, timeout=30.0)
+                except Exception:
+                    pass
+            if _t.monotonic() > deadline:
+                try:
+                    self.call(self._vna_stop, timeout=30.0)
+                except Exception:
+                    pass
+                out = dict(start, waited=True, ok=False)
+                out["error"] = ("VNA 측정이 %.0f분 안에 끝나지 않아 중지했습니다."
+                                % (timeout_s / 60.0))
+                return out
+            _t.sleep(self._VNA_POLL_S)
+        done = self.call(self._vna_result)
+        return dict(start, waited=True, **done)
+
+    def _vna_running(self) -> bool:
+        win = self._vna_win()
+        th = getattr(win, "_acq_thread", None) if win is not None else None
+        return bool(th is not None and th.isRunning())
+
+    def _vna_result(self) -> dict:
+        win = self._vna_win()
+        if win is None:
+            return {}
+        return {"steps": int(getattr(win, "_step_count", 0) or 0),
+                "last_saved": str(getattr(win, "_last_saved_path", "") or ""),
+                "stopped": bool(getattr(win, "_acq_stopped", False)),
+                "errored": bool(getattr(win, "_acq_errored", False))}
+
+    def _vna_start(self, mode: str) -> dict:
+        win = self._vna_win(create=True)
+        if win is None:
+            return {"ok": False, "error": "VNA Control 창을 열 수 없습니다."}
+        th = getattr(win, "_acq_thread", None)
+        if th is not None and th.isRunning():
+            return {"ok": False, "error": "VNA 측정이 이미 실행 중입니다."}
+        problems = self._vna_problems(win)
+        if problems:
+            return {"ok": False,
+                    "error": "VNA 설정에 문제가 있어 시작하지 않았습니다.",
+                    "problems": problems}
+        if mode == "single":
+            win._on_single_acquire()
+        elif mode == "sweep":
+            win._on_sweep_acquire()
+        else:
+            return {"ok": False, "error": "알 수 없는 mode: " + str(mode) + " (single | sweep)"}
+        th = getattr(win, "_acq_thread", None)
+        if th is None or not th.isRunning():
+            return {"ok": False,
+                    "error": "VNA 측정이 시작되지 않았습니다 "
+                             "(설정·장비 연결을 확인하세요)."}
+        return {"ok": True, "mode": mode}
+
     # ── GUI 스레드 ─────────────────────────────────────────────────────
     def _verify_identity(self, spec: MainSweepSpec) -> str:
         """인덱스가 여전히 같은 장비 항목을 가리키는지 (프로파일 변경 방어)."""

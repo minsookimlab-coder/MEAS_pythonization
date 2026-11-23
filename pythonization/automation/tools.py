@@ -18,12 +18,20 @@
   record_observation  이번 측정에서 본 수치·해석·근거를 관찰 기록으로 남기기
   analyze_data_file   Main Folder 안의 .dat 를 다시 요약 (과거 데이터 분석)
 
+  vna_get_state       VNA Control 창의 상태·설정 요약 (장비를 움직이지 않음)
+  vna_run_section     VNA Config 에 등록된 묶음 명령(섹션)을 실행 (OPC 대기 포함)
+  vna_acquire         VNA 측정 실행 — single(한 장) 또는 sweep(설정된 sweep 전체)
+  vna_stop            실행 중인 VNA 측정 중지
+
 ACTUATING_TOOLS 는 장비 상태를 바꾸는 도구다. '실행 전 승인' 모드에서는 이 도구와
 save_knowledge(앞으로의 판단에 영향을 주므로)를 부를 때마다 사용자가 승인해야 한다.
 """
 
 ACTUATING_TOOLS = frozenset({
     "move_channel", "run_sweep", "set_second_axis", "send_write_command",
+    # VNA 도 실제 장비를 움직인다 — 섹션은 등록된 write 명령을 그대로 쏘고,
+    # acquire 는 sweep 축(자기장·온도·power)을 움직이며 수십 시간 돌 수 있다.
+    "vna_run_section", "vna_acquire",
 })
 APPROVAL_TOOLS = ACTUATING_TOOLS | {"save_knowledge"}
 
@@ -291,6 +299,58 @@ TOOL_SPECS = [
             "required": ["summary"],
             "additionalProperties": False,
         },
+    },
+    {
+        "name": "vna_get_state",
+        "description": (
+            "VNA Control 창의 상태와 설정 요약을 돌려준다 — 실행 중인지, 모드"
+            "(double sweep / with Time / power sweep), First·Second 축과 범위, "
+            "등록된 섹션 이름, 저장 폴더, 마지막 저장 파일, 시작을 막는 설정 문제. "
+            "장비를 움직이지 않는다. VNA 로 무언가 하기 전에 먼저 부른다."),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "vna_run_section",
+        "description": (
+            "VNA Config 에 등록된 묶음 명령(섹션)을 실행한다. 섹션 이름은 "
+            "vna_get_state 의 sections 에서 고른다. 섹션에 OPC 명령이 있으면 완료까지 "
+            "기다린다. 등록되지 않은 명령은 만들 수 없다 — 사용자가 VNA Config 에 "
+            "넣어 둔 것만 쓸 수 있다."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "실행할 섹션 이름 (정확히 일치)"},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "vna_acquire",
+        "description": (
+            "VNA 측정을 실행한다. mode='single' 은 지금 조건에서 한 장, "
+            "mode='sweep' 은 VNA Control 에 설정된 sweep 전체(Double sweep / with Time / "
+            "power sweep)를 돈다. sweep 은 수십 시간이 걸릴 수 있으므로 timeout_min 을 "
+            "넉넉히 주고, 중간 보고가 필요하면 사용자에게 알린다. 설정에 문제가 있으면 "
+            "**시작하지 않고** 사유를 돌려준다."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["single", "sweep"],
+                         "description": "single=한 장, sweep=설정된 sweep 전체"},
+                "wait": {"type": "boolean",
+                         "description": "끝날 때까지 기다릴지 (기본 true)"},
+                "timeout_min": {"type": "number",
+                                "description": "기다릴 최대 시간(분). 넘으면 중지한다. 기본 60"},
+            },
+            "required": ["mode"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "vna_stop",
+        "description": "실행 중인 VNA 측정을 중지한다. 실행 중이 아니면 아무 일도 하지 않는다.",
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "analyze_data_file",
