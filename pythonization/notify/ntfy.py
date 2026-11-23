@@ -71,7 +71,7 @@ def http_action(label: str, server: str, topic: str, body: str, token: str = "")
 def publish(server: str, topic: str, message: str, *, title: str = "",
             priority: int = 3, tags: Optional[List[str]] = None,
             actions: Optional[List[dict]] = None, token: str = "",
-            timeout: float = 10.0) -> Optional[str]:
+            markdown: bool = False, timeout: float = 10.0) -> Optional[str]:
     """메시지 하나 발행. 성공이면 None, 실패면 사유 문자열."""
     if not server.strip() or not topic.strip():
         return "ntfy 서버 또는 주제가 비어 있습니다."
@@ -84,6 +84,8 @@ def publish(server: str, topic: str, message: str, *, title: str = "",
         payload["tags"] = list(tags)[:5]
     if actions:
         payload["actions"] = list(actions)[:3]
+    if markdown:
+        payload["markdown"] = True
     url = server.strip().rstrip("/") + "/"
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                  method="POST",
@@ -102,6 +104,41 @@ def publish(server: str, topic: str, message: str, *, title: str = "",
     except Exception as e:
         return explain_ssl_error(e) or f"ntfy 전송 실패: {e}"
 
+
+def publish_attachment(server: str, topic: str, data: bytes, filename: str, *,
+                       token: str = "", timeout: float = 30.0) -> Optional[str]:
+    """파일 하나를 첨부로 발행한다 (그래프 PNG 등). 성공이면 None, 실패면 사유.
+
+    ntfy 는 **본문이 곧 파일**인 업로드를 지원한다 — JSON 발행으로는 바이너리를
+    보낼 수 없다. 그래서 리포트는 두 번 나간다: 글(JSON, 한글 가능) + 이 첨부.
+    헤더에는 ASCII 만 넣는다 — ntfy 헤더는 ASCII 기준이라 한글 제목을 넣으면
+    서버·클라이언트에 따라 깨진다. 한글은 앞서 보낸 글 쪽에 있다.
+
+    filename 은 휴대폰에 보이는 이름이자 미리보기 판단 근거다(.png 면 그림으로 뜬다).
+    """
+    if not server.strip() or not topic.strip():
+        return "ntfy 서버 또는 주제가 비어 있습니다."
+    if not data:
+        return "첨부할 내용이 비어 있습니다."
+    safe = "".join(c for c in (filename or "attachment.bin")
+                   if c.isalnum() or c in "._-")[:64] or "attachment.bin"
+    url = f"{server.strip().rstrip('/')}/{urllib.parse.quote(topic.strip())}"
+    headers = {**_headers(token), "Filename": safe,
+               "Content-Type": "application/octet-stream"}
+    req = urllib.request.Request(url, data=data, method="PUT", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_context(url)) as resp:
+            resp.read()
+        return None
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            detail = ""
+        hint = " (첨부 크기 제한·권한 확인)" if e.code in (401, 403, 413) else ""
+        return f"ntfy 첨부 HTTP {e.code}{hint} {detail}".strip()
+    except Exception as e:
+        return explain_ssl_error(e) or f"ntfy 첨부 전송 실패: {e}"
 
 class NtfySubscriber:
     """주제를 구독해 새 메시지마다 on_message(dict) 를 부른다. 끊기면 다시 붙는다."""

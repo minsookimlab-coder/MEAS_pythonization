@@ -118,10 +118,11 @@ class AlarmManager:
     @staticmethod
     def _ntfy_publish(d, text: str, title: str, priority: int = 3,
                       tags: Optional[List[str]] = None,
-                      actions: Optional[List[dict]] = None) -> Optional[str]:
+                      actions: Optional[List[dict]] = None,
+                      markdown: bool = False) -> Optional[str]:
         from pythonization.notify.ntfy import publish
         return publish(d.ntfy_server, d.ntfy_topic, text, title=title, priority=priority,
-                       tags=tags, actions=actions, token=d.ntfy_token)
+                       tags=tags, actions=actions, token=d.ntfy_token, markdown=markdown)
 
     def send_ntfy(self, text: str, title: str = "Pythonization AI", priority: int = 3,
                   tags: Optional[List[str]] = None,
@@ -236,6 +237,52 @@ class AlarmManager:
         if not sent_any and not errors:
             errors.append("ntfy·텔레그램·이메일 전송 수단이 설정되지 않았습니다 "
                           "(Settings → 알림 (ntfy) 에서 설정).")
+        return errors
+
+    def send_report(self, report, *, urgent: bool = False) -> List[str]:
+        """측정 리포트(글 + 그래프 PNG)를 휴대폰으로 보낸다.
+
+        ntfy 가 설정돼 있으면 **두 번** 나간다 — 마크다운 글 한 번, 그래프 첨부 한 번.
+        ntfy 만 바이너리 첨부를 받을 수 있어서, 그래프는 이 경로로만 간다.
+        ntfy 가 없으면 글만 기존 경로(send_message → 텔레그램·이메일)로 보낸다.
+
+        그래프 전송이 실패해도 글은 이미 간 것으로 본다 — 장시간 측정에서
+        '그림을 못 붙였다' 는 이유로 알림 자체가 사라지면 안 된다.
+        반환: 실패 사유 목록 (빈 목록 = 모두 성공).
+        """
+        from pythonization.notify.ntfy import publish_attachment
+        try:
+            from pythonization.config.app_config import load_alarm_delivery
+            d = load_alarm_delivery()
+        except Exception as e:
+            return [f"알람 전송 설정을 읽지 못했습니다: {e}"]
+
+        title = getattr(report, "title", "") or "Pythonization 측정 리포트"
+        text = getattr(report, "text", "") or ""
+        if not d.ntfy_ready():
+            # ntfy 가 없으면 그림은 못 보내고 글만 간다
+            errors = self.send_message(text, urgent=urgent, title=title)
+            if getattr(report, "png", None):
+                errors.append("그래프는 ntfy 가 설정돼 있을 때만 보낼 수 있습니다.")
+            return errors
+
+        errors: List[str] = []
+        if urgent and d.use_sound:
+            self._play_sound()
+        err = self._ntfy_publish(d, text, title, priority=5 if urgent else 3,
+                                 tags=["warning"] if urgent else ["bar_chart"],
+                                 markdown=True)
+        if err:
+            errors.append(f"ntfy: {err}")
+            self._log_send_fail(f"ntfy report failed: {err}")
+        png = getattr(report, "png", None)
+        if png:
+            err2 = publish_attachment(d.ntfy_server, d.ntfy_topic, png,
+                                      getattr(report, "png_name", "graph.png"),
+                                      token=d.ntfy_token)
+            if err2:
+                errors.append(f"ntfy 그래프: {err2}")
+                self._log_send_fail(f"ntfy graph failed: {err2}")
         return errors
 
     @staticmethod
