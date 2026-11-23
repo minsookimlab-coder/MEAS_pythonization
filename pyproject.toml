@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pythonization"
-version = "1.10.0"
+version = "1.12.0"
 description = "저온·자기장 물성 측정 자동화 (PySide6 + VISA)"
 requires-python = ">=3.10"
 dependencies = [
@@ -22,6 +22,8 @@ dependencies = [
 mfli = ["zhinst>=23.0"]
 # 미분 채널 Savitzky-Golay 필터. 없으면 다항식 회귀로 자동 fallback.
 savgol = ["scipy>=1.10"]
+# AI 자동 측정 — 앱 내장 실행(Claude API). Claude Code 연결에는 필요 없다.
+ai = ["anthropic>=2.12"]
 build = ["pyinstaller>=6.0"]
 
 [project.scripts]

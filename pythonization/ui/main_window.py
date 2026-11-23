@@ -48,7 +48,12 @@ from pythonization.measurement.channel import (
 from pythonization.measurement.sweep_worker import StepRequest, StepResult, SweepWorker
 from pythonization.instruments.command_library import VisaLibraryRegistry
 from pythonization.profiles.registry import ProfileRegistry
-from pythonization.config.app_config import AppConfig, load_app_config, save_app_config
+from pythonization.config.app_config import (
+    AppConfig,
+    load_alarm_delivery,
+    load_app_config,
+    save_app_config,
+)
 from pythonization.config.models import DerivConfigData, MainUIProfile, MeasType
 from pythonization.ui.assets import WHALE_BACKGROUND, asset_path
 from pythonization.ui.panels.console_handler import (
@@ -129,6 +134,12 @@ class MainWindow(QMainWindow):
     request_step = Signal(object)   # StepRequest
     # VISA 로그를 메인 스레드로 릴레이 (worker 스레드에서 호출되므로 Signal 경유)
     _visa_log_relay = Signal(str, str, str, str, object)  # alias, addr, cmd_type, cmd, result
+    # AI 자동 측정이 sweep 진행을 지켜보는 통로 (둘 다 메인 스레드에서 emit)
+    #   sweep_step_recorded: .dat 에 한 줄 기록된 직후 — (x, {measurement row: value})
+    #   sweep_stopped:       sweep 이 어떤 이유로든 끝난 직후 — (reason, detail)
+    #     reason: complete | user_stop | error | comm_error | save_error | stopped
+    sweep_step_recorded = Signal(float, object)
+    sweep_stopped = Signal(str, str)
 
     def __init__(self, profile_registry: ProfileRegistry = None):
         super().__init__()
@@ -151,6 +162,8 @@ class MainWindow(QMainWindow):
 
         # 마지막으로 사용한 프로파일 전체 복원 (sweep params, 폴더, sweep channel 포함)
         self._apply_active_profile()
+        # Claude Code 연결 서버 자동 시작 (설정한 경우만) — 창이 다 뜬 뒤에
+        QTimer.singleShot(0, self._autostart_ai_server)
 
     # ── __init__ 의 단계별 초기화 ─────────────────────────────────────────
 
@@ -170,6 +183,9 @@ class MainWindow(QMainWindow):
         self._active_profile: MainUIProfile = MainUIProfile()
         self._running = False
         self._loading_profile = False
+        # 다음 _on_stop 이 sweep_stopped 로 알릴 종료 사유 (_set_stop_reason 으로 지정)
+        self._stop_reason = "stopped"
+        self._stop_detail = ""
         self._sweep_step_count = 0
         self._tick_start: float = 0.0
         self._last_write_value: "float | None" = None
@@ -214,6 +230,7 @@ class MainWindow(QMainWindow):
         self._vna_window = None
         self._mfli_window = None
         self._config_window = None
+        self._auto_measure_window = None
 
     def _init_worker_thread(self):
         """VISA I/O 를 담당할 워커 스레드.
@@ -291,6 +308,9 @@ class MainWindow(QMainWindow):
         act_config.setShortcut("Ctrl+,")
         act_config.triggered.connect(self._open_config)
         settings_menu.addAction(act_config)
+        act_ntfy = QAction("알림 (ntfy)...", self)
+        act_ntfy.triggered.connect(self._open_ntfy_settings)
+        settings_menu.addAction(act_ntfy)
 
         view_menu = menubar.addMenu("View")
         act_debug = QAction("Debug Window", self)
@@ -342,6 +362,11 @@ class MainWindow(QMainWindow):
         act_cycle2d.setShortcut("Ctrl+Shift+B")
         act_cycle2d.triggered.connect(self._open_cycle_double_sweep)
         view_menu.addAction(act_cycle2d)
+        view_menu.addSeparator()
+        act_auto = QAction("AI 자동 측정...", self)
+        act_auto.setShortcut("Ctrl+Shift+J")
+        act_auto.triggered.connect(self._open_auto_measure_window)
+        view_menu.addAction(act_auto)
 
     def _setup_ui(self):
         self._glow_frame = GlowFrame("glowFrame")
@@ -413,6 +438,8 @@ class MainWindow(QMainWindow):
             self._cycle_sweep_window.reload_from_profile()
         if self._cycle_double_sweep_window is not None:
             self._cycle_double_sweep_window.reload_from_profile()
+        if self._auto_measure_window is not None:
+            self._auto_measure_window.reload_from_profile()
         if self._meta_data_window is not None and self._meta_data_window.isVisible():
             self._meta_data_window._populate()
         if self._param_manager_window is not None and self._param_manager_window.isVisible():
@@ -1111,13 +1138,85 @@ class MainWindow(QMainWindow):
         self._cycle_double_sweep_window.show()
         self._cycle_double_sweep_window.raise_()
 
+    def _ensure_auto_measure_window(self):
+        if self._auto_measure_window is None:
+            # 지역 import — 이 창은 선택 패키지(anthropic)를 쓰는 기능의 입구다.
+            # 모듈 자체는 anthropic 없이도 import 되지만, 메인 창 기동 경로를
+            # 가볍게 유지하려고 처음 열 때 불러온다.
+            from pythonization.ui.modules.auto_measure.window import AutoMeasureWindow
+            self._auto_measure_window = AutoMeasureWindow(self, self._param_manager_reg, None)
+        return self._auto_measure_window
+
+    def _open_auto_measure_window(self):
+        win = self._ensure_auto_measure_window()
+        win.show()
+        win.raise_()
+
+    def _autostart_ai_server(self):
+        """기동 직후 — 설정해 두었으면 Claude Code 연결 서버와 ntfy 지시 수신을 켠다."""
+        try:
+            from pythonization.automation.settings import load_llm_settings
+            cfg = load_llm_settings(getattr(self._param_manager_reg, "settings_dir", None))
+            ntfy_commands = load_alarm_delivery().ntfy_commands_ready()
+        except Exception:
+            return
+        if not cfg.mcp_enabled and not ntfy_commands:
+            return
+        # 창을 만들면 ntfy 지시 수신이 함께 시작된다 (설정한 경우)
+        win = self._ensure_auto_measure_window()
+        if not cfg.mcp_enabled:
+            return
+        if win.start_mcp_server(show_error=False):
+            self._log("AI: Claude Code 연결 서버를 켰습니다.", color="#d2a8ff")
+        else:
+            self._log("AI: Claude Code 연결 서버를 켜지 못했습니다 — "
+                      "View → AI 자동 측정 창에서 확인하세요.", color="#f44747")
+
+    def _open_ntfy_settings(self):
+        from pythonization.ui.dialogs.ntfy_settings import NtfySettingsDialog
+        if NtfySettingsDialog(self).exec():
+            self._log("알림 (ntfy) 설정을 저장했습니다.", color="#888888")
+            # 지시 수신을 켰으면 AI 창(수신 담당)을 만들고, 이미 있으면 다시 연결한다
+            if load_alarm_delivery().ntfy_commands_ready() or \
+                    self._auto_measure_window is not None:
+                self._ensure_auto_measure_window().on_ntfy_settings_changed()
+
+    def _automation_busy(self) -> bool:
+        """AI 자동 측정이 실행 중인지 (그동안 사람이 메인 Start 를 누르면 안 된다)."""
+        win = self._auto_measure_window
+        return win is not None and not win.is_idle()
+
+    def measurement_busy_reason(self) -> str:
+        """메인 sweep 외에 장비를 쓰는 측정이 돌고 있으면 그 이름. 없으면 빈 문자열.
+
+        AI 자동 측정이 장비를 움직이기 전에 확인한다.
+        """
+        if self._running:
+            return "Main sweep"
+        dsw = self._double_sweep_window
+        if dsw is not None and getattr(getattr(dsw, "_phase", None), "name", "IDLE") != "IDLE":
+            return "Double Sweep"
+        if self._cycle_sweep_window is not None and not self._cycle_sweep_window.is_idle():
+            return "Cycle Sweep"
+        if (self._cycle_double_sweep_window is not None
+                and not self._cycle_double_sweep_window.is_idle()):
+            return "Double Sweep+"
+        for name, win in (("VNA", self._vna_window), ("MFLI", self._mfli_window)):
+            thread = getattr(win, "_acq_thread", None) if win is not None else None
+            try:
+                if thread is not None and thread.isRunning():
+                    return name
+            except RuntimeError:
+                pass    # 이미 파괴된 QThread 참조
+        return ""
+
     def _on_double_sweep_started(self):
         """Double sweep 시작 → main UI Start 비활성화."""
         self._btn_start.setEnabled(False)
 
     def _on_double_sweep_finished(self):
-        """Double sweep 종료 → main UI Start 복원 (single sweep 실행 중이 아닐 때만)."""
-        if not self._running:
+        """Double sweep 종료 → main UI Start 복원 (single sweep·AI 실행 중이 아닐 때만)."""
+        if not self._running and not self._automation_busy():
             self._btn_start.setEnabled(True)
 
     # ------------------------------------------------------------------
@@ -1931,24 +2030,66 @@ class MainWindow(QMainWindow):
         """
         if self._running:
             return
+        if self._automation_busy():
+            QMessageBox.warning(self, "AI 자동 측정 실행 중",
+                                "AI 자동 측정이 장비를 쓰고 있습니다. "
+                                "AI 자동 측정 창에서 먼저 중지하세요.")
+            return
         if not self._validate_start():
             return
+        self._launch_sweep(interactive=True)
 
+    def start_sweep_unattended(self) -> str:
+        """확인 창 없이 sweep 을 시작한다 — AI 자동 측정용.
+
+        _on_start 와 같은 순서로 시작하되, 사람에게 묻는 대화상자를 띄우지 않고 실패
+        사유를 문자열로 돌려준다 (무인 측정 중 모달 창이 뜨면 아무도 닫지 못한다).
+        반환: 성공이면 빈 문자열, 실패면 사유.
+        """
+        if self._running:
+            return "Main sweep 이 이미 실행 중입니다."
+        if self._sweep_channel is None:
+            return "Sweep channel 이 선택되지 않았습니다."
+        cfg = self._sweep_config
+        if cfg.sweep_rate <= 0 or cfg.time_per_point <= 0:
+            return (f"Rate({cfg.sweep_rate:g})와 Time/Point({cfg.time_per_point:g})는 "
+                    "0보다 커야 합니다.")
+        if not self._cb_save_enable.isChecked():
+            return "Auto-save 가 꺼져 있습니다."
+        # 연결 확인 — 열려 있지 않은 장비만 연다 (*IDN? 은 보내지 않는다:
+        # raw socket 장비의 응답이 측정 버퍼를 오염시킬 수 있다)
+        for alias in self.collect_active_aliases():
+            if self._session.is_open(alias):
+                continue
+            try:
+                self._session.open(alias)
+            except Exception as exc:
+                return f"[{alias}] 연결 실패\n{self._connection_hint(alias, exc)}"
+        return self._launch_sweep(interactive=False)
+
+    def _launch_sweep(self, interactive: bool) -> str:
+        """검증을 마친 뒤의 시작 단계. 반환: 성공이면 빈 문자열, 실패면 사유."""
         self._worker.reset_stop()   # 이전 sweep 의 Stop 잔류 플래그 제거
-        get_logger().info("sweep _on_start: ch=%s to=%s rate=%s tpp=%s",
-                          getattr(self._sweep_channel, "alias", "?"),
+        get_logger().info("sweep start (interactive=%s): ch=%s to=%s rate=%s tpp=%s",
+                          interactive, getattr(self._sweep_channel, "alias", "?"),
                           self._sweep_config.sweep_to, self._sweep_config.sweep_rate,
                           self._sweep_config.time_per_point)
 
+        self._stop_reason, self._stop_detail = "stopped", ""
         self._begin_run_state()
-        if not self._open_data_file():
-            return
+        if not self._open_data_file(interactive):
+            return self._data_saver.start_error() or "데이터 파일을 시작하지 못했습니다."
 
         self._prepare_derivative_channels()
         self._prepare_graph_session()
         self._configure_metadata()
         self._log_sweep_start()
         self._request_initial_measurement()
+        return ""
+
+    def _set_stop_reason(self, reason: str, detail: str = "") -> None:
+        """다음 _on_stop 이 sweep_stopped 로 알릴 종료 사유를 정한다."""
+        self._stop_reason, self._stop_detail = reason, detail
 
     # ── _on_start 의 단계별 처리 ──────────────────────────────────────────
 
@@ -2023,10 +2164,11 @@ class MainWindow(QMainWindow):
         self._lbl_idle.setStyleSheet("color: #555555;")
         self._lbl_remaining.setText("—")
 
-    def _open_data_file(self) -> bool:
+    def _open_data_file(self, interactive: bool = True) -> bool:
         """.dat 세션 시작. 저장이 켜져 있는데 실패하면 측정을 취소하고 False.
 
         여기서 그냥 진행하면 장시간 측정이 통째로 유실된다.
+        interactive=False(AI 자동 측정)면 실패 안내 창을 띄우지 않는다.
         """
         self._update_save_preview()
         filepath = self._data_saver.start_session()
@@ -2039,7 +2181,10 @@ class MainWindow(QMainWindow):
             return True     # 저장을 의도적으로 끈 상태
 
         self._log(f"  ✗ 데이터 저장 시작 실패 — 측정 취소: {error}", color="#f44747")
+        self._set_stop_reason("save_error", error)
         self._on_stop()
+        if not interactive:
+            return False
         QMessageBox.critical(
             self, "데이터 저장 실패 — 측정 취소",
             f"데이터 파일을 시작할 수 없어 측정을 시작하지 않았습니다.\n\n"
@@ -2121,6 +2266,7 @@ class MainWindow(QMainWindow):
         """사용자가 Stop 버튼을 누른 경우 — 직전 지점을 resume 로그에 저장 후 중단."""
         if self._running and self._last_write_value is not None:
             self._save_resume_point("사용자 중단(Stop)")
+        self._set_stop_reason("user_stop", "사용자가 메인 창 Stop 을 눌렀습니다.")
         self._on_stop()
 
     def _on_stop(self):
@@ -2132,7 +2278,8 @@ class MainWindow(QMainWindow):
         self._sweep_step_timer.stop()
         self._retry_timer.stop()
         self._update_resume_btn_enabled()
-        self._btn_start.setEnabled(True)
+        # AI 자동 측정 중이면 다음 단계도 AI 가 이어 가므로 사람용 Start 는 잠가 둔다
+        self._btn_start.setEnabled(not self._automation_busy())
         self._btn_stop.setEnabled(False)
         self._sweep_channel_panel.setEnabled(True)
         self._meas_panel.setEnabled(True)
@@ -2159,6 +2306,9 @@ class MainWindow(QMainWindow):
                 w.setEnabled(enabled)
         self._stop_glow()
         self._log("Sweep stopped.", color="#ce9178")
+        reason, detail = self._stop_reason, self._stop_detail
+        self._stop_reason, self._stop_detail = "stopped", ""
+        self.sweep_stopped.emit(reason, detail)
 
     def _log_sweep(self, text: str, color: str = "#c9d1d9", verbose: bool = False):
         """Sweep Log 패널에 기록. verbose=True 항목은 Verbose 체크 시에만 표시."""
@@ -2258,6 +2408,10 @@ class MainWindow(QMainWindow):
         self._data_window.update_values(row_vals)
         if not self._record_row(row_vals):
             return
+        # AI 자동 측정의 즉시 중단·안정화 판정용. 기록된 행만 알린다.
+        self.sweep_step_recorded.emit(
+            float(result.next_v),
+            {idx: meas_map.get(idx) for idx in self._active_meas_indices})
 
         self._meta_manager.record_step(result.meas_results)   # T/B 메타 버퍼 누적
         self._push_graph_point(result, meas_map, deriv_vals)
@@ -2272,6 +2426,11 @@ class MainWindow(QMainWindow):
 
     def _finish_sweep(self):
         """sweep 정상 종료 — 표시 초기화, 메타데이터 저장, 정지."""
+        if not self._running:
+            # 이 스텝을 처리하는 도중 이미 멈췄다 (예: AI 의 즉시 중단 조건) —
+            # '완료'로 기록하면 안 된다.
+            return
+        self._set_stop_reason("complete")
         self._lbl_idle.setText("—")
         self._lbl_remaining.setText("—")
         self._log(f"Sweep complete. ({self._sweep_step_count} steps)", color="#4ec9b0")
@@ -2317,8 +2476,11 @@ class MainWindow(QMainWindow):
             self._handle_comm_error("; ".join(descs))
             return
 
-        self._on_stop()
         detail = "; ".join(result.meas_errors.get(idx, "") for idx in failed)
+        self._set_stop_reason("error", f"{err_msg}\n원인: {humanize_error(detail)}")
+        self._on_stop()
+        if self._automation_busy():
+            return      # 무인 측정 — 사유는 AI 가 받아 보고한다
         QMessageBox.critical(self, "Measurement Error",
                              f"{err_msg}\n\n원인: {humanize_error(detail)}")
 
@@ -2349,7 +2511,10 @@ class MainWindow(QMainWindow):
         if self._data_saver.append_row(row_vals) or not self._data_saver.is_enabled():
             return True
         self._log("  ✗ 데이터 기록 실패 — 측정 중단 (디스크/권한 확인).", color="#f44747")
+        self._set_stop_reason("save_error", "측정값을 파일에 기록하지 못했습니다.")
         self._on_stop()
+        if self._automation_busy():
+            return False    # 무인 측정 — 사유는 AI 가 받아 보고한다
         QMessageBox.critical(
             self, "데이터 기록 실패 — 측정 중단",
             "측정값을 파일에 기록하지 못해 측정을 중단했습니다.\n"
@@ -2448,6 +2613,7 @@ class MainWindow(QMainWindow):
         if is_comm_error(msg):
             self._handle_comm_error(msg)
         else:
+            self._set_stop_reason("error", cause)
             self._on_stop()
 
     # ------------------------------------------------------------------
@@ -2483,7 +2649,12 @@ class MainWindow(QMainWindow):
                 color="#f44747",
             )
             self._log(f"     원인: {cause}", color="#f44747")
+            self._set_stop_reason("comm_error", cause)
             self._on_stop()
+            if self._automation_busy():
+                # 무인 측정 중 — 모달 창을 띄우면 아무도 닫지 못한다. AI 가 사유를 받아
+                # 메신저로 보고한다.
+                return
             QMessageBox.warning(
                 self, "통신 오류 — 측정 중단",
                 "자동 재개 후에도 통신 오류가 반복되어 측정을 중단했습니다.\n\n"
@@ -2815,10 +2986,10 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
-        if self._running:
+        if self._running or self._automation_busy():
             reply = QMessageBox.question(
                 self, "종료 확인",
-                "Sweep이 실행 중입니다. 종료하시겠습니까?",
+                "Sweep 또는 AI 자동 측정이 실행 중입니다. 종료하시겠습니까?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.No:
@@ -2846,6 +3017,9 @@ class MainWindow(QMainWindow):
             self._cycle_sweep_window.shutdown_threads()
         if self._cycle_double_sweep_window is not None:
             self._cycle_double_sweep_window.shutdown_threads()
+        # AI 자동 측정: 중지를 걸고 장비 조작이 끝나길 기다린다 (세션을 닫기 전에)
+        if self._auto_measure_window is not None:
+            self._auto_measure_window.shutdown_threads()
         self._session.shutdown()
 
         # 모든 하위 창 닫기
@@ -2856,6 +3030,7 @@ class MainWindow(QMainWindow):
             self._double_sweep_window,
             self._cycle_sweep_window,
             self._cycle_double_sweep_window,
+            self._auto_measure_window,
             self._param_manager_window,
             self._visa_lib_window,
             self._settings_window,

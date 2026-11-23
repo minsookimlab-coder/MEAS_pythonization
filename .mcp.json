@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "pythonization-lab": {
+      "type": "http",
+      "url": "${PYTHONIZATION_MCP_URL:-http://127.0.0.1:8765/mcp}",
+      "headersHelper": ".venv/Scripts/python.exe -m pythonization.automation.mcp_auth",
+      "timeout": 600000
+    }
+  }
+}

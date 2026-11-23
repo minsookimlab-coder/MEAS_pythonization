@@ -6,6 +6,11 @@
 재개를 제공한다. VNA / MFLI noise sweep / Double Sweep / Cycle Sweep /
 Double Sweep+ (Cycle) 은 각자 독립 창으로 동작한다.
 
+**AI 자동 측정** — 말로 요청하면 AI(Claude)가 메인 창 sweep 등 내장 기능으로 측정하고,
+결과를 판단하고, ntfy 로 휴대폰에 보고한다. Claude Code 데스크톱 앱으로 돌리면 API 키가
+필요 없다 (이 폴더를 열면 `.mcp.json` 으로 연결). 안전 한계는 코드가 강제한다.
+[docs/USER_MANUAL.md](docs/USER_MANUAL.md) 18·19절.
+
 ---
 
 ## 실행
@@ -31,6 +36,7 @@ pip install -r requirements-optional.txt
 |---|---|
 | `zhinst` | MFLI 창에서 연결 시 안내 메시지. 나머지 기능은 정상 |
 | `scipy` | 미분 채널이 Savitzky-Golay 대신 다항식 회귀로 자동 fallback |
+| `anthropic` | AI 자동 측정의 '앱 내장 실행'만 안내 메시지. Claude Code 연결은 그대로 동작 |
 
 **처음 사용하는 순서**: 장비 등록 → VISA 라이브러리 작성 → Parameter Manager 구성
 → 메인 창에서 Sweep. 자세한 절차는 [docs/USER_MANUAL.md](docs/USER_MANUAL.md).
@@ -86,11 +92,15 @@ Settings → Config 의 `data_dir` 로 바꿀 수 있다(재시작 후 적용).
 | `settings/profiles/{name}.yaml` | 명명된 프로파일 |
 | `settings/active_profile.txt` | 마지막으로 쓴 프로파일 이름 |
 | `settings/resume_points.json` | 중단된 측정의 재개 지점 |
+| `settings/profiles/automation/` | AI 자동 측정 — 채널 허용·한계·역할 메모 |
+| `settings/llm.yaml` | AI 앱 내장 실행 API 키 (형식: [llm.example.yaml](llm.example.yaml)) |
+| `settings/mcp_token.txt` | Claude Code 연결 토큰 |
+| `settings/knowledge/` | 실험 지식 (현상 → 의미 → 대응, 관찰 기록) |
 
 측정 데이터(`.dat`)는 메인 창의 Save Settings 에서 지정한 폴더에 저장된다.
 
 프로그램 폴더의 `app_config.yaml` 은 전역 설정(측정 임계값·병렬 측정·알람 전송 수단)이다.
-SMTP 비밀번호와 텔레그램 토큰이 들어가므로 **저장소에 커밋하지 않는다**
+SMTP 비밀번호와 텔레그램·ntfy 토큰이 들어가므로 **저장소에 커밋하지 않는다**
 (`.gitignore` 대상). 형식은 [app_config.example.yaml](app_config.example.yaml) 참고.
 
 ---
@@ -133,6 +143,7 @@ python -m unittest discover -s tests -t .
 | `test_plot_panel` | 공용 플롯 패널 상태 저장/복원 |
 | `test_cycle_sweep` | Cycle sweep — targets 파싱, 소요시간, 2636A 판정, 구간 전환 계약 |
 | `test_cycle_double_sweep` | Double Sweep+ — array 생성, ITC/IPS 판정, Settle Wait 게이트, 파일명 |
+| `test_automation_*` | AI 자동 측정 — 안전 검사, 도구 루프, 실행기, 메인 창 경로, 실험 지식, MCP 서버, SDK 요청 형식, ntfy |
 
 ---
 

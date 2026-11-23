@@ -5,6 +5,10 @@
 # 없으면 MFLI 창에서 연결 시 안내 메시지가 뜨고, 나머지 기능은 그대로 동작한다.
 zhinst>=23.0
 
+# AI 자동 측정의 '앱 내장 실행' (Claude API). 없으면 그 버튼만 안내 메시지가 뜬다.
+# Claude Code 데스크톱 앱으로 돌리는 방식(MCP 연결)에는 필요 없다.
+anthropic>=2.12
+
 # 미분 채널의 Savitzky-Golay 필터.
 # 없으면 자동으로 다항식 회귀(linear)로 fallback 한다 — 결과 컬럼은 그대로 나온다.
 scipy>=1.10

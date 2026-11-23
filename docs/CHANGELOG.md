@@ -6,29 +6,97 @@
 
 ## v1.12.0 — 2026-11-23 (기능 추가)
 
-### 알람 설정 창이 저장할 때 다른 전송 설정을 지울 수 있던 문제
+### AI 자동 측정 — LLM 이 내장 측정 기능을 조작하고 판단하고 보고한다
 
-- **[버그]** `pythonization/ui/dialogs/alarm_config.py` `_save_delivery_global` 이 전역 전송
-  설정(`AlarmDeliveryConfig`)을 새로 만들어 덮어써, 이 창에 없는 필드는 저장할 때마다
-  기본값으로 돌아갔다. 지금까지는 모든 필드가 이 창에 있어 드러나지 않았지만, 다른 창에서
-  관리하는 전송 수단(이번의 ntfy)을 더하면 바로 지워진다. 기존 값을 읽어 이 창이 다루는
-  필드만 바꾸도록 고쳤다.
+자연어 요청("게이트를 -20 V 에서 20 V 까지 스윕해")을 받아 LLM(Claude)이 채널을 고르고
+조건을 정해 **메인 창의 sweep 경로 그대로** 측정하고, 결과를 요약해 판단하고, 다음 측정을
+정하고, 휴대폰으로 보고한다. View → **AI 자동 측정** (Ctrl+Shift+J).
 
-### ntfy 연동 — 알람을 휴대폰으로 (실험실 PC 의 ntfy 서버)
+AI 를 돌리는 방법은 두 가지이고 도구·안전 검사·저장 경로는 같다.
 
-- `pythonization/notify/ntfy.py` — JSON 발행(제목·우선순위·태그·버튼), 구독 스트림
-  (처음에는 '지금 이후'만, 끊기면 마지막 메시지 id 부터 재접속), 무작위 주제 이름.
-  표준 라이브러리만 쓴다.
-- `notify/alarm_manager.py` — 기존 알람(Double Sweep·VNA)이 ntfy 로도 나간다 (우선순위 5).
-  텔레그램·SMTP 전송을 실패 사유를 돌려주는 함수로 나누고(`_telegram_post`·`_smtp_send`),
-  사람이 쓴 보고를 보내는 `send_message()`·`send_ntfy()` 를 더했다.
-- `config/models.py` — `AlarmDeliveryConfig` 에 ntfy 항목 (서버 주소, 휴대폰 접속 주소,
-  보고·지시 주제, 토큰). 앱은 같은 PC 의 127.0.0.1 로 붙지만 휴대폰은 랩 네트워크 주소로
-  붙으므로, 알림 버튼용 주소를 따로 둔다.
-- `ui/dialogs/ntfy_settings.py` — 알림 (ntfy) 설정 창 (다른 전송 설정은 건드리지 않음).
-- `automation/remote.py` — 지시 주제의 글을 상태·중지·승인·거부·지시로 해석.
-- 검증: `test_automation_ntfy` 13개 (127.0.0.1 가짜 ntfy 서버 — 발행 형식, 토큰 거부,
-  재접속 since, 알람·보고 발행, 두 설정 창이 서로의 값을 지우지 않음).
+- **Claude Code (데스크톱 앱·CLI)** — 창에서 '연결 서버'를 켜면 이 프로그램 안에 MCP
+  서버(127.0.0.1, Bearer 토큰)가 뜬다. 저장소 폴더를 Claude Code 에서 열면 `.mcp.json` 으로
+  자동 연결된다. API 키가 필요 없다. 계측기는 실행 중인 이 프로그램이 잡고 있으므로 다른
+  프로세스가 장비를 직접 열 수 없어 이 방식을 택했다.
+- **앱 내장 실행** — 창에 요청을 쓰고 시작. Claude API 키(`SETTINGS_DIR/llm.yaml` 또는
+  `ANTHROPIC_API_KEY`)와 선택 패키지 `anthropic` 이 필요하다. 기본 모델 `claude-opus-5-5`,
+  adaptive thinking + effort high, 서버측 fallback, 프롬프트 캐시. Anthropic 호스팅 에이전트
+  (Managed Agents) 대신 앱 안에서 루프를 도는 이유: 측정이 수십 시간 걸리는데 그동안 원격
+  세션을 열어 둘 이유가 없고, 안전 검사·중지 버튼·장비 락이 이 프로세스 안에 있어야 한다.
+
+**측정은 내장 기능으로** (규칙 2 — LLM 은 VISA 명령 문자열을 만들 수 없다)
+
+- `run_sweep` / `run_time_trace` → 메인 창의 채널·Sweep To·Rate·Time/Point·measurement 체크·
+  Sub Folder·Filename 을 설정하고 시작. 그래프·Data 창·`.dat`·메타데이터·통신 오류 자동 재개가
+  사람이 Start 를 누른 것과 똑같이 돈다. 끝나면 메인 창 설정을 원래대로 되돌린다.
+- `move_channel` → SweepWorker 스텝 로직 (Cycle Sweep PRE_INIT 과 같은 방식, safety ramp 포함).
+- `set_second_axis` → SecondChannelWorker (advance 4종 + 워치독).
+- 폴더·파일명은 LLM 이 조건에 맞게 짓되 Main Folder 아래 상대 경로만 허용 (`..`·드라이브·
+  4단계 초과 거부, Windows 예약 이름 정리).
+
+**안전은 코드가 강제** — `pythonization/automation/safety.py`
+
+- 채널마다 허용·최소·최대·최대 rate 를 사용자가 표에서 정한다. 기본은 전부 금지.
+- 현재값이 범위 밖이면 첫 스텝부터 범위 밖 값을 쓰게 되므로 시작하지 않는다.
+- 측정값별 '중단 |값|' (예: 누설전류) — 넘으면 LLM 판단을 기다리지 않고 그 스텝에서 바로
+  멈춘다 (`ui/modules/auto_measure/bridge.py` `_on_step_recorded`). LLM 은 더 엄격한 값만 추가.
+- '조작 전마다 승인' 모드: 장비를 움직이는 도구마다 창에 승인 카드 (Claude Code 호출에도 적용).
+- 실행 시간·LLM 호출 수·sweep 당 점 수 예산. 다른 측정(Main/Double/Cycle/VNA/MFLI)이 돌고
+  있으면 장비를 움직이지 않는다. AI 실행 중에는 메인 Start 를 막는다.
+- 실행 기록: `Main Folder/ai_runs/{시각}/journal.jsonl` (+ `report.md`).
+
+**실험 지식 저장소** — `pythonization/automation/knowledge.py`, `SETTINGS_DIR/knowledge/`
+
+- 규칙(현상 → 물리적 의미 → 대응)과 관찰 기록(수치·파일·해석·뒷받침/반박한 규칙).
+  예: gate 0 V 근처 lock-in peak → Dirac point / gate 전극 전류 수 µA → 누설 → 중단 + 알람.
+  대화 중 "기억해" 라고 하면 저장된다.
+- **가이드일 뿐, 판단은 LLM 이 데이터로 직접 한다.** 해석 규칙은 첫 메시지에 싣지 않고
+  (편향 방지) 데이터 특징을 먼저 스스로 기술한 뒤 조회하게 했다. 관찰이 규칙을 반박한 수도
+  똑같이 세어 보여 준다. AI 가 만든 규칙은 사용자 확인 전까지 '가설'.
+
+**ntfy 연동 (실험실 PC 의 ntfy 서버)** — `pythonization/notify/ntfy.py`, Settings → 알림 (ntfy)
+
+- 알람(Double Sweep·VNA)과 AI 보고가 ntfy 로 휴대폰에 간다 (기존 텔레그램·이메일도 유지).
+- 지시 주제에 쓴 글 → AI 에게 지시. '상태'·'중지'·'승인 <번호>'·'거부 <번호>' 는 명령.
+  실행 중이면 다음 단계에 반영, Claude Code 가 일하는 중이면 다음 도구 결과에 붙여 전달,
+  둘 다 아니면 앱 내장 실행으로 시작한다.
+- 승인 요청 알림에 [승인]/[거부] 버튼. 버튼은 '휴대폰 접속 주소'로 보낸다 — 앱은 같은 PC 의
+  127.0.0.1 로 붙지만 휴대폰은 랩 네트워크 주소로 붙기 때문에 두 주소를 따로 둔다.
+
+**기존 코드 변경**
+
+- `ui/main_window.py` — `sweep_step_recorded`·`sweep_stopped` 신호, 확인 창 없이 시작하는
+  `start_sweep_unattended()` (`_on_start` 는 `_launch_sweep()` 를 공유), 종료 사유
+  (`_set_stop_reason`), `measurement_busy_reason()`. AI 실행 중에는 오류 안내 모달을 띄우지
+  않는다 (무인 측정 중 아무도 닫지 못한다 — 사유는 AI 가 받아 보고한다).
+  `_finish_sweep` 은 이미 멈춘 뒤면 '완료'로 기록하지 않는다.
+- `notify/alarm_manager.py` — 텔레그램·SMTP 전송이 실패 사유를 돌려주게 나누고
+  (`_telegram_post`·`_smtp_send`), AI 보고용 `send_message()`·`send_ntfy()` 추가.
+- **[버그]** `ui/dialogs/alarm_config.py` `_save_delivery_global` 이 전송 설정을 새로 만들어
+  덮어써, 이 창에 없는 필드(이번의 ntfy 설정)가 저장할 때마다 지워질 수 있었다. 기존 값을
+  읽어 이 창이 다루는 필드만 바꾸도록 고쳤다.
+- `profiles/registry.py` — `settings_dir` 속성 (테스트가 임시 폴더를 쓰게).
+- `config/models.py` — `AlarmDeliveryConfig` 에 ntfy 항목.
+
+**검증** — 실제 장비·API 키·ntfy 서버·Claude Code 없이 확인한 범위:
+
+| 항목 | 방법 |
+|---|---|
+| 안전 검사·이름 정리·요약 | `test_automation_safety` 27개 |
+| 도구 루프 (승인·거부·중지·잘림·거절·추가 지시·예산) | `test_automation_agent` 23개, 가짜 클라이언트 |
+| 도구 실행 (이동·sweep·second·write·읽기) | `test_automation_executor` 24개, 가짜 장비 위 실제 워커 |
+| 메인 창 경로 (.dat 저장·즉시 중단·안정화·중지·복원·창 전체 흐름·휴대폰 지시) | `test_automation_bridge` 14개, 헤드리스 MainWindow |
+| 실험 지식 | `test_automation_knowledge` 14개 |
+| MCP 서버 (토큰·Origin·initialize·tools·job·승인) | `test_automation_mcp` 17개, 실제 HTTP |
+| 실제 `anthropic` SDK 요청 형식·thinking 서명 왕복 | `test_automation_llm_http` 3개, 127.0.0.1 가짜 API |
+| ntfy 발행·구독·재연결·알람·설정 창 | `test_automation_ntfy` 13개, 127.0.0.1 가짜 ntfy |
+
+전체 469개 중 실패 6개는 이번 변경 전과 같다 — `test_add_entry`·`test_vna_double_sweep` 이
+임시 폴더 대신 사용자 Documents 의 실제 프로파일·라이브러리를 읽어, 설정이 없는 PC 에서
+실패한다 (기존 테스트 격리 문제, 이번에 손대지 않음).
+
+**확인하지 못한 것**: 실제 Claude API 호출, 실제 Claude Code 데스크톱 앱의 연결, 실제 ntfy
+서버, 실제 계측기. 랩 PC 에서 처음에는 '조작 전마다 승인' 모드와 좁은 허용 범위로 시작할 것.
 
 ---
 

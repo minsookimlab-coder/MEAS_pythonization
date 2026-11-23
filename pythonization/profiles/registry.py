@@ -287,6 +287,11 @@ class ProfileRegistry:
     def active_name(self) -> str:
         return self._active_name
 
+    @property
+    def settings_dir(self) -> Path:
+        """이 저장소가 쓰는 사용자 데이터 폴더 (테스트에서는 임시 폴더)."""
+        return self._base
+
     def get_active_profile(self) -> FullProfile:
         return self.get_profile(self._active_name)
 

@@ -1,0 +1,20 @@
+# AI 자동 측정 — 전역 LLM 설정 예시.
+#
+# 실제 파일은 사용자 데이터 폴더의 llm.yaml 이다 (기본 %USERPROFILE%\Documents\pythonization\settings\).
+# 저장소에는 두지 않는다 — API 키가 들어간다. AI 자동 측정 창의 [LLM 설정] 이 만든다.
+#
+# 대응 모델: pythonization/automation/settings.py 의 LlmSettings
+
+# 앱 내장 실행용 Claude API 키. 비우면 ANTHROPIC_API_KEY 환경변수 등 SDK 기본 경로를 쓴다.
+# Claude Code 데스크톱 앱으로 돌릴 때는 필요 없다.
+api_key: ''             # ← 저장소에 커밋하지 말 것.
+
+model: claude-opus-5-5
+effort: high            # low | medium | high | xhigh | max
+max_tokens: 16000
+request_timeout_s: 600.0
+
+# Claude Code 연결 서버 (127.0.0.1 전용). 포트를 바꾸면 .mcp.json 의 주소도
+# 함께 바꾸거나 PYTHONIZATION_MCP_URL 환경변수로 지정한다.
+mcp_enabled: false      # 프로그램 시작 시 자동으로 켠다
+mcp_port: 8765

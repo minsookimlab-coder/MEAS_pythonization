@@ -33,6 +33,7 @@ OPENERS = [
     "_open_instrument_settings",
     "_open_meta_data_config",
     "_open_config",
+    "_open_auto_measure_window",
 ]
 
 

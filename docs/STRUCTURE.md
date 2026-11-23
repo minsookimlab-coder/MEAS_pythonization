@@ -1,6 +1,6 @@
 # Pythonization — 시스템 구조
 
-> Last updated: 2026-09-21 | Version: 1.11.0
+> Last updated: 2026-11-23 | Version: 1.12.0
 
 사용법은 [USER_MANUAL.md](USER_MANUAL.md), 변경 이력은 [CHANGELOG.md](CHANGELOG.md).
 
@@ -81,9 +81,31 @@ pythonization/                      (저장소 루트)
 |---|---|
 | `profiles/registry.py` | 명명된 프로파일 관리 |
 | `analysis/mfli_merge.py` | LabOne CSV + MFLI `.dat` sweep별 병합. **Qt·numpy 비의존 → CLI 겸용** |
-| `notify/alarm_manager.py` | 사운드·이메일·텔레그램 알람 (데몬 오프로드) |
+| `notify/alarm_manager.py` | 사운드·이메일·텔레그램·ntfy 알람 (데몬 오프로드) + AI 보고 `send_message` |
+| `notify/ntfy.py` | ntfy 발행(JSON)·구독(스트림, 끊기면 마지막 id 부터 재접속). **Qt 비의존** |
 | `util/network.py` | LAN·MAC 유틸. **MAC 이 IP 보다 우선**하므로 MAC 을 잘못 적으면 조용히 다른 기기에 붙는다 |
 | `util/net_ssl.py` | 알람(SMTP·Telegram) TLS 컨텍스트. 검증 주체를 OS 저장소/공인 번들로 옮겨 Windows 인증서 스냅샷 문제를 피한다 |
+
+### `pythonization/automation/` — AI 자동 측정 (Qt 위젯 비의존)
+
+LLM 이 메인 창 sweep 등 내장 측정 기능을 도구로 조작한다. 앱 내장 실행(Claude API)과
+Claude Code(MCP) 가 같은 실행기·안전 검사를 쓴다.
+
+| 파일 | 역할 |
+|---|---|
+| `settings.py` | `LlmSettings`(llm.yaml) / `AutomationSettings`(profiles/automation/{name}.yaml) — 채널 정책은 (alias, description) 으로 찾는다 |
+| `safety.py` | **코드가 강제하는 안전 검사** — 허용·범위·속도·점 수·현재값·경로 탈출 |
+| `lab_context.py` | LLM 에게 보여 줄 채널 목록 (인덱스·역할 메모·허용 범위) — 하네스 |
+| `summarize.py` | `.dat`·시계열 요약 (통계·극값·가장 가파른 변화·축약 곡선) |
+| `tools.py` | 도구 정의. `ACTUATING_TOOLS`·`APPROVAL_TOOLS` |
+| `prompts.py` | 앱 내장 시스템 프롬프트 + Claude Code 용 서버 안내문(4,096자 제한) |
+| `llm.py` | anthropic SDK (선택 의존성, 지역 import) — 요청 형태·오류 분류 |
+| `agent.py` | Messages API 수동 루프 — 승인·중지·예산·추가 지시·기록. 대화는 덧붙이기만 |
+| `executor.py` | 도구 실행. 측정은 `LabBackend.run_main_sweep`(메인 창), 이동은 SweepWorker, second 는 SecondChannelWorker 를 호출 스레드에서 동기로 |
+| `knowledge.py` | 실험 지식(규칙·관찰). 해석 규칙은 미리 주지 않고 조회만 (편향 방지) |
+| `mcp_server.py` | Claude Code 용 MCP 서버 (stdlib HTTP, 127.0.0.1, Bearer 토큰, 긴 작업은 job_id) |
+| `mcp_auth.py` | `.mcp.json` 의 headersHelper — 토큰 파일을 읽어 헤더 JSON 출력 |
+| `remote.py` | 휴대폰(ntfy) 글 → 상태·중지·승인·거부·지시 |
 
 ### `pythonization/ui/` — GUI
 
@@ -104,7 +126,8 @@ pythonization/                      (저장소 루트)
 | `visa_library.py` | VISA 명령어 라이브러리 편집 |
 | `parameter_manager.py` | 측정 항목 구성 (`{p}` 채우기) |
 | `app_config.py` | 앱 설정 |
-| `alarm_config.py` | 알람 설정 |
+| `alarm_config.py` | 알람 설정 (전역 전송 설정은 이 창이 다루는 필드만 갱신) |
+| `ntfy_settings.py` | 알림 (ntfy) — 서버·휴대폰 접속 주소·주제·토큰·지시 수신 |
 | `meta_data.py` | 측정 전 메타 기록 |
 | `resume.py` | 재개 지점 선택 |
 
@@ -132,6 +155,8 @@ pythonization/                      (저장소 루트)
 | `double_sweep/window.py` | 레거시 이중 sweep + 알람 |
 | `cycle_sweep/window.py` | 다구간 CYCLE sweep 반복 (Keithley 2636A 전용) |
 | `cycle_double_sweep/window.py` | Double Sweep+ — second 축(ITC/IPS) 한 점마다 cycle 한 세트 |
+| `auto_measure/window.py` | AI 자동 측정 — 안전 한계 표·실험 지식·승인 카드·연결 서버·ntfy 지시 |
+| `auto_measure/bridge.py` | 에이전트 스레드 ↔ 메인 창. 메인 창을 설정·시작하고 매 행으로 즉시 중단·안정화 판정 |
 
 ### 런타임 파일 (저장소 밖)
 
@@ -146,7 +171,11 @@ settings/
 ├── visa_libraries.yaml     VISA 명령어 라이브러리
 ├── active_profile.txt      현재 활성 프로파일 이름
 ├── resume_points.json      중단 지점
-└── profiles/{name}.yaml    명명된 사용자 프로파일
+├── profiles/{name}.yaml    명명된 사용자 프로파일
+├── profiles/automation/    AI 자동 측정 설정 (프로파일별)
+├── llm.yaml                AI 앱 내장 실행 API 키·모델
+├── mcp_token.txt           Claude Code 연결 토큰
+└── knowledge/              실험 지식 (knowledge.json, observations.jsonl)
 ```
 
 ---
@@ -347,6 +376,13 @@ Worker Thread: SweepWorker (메인 sweep / double sweep / cycle sweep /
 
 Worker Thread: SecondChannelWorker  [double sweep / double sweep+ advance 시 활성]
  └─ second channel 이동 / feedback·threshold 폴링
+
+Python 데몬 스레드: AI 자동 측정  (QThread 가 아니다 — HTTP 대기 중 앱 종료를 막지 않게)
+ ├─ 앱 내장 에이전트 루프 / MCP job 실행: LabExecutor 가 SweepWorker·SecondChannelWorker 를
+ │   그 스레드에서 동기로 부른다 (신호는 DirectConnection 으로 같은 스레드의 변수에 담을 뿐)
+ ├─ 메인 창 조작은 MainWindowBridge.call → 큐잉 신호 → GUI 스레드 bound @Slot → Future
+ ├─ MCP HTTP 서버 (ThreadingHTTPServer, 127.0.0.1) / ntfy 구독 스트림
+ └─ 창 갱신은 _AgentSignals 의 신호 → bound @Slot (워커가 위젯을 직접 만지지 않는다)
 ```
 
 ### 안전 불변식 (Threading / VISA) — 위반 시 네이티브 크래시
