@@ -280,6 +280,9 @@ class AlarmDeliveryConfig(BaseModel):
     ntfy_command_topic: str = ""     # AI 에게 지시를 보내는 주제
     ntfy_token: str = ""             # 접근 토큰 (tk_...) — 저장소에 올리지 말 것
     ntfy_commands_enabled: bool = False
+    # 측정 리포트 — 갱신마다 그래프·장비값·조건을 담은 문서를 보낸다 (notify/report.py)
+    ntfy_report_enabled: bool = False
+    ntfy_report_every_n: int = 1     # 갱신 N 번마다 1회 (1=매번). 완료 시엔 항상 보낸다
 
     def is_configured(self) -> bool:
         """전역 전송설정이 실제로 채워져 있는지(최초 시드 판단용)."""
@@ -293,6 +296,10 @@ class AlarmDeliveryConfig(BaseModel):
     def ntfy_commands_ready(self) -> bool:
         return bool(self.ntfy_commands_enabled and self.ntfy_server.strip()
                     and self.ntfy_command_topic.strip())
+
+    def report_ready(self) -> bool:
+        """측정 리포트를 보낼 수 있는 상태인가 (그래프 첨부는 ntfy 로만 간다)."""
+        return bool(self.ntfy_report_enabled and self.ntfy_ready())
 
 
 class AlarmConfig(BaseModel):

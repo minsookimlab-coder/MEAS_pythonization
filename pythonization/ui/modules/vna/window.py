@@ -72,6 +72,7 @@ from pythonization.ui.modules.vna.config_window import (
     VnaConfigWindow,
     _PreAdvanceCmdDialog,
 )
+from pythonization.notify.report_sender import ReportSender
 from pythonization.ui.widgets.help_button import make_help_button
 
 if TYPE_CHECKING:
@@ -1337,6 +1338,12 @@ class VnaWindow(QDialog):
         self._linspace_data: Optional[Tuple[str, str, np.ndarray]] = None
         # 알람 (VNA sweep 전용 — 텔레그램)
         self._alarm_manager = AlarmManager()
+        #: 마지막으로 저장한 .dat — 휴대폰 리포트가 이 파일로 그래프를 그린다
+        self._last_saved_path = None
+        #: 측정 갱신마다 리포트를 보낼지 판단·전송 (설정이 꺼져 있으면 아무 일도 안 한다)
+        self._report_sender = ReportSender(
+            self._alarm_manager,
+            on_error=lambda m: get_logger().warning("리포트 전송: %s", m))
         self._time_mode_running: bool = False
         # Sweep 콤보에 '⏱ Time' 항목을 두고, 저장된 time_mode면 최초 1회 그 항목을 선택
         self._pending_time_select: bool = bool(self._cfg.acquire.time_mode)
@@ -3459,6 +3466,7 @@ class VnaWindow(QDialog):
             return
         if not self._check_param_problems():
             return
+        self._report_sender.reset()      # 새 측정 → 리포트 주기 카운터 초기화
 
         is_sweep = sweep_values is not None or ds_plan is not None
         if ds_plan is not None:
@@ -3692,6 +3700,56 @@ class VnaWindow(QDialog):
                 pass
             self._save_resume()
             get_logger().info("second %d done (resume saved)", global_si)
+        # 휴대폰 리포트: second 한 점이 끝날 때마다가 '갱신' 단위다
+        total = len(getattr(st, "second_values", []) or []) if st is not None else 0
+        self._send_report(progress=(f"second {global_si + 1}/{total} 완료"
+                                    if total else f"second {global_si + 1} 완료"))
+
+    # ------------------------------------------------------------------
+    # 휴대폰 리포트 (notify/report_sender.py)
+    # ------------------------------------------------------------------
+    def _report_conditions(self) -> dict:
+        """리포트에 적을 '측정 조건' — 설정 창을 못 보는 휴대폰에서 이것만 봐도
+        어떤 측정인지 알 수 있어야 한다. 값이 없으면 그 항목은 빼고 넘어간다."""
+        ds = self._cfg.ds_control
+        cond = {}
+        try:
+            if ds.power.enabled:
+                cond["모드"] = "Power sweep"
+                cond["Power"] = f"{ds.power.start:g} ~ {ds.power.stop:g} dBm, {ds.power.n}점"
+            elif ds.field_time.enabled:
+                cond["모드"] = "Double sweep with Time (시간 기반)"
+                cond["측정 간격"] = f"{ds.field_time.interval:g} s"
+            else:
+                cond["모드"] = "Double sweep"
+            first = self._cfg.acquire.sweep_cmds[ds.first_idx]                 if 0 <= ds.first_idx < len(self._cfg.acquire.sweep_cmds) else None
+            if first is not None:
+                cond["First 축"] = f"[{first.alias}] {first.description}"
+                cond["First 범위"] = f"{ds.first_start:g} ~ {ds.first_stop:g}"
+            if ds.second_enabled:
+                sec = self._cfg.acquire.sweep_cmds[ds.second_idx]                     if 0 <= ds.second_idx < len(self._cfg.acquire.sweep_cmds) else None
+                if sec is not None:
+                    cond["Second 축"] = f"[{sec.alias}] {sec.description}"
+                cond["Second 범위"] = f"{ds.second_start:g} ~ {ds.second_stop:g} ({ds.second_n}점)"
+            cond["저장 폴더"] = str(self._get_save_dir())
+        except Exception:
+            pass                                  # 조건 수집 실패가 알림을 막지 않는다
+        return cond
+
+    def _send_report(self, *, progress: str = "", note: str = "",
+                     force: bool = False, urgent: bool = False) -> None:
+        """측정 갱신·완료 시 휴대폰으로 리포트. 설정이 꺼져 있으면 즉시 돌아온다.
+
+        GUI 스레드에서 불러도 된다 — 조립·전송은 ReportSender 가 워커로 넘긴다.
+        """
+        try:
+            self._report_sender.on_update(
+                title=f"VNA {self._le_filename.text().strip() or 'measurement'}",
+                conditions=self._report_conditions(),
+                data_file=getattr(self, "_last_saved_path", None),
+                progress=progress, note=note, force=force, urgent=urgent)
+        except Exception as e:                    # noqa: BLE001
+            get_logger().warning("리포트 호출 실패: %s", e)
 
     def _on_resume_clicked(self):
         st = load_resume_state(self._resume_path())
@@ -3830,6 +3888,11 @@ class VnaWindow(QDialog):
         # 알람: 정상 완료(오류·중단 아님)에만 완료 트리거
         if not self._acq_errored and not self._acq_stopped:
             self._fire_alarm_complete(n)
+            self._send_report(progress=f"측정 완료 — {n} step", force=True)
+        else:
+            self._send_report(
+                progress=f"{'오류로 중단' if self._acq_errored else '사용자 중지'} — {n} step",
+                force=True, urgent=self._acq_errored)
 
     def _build_stop_cmd_tuples(self) -> List[Tuple[str, str, bool]]:
         """등록된 stop_cmds → _VnaWorker용 (alias, cmd, is_query=False) 목록.
@@ -4063,12 +4126,14 @@ class VnaWindow(QDialog):
                 fname = f"{safe_fa}_{sv_str}.dat"
                 path  = folder / fname
                 self._write_dat(path, arrays)
+                self._last_saved_path = path
             else:
                 # Single acquire: filename_x001.dat 넘버링
                 filename = self._le_filename.text().strip() or "vna_data"
                 base_dir = self._get_save_dir()
                 path = next_dat_path(base_dir, filename)
                 self._write_dat(path, arrays)
+                self._last_saved_path = path
         except Exception as e:
             self._set_status(f"Save error: {e}", color="#f78166")
 

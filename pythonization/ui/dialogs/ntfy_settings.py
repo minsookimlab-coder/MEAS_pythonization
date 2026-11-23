@@ -13,6 +13,7 @@ import threading
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
+    QSpinBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -98,6 +99,17 @@ class NtfySettingsDialog(QDialog):
         self._le_token.setPlaceholderText("tk_... (서버가 deny-all 이면 필수)")
         form.addRow("접근 토큰:", self._le_token)
 
+        self._cb_report = QCheckBox("측정 리포트 보내기 (그래프·장비 상태·측정 조건)")
+        self._cb_report.setToolTip(
+            "측정이 갱신될 때마다 마지막 그래프 이미지와 장비 값·측정 조건을 묶어 보고 주제로 보냅니다. 측정이 끝나거나 중단되면 주기와 무관하게 한 번 보냅니다.")
+        self._cb_report.setChecked(d.ntfy_report_enabled)
+        form.addRow(self._cb_report)
+        self._sb_report_n = QSpinBox()
+        self._sb_report_n.setRange(1, 100)
+        self._sb_report_n.setValue(max(1, int(d.ntfy_report_every_n or 1)))
+        self._sb_report_n.setToolTip("1 이면 갱신마다. 긴 측정은 값을 올려 알림을 줄입니다.")
+        form.addRow("리포트 주기 (갱신 N 회마다):", self._sb_report_n)
+
         self._cb_cmd = QCheckBox("지시용 주제의 글을 AI 에게 지시로 전달 (승인 버튼 포함)")
         self._cb_cmd.setChecked(d.ntfy_commands_enabled)
         form.addRow(self._cb_cmd)
@@ -147,6 +159,8 @@ class NtfySettingsDialog(QDialog):
             "ntfy_public_url": self._le_public.text().strip().rstrip("/"),
             "ntfy_topic": self._le_topic.text().strip(),
             "ntfy_token": self._le_token.text().strip(),
+            "ntfy_report_enabled": self._cb_report.isChecked(),
+            "ntfy_report_every_n": int(self._sb_report_n.value()),
             "ntfy_commands_enabled": self._cb_cmd.isChecked(),
             "ntfy_command_topic": self._le_cmd.text().strip(),
         }

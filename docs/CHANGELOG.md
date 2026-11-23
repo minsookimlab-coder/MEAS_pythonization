@@ -4,6 +4,39 @@
 
 ---
 
+## v1.12.2 — 2026-11-23 (기능 추가)
+
+### 측정 갱신마다 리포트를 자동으로 — 설정·주기·전송 연결
+
+v1.12.1 의 리포트 조립을 실제 측정에 물렸다. VNA 측정이 **second 한 점을 끝낼
+때마다** 갱신으로 보고, 측정이 **끝나거나 중단되면** 주기와 무관하게 한 번 더 보낸다.
+
+- `pythonization/notify/report_sender.py` (신설) — '언제 보낼지' 를 판단하고 보낸다.
+  측정 코드는 `on_update()` 만 부르면 된다.
+  - **조립까지 통째로 워커 스레드에서** 한다. 갱신 신호는 GUI 스레드에서 오는데,
+    파일 읽기 + 그래프 그리기 + 네트워크를 거기서 하면 창이 멈춘다.
+  - 보내는 중에 갱신이 또 오면 **건너뛴다**. 느린 서버 하나로 스레드가 쌓이면
+    메모리와 소켓이 늘어난다.
+  - 설정 읽기 실패·조립 실패·전송 실패 어느 것도 예외로 새지 않는다 —
+    알림이 측정을 멈추면 안 된다. 사유는 `last_error` 와 로그에 남는다.
+- `pythonization/config/models.py` — `ntfy_report_enabled`,
+  `ntfy_report_every_n`(갱신 N 회마다 1 회), `report_ready()` 추가.
+- `pythonization/ui/dialogs/ntfy_settings.py` — 체크박스와 주기 입력 추가.
+- `pythonization/ui/modules/vna/window.py`
+  - `_save_step()` 이 마지막 저장 경로(`_last_saved_path`)를 기억한다 —
+    리포트가 그 파일로 그래프를 그린다.
+  - `_report_conditions()` — 모드(Power / Double sweep with Time / Double sweep),
+    First·Second 축과 범위, 저장 폴더. 설정 창을 못 보는 휴대폰에서 이것만 봐도
+    어떤 측정인지 알 수 있어야 한다. 수집이 실패해도 알림은 나간다.
+  - `_finish_second()` → 갱신 리포트, `_on_acq_finished()` → 완료·중단 리포트
+    (오류면 urgent). 측정 시작 시 주기 카운터를 `reset()` 한다.
+
+검증: `tests/test_notify_report_sender.py` 13개 — 주기(매번/N회/force), 호출이
+0.5초 안에 돌아오는지(GUI 블로킹 금지), 겹친 갱신 건너뛰기, 워커 예외·설정 오류가
+새지 않는지, VNA 창의 훅 연결. 전체 494개 통과.
+
+---
+
 ## v1.12.1 — 2026-11-23 (기능 추가)
 
 ### 측정 리포트 — 그래프·장비 상태·측정 조건을 휴대폰으로
