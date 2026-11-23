@@ -223,3 +223,27 @@ class SendReportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TokenSanitizeTest(unittest.TestCase):
+    """토큰에 섞인 보이지 않는 문자 — 파일에서 복사하면 BOM 이 딸려온다."""
+
+    def test_bom_is_stripped(self):
+        from pythonization.notify.ntfy import _clean_token, _headers
+        self.assertEqual(_clean_token("\ufeff tk_abc "), "tk_abc")
+        h = _headers("\ufeff tk_abc ")
+        self.assertEqual(h["Authorization"], "Bearer tk_abc")
+        h["Authorization"].encode("latin-1")      # 헤더 인코딩에서 터지지 않는다
+
+    def test_zero_width_is_stripped(self):
+        from pythonization.notify.ntfy import _clean_token
+        self.assertEqual(_clean_token("tk_x\u200b"), "tk_x")
+
+    def test_empty_token_means_no_header(self):
+        from pythonization.notify.ntfy import _headers
+        self.assertNotIn("Authorization", _headers("\ufeff  "))
+
+    def test_http_action_uses_clean_token(self):
+        from pythonization.notify.ntfy import http_action
+        a = http_action("승인", "http://h:1", "t", "/approve 1", token="\ufefftk_z")
+        self.assertEqual(a["headers"]["Authorization"], "Bearer tk_z")

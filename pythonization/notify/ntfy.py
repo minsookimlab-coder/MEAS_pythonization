@@ -51,10 +51,21 @@ def _context(url: str):
     return make_ssl_context() if url.lower().startswith("https") else None
 
 
+#: 토큰 문자열에 섞여 들어오는 보이지 않는 문자 (BOM·zero-width).
+#: 파일에서 복사해 붙이면 BOM 이 딸려오는데, str.strip() 은 이것을 지우지 않는다.
+#: 그대로 두면 HTTP 헤더가 latin-1 인코딩에서 터지고 "전송 실패" 만 보인다.
+_INVISIBLE = "﻿​‌‍⁠"
+
+
+def _clean_token(token: str) -> str:
+    return (token or "").strip().strip(_INVISIBLE).strip()
+
+
 def _headers(token: str) -> dict:
     headers = {"User-Agent": "pythonization-ntfy/1.0"}
-    if token.strip():
-        headers["Authorization"] = f"Bearer {token.strip()}"
+    tok = _clean_token(token)
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
     return headers
 
 
@@ -63,8 +74,9 @@ def http_action(label: str, server: str, topic: str, body: str, token: str = "")
     action = {"action": "http", "label": label,
               "url": f"{server.rstrip('/')}/{topic}", "method": "POST",
               "body": body, "clear": True}
-    if token.strip():
-        action["headers"] = {"Authorization": f"Bearer {token.strip()}"}
+    tok = _clean_token(token)
+    if tok:
+        action["headers"] = {"Authorization": f"Bearer {tok}"}
     return action
 
 
