@@ -14,6 +14,22 @@
   관리하는 전송 수단(이번의 ntfy)을 더하면 바로 지워진다. 기존 값을 읽어 이 창이 다루는
   필드만 바꾸도록 고쳤다.
 
+### ntfy 연동 — 알람을 휴대폰으로 (실험실 PC 의 ntfy 서버)
+
+- `pythonization/notify/ntfy.py` — JSON 발행(제목·우선순위·태그·버튼), 구독 스트림
+  (처음에는 '지금 이후'만, 끊기면 마지막 메시지 id 부터 재접속), 무작위 주제 이름.
+  표준 라이브러리만 쓴다.
+- `notify/alarm_manager.py` — 기존 알람(Double Sweep·VNA)이 ntfy 로도 나간다 (우선순위 5).
+  텔레그램·SMTP 전송을 실패 사유를 돌려주는 함수로 나누고(`_telegram_post`·`_smtp_send`),
+  사람이 쓴 보고를 보내는 `send_message()`·`send_ntfy()` 를 더했다.
+- `config/models.py` — `AlarmDeliveryConfig` 에 ntfy 항목 (서버 주소, 휴대폰 접속 주소,
+  보고·지시 주제, 토큰). 앱은 같은 PC 의 127.0.0.1 로 붙지만 휴대폰은 랩 네트워크 주소로
+  붙으므로, 알림 버튼용 주소를 따로 둔다.
+- `ui/dialogs/ntfy_settings.py` — 알림 (ntfy) 설정 창 (다른 전송 설정은 건드리지 않음).
+- `automation/remote.py` — 지시 주제의 글을 상태·중지·승인·거부·지시로 해석.
+- 검증: `test_automation_ntfy` 13개 (127.0.0.1 가짜 ntfy 서버 — 발행 형식, 토큰 거부,
+  재접속 since, 알람·보고 발행, 두 설정 창이 서로의 값을 지우지 않음).
+
 ---
 
 ## v1.11.3 — 2026-10-24 (버그픽스)

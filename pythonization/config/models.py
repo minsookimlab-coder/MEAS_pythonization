@@ -272,11 +272,27 @@ class AlarmDeliveryConfig(BaseModel):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_contacts: List[TelegramContact] = Field(default_factory=list)
+    # ntfy (실험실 PC 에 구축한 ntfy 서버 등) — 알람·AI 보고 발행 + AI 지시 수신
+    use_ntfy: bool = False
+    ntfy_server: str = ""            # 이 프로그램이 붙는 주소 (예: http://127.0.0.1:2586)
+    ntfy_public_url: str = ""        # 휴대폰이 붙는 주소 — 알림 버튼용. 비우면 ntfy_server
+    ntfy_topic: str = ""             # 알람·보고를 받는 주제
+    ntfy_command_topic: str = ""     # AI 에게 지시를 보내는 주제
+    ntfy_token: str = ""             # 접근 토큰 (tk_...) — 저장소에 올리지 말 것
+    ntfy_commands_enabled: bool = False
 
     def is_configured(self) -> bool:
         """전역 전송설정이 실제로 채워져 있는지(최초 시드 판단용)."""
         return bool(self.telegram_bot_token.strip() or self.email_to.strip()
-                    or self.smtp_user.strip() or self.telegram_contacts)
+                    or self.smtp_user.strip() or self.telegram_contacts
+                    or self.ntfy_topic.strip())
+
+    def ntfy_ready(self) -> bool:
+        return bool(self.use_ntfy and self.ntfy_server.strip() and self.ntfy_topic.strip())
+
+    def ntfy_commands_ready(self) -> bool:
+        return bool(self.ntfy_commands_enabled and self.ntfy_server.strip()
+                    and self.ntfy_command_topic.strip())
 
 
 class AlarmConfig(BaseModel):

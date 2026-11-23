@@ -104,6 +104,40 @@ class AlarmManager:
             self._send_email(d, reason)
         if d.use_telegram and d.telegram_bot_token.strip() and d.telegram_chat_id.strip():
             self._send_telegram(d.telegram_bot_token, d.telegram_chat_id, reason)
+        # ntfy — 전역 전송설정에만 있다 (컨텍스트 AlarmConfig 폴백에는 없는 필드)
+        if getattr(d, "ntfy_ready", lambda: False)():
+            err = self._ntfy_publish(d, reason, title="Pythonization Alarm", priority=5,
+                                     tags=["rotating_light"])
+            if err:
+                self._log_send_fail(f"ntfy failed: {err}")
+
+    # ------------------------------------------------------------------
+    # ntfy
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ntfy_publish(d, text: str, title: str, priority: int = 3,
+                      tags: Optional[List[str]] = None,
+                      actions: Optional[List[dict]] = None) -> Optional[str]:
+        from pythonization.notify.ntfy import publish
+        return publish(d.ntfy_server, d.ntfy_topic, text, title=title, priority=priority,
+                       tags=tags, actions=actions, token=d.ntfy_token)
+
+    def send_ntfy(self, text: str, title: str = "Pythonization AI", priority: int = 3,
+                  tags: Optional[List[str]] = None,
+                  actions: Optional[List[dict]] = None) -> Optional[str]:
+        """ntfy 로만 보낸다 (승인 버튼이 달린 알림 등). 동기 — GUI 스레드에서 부르지 말 것.
+
+        반환: 실패 사유 (None = 성공). ntfy 가 설정돼 있지 않으면 그 사유.
+        """
+        try:
+            from pythonization.config.app_config import load_alarm_delivery
+            d = load_alarm_delivery()
+        except Exception as e:
+            return f"알람 전송 설정을 읽지 못했습니다: {e}"
+        if not d.ntfy_ready():
+            return "ntfy 가 설정되지 않았습니다."
+        return self._ntfy_publish(d, text, title, priority, tags, actions)
 
     # ------------------------------------------------------------------
     # Sound
@@ -134,18 +168,75 @@ class AlarmManager:
         return make_ssl_context()
 
     def _send_telegram(self, token: str, chat_id: str, reason: str) -> None:
+        err = self._telegram_post(token, chat_id, f"[Pythonization Alarm]\n{reason}")
+        if err:
+            self._log_send_fail(f"Telegram failed: {err}")
+
+    def _telegram_post(self, token: str, chat_id: str, text: str) -> Optional[str]:
+        """Telegram sendMessage 1회. 성공 시 None, 실패 시 사유 문자열."""
         try:
             import urllib.request, urllib.parse, json as _json
-            text = f"[Pythonization Alarm]\n{reason}"
             payload = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
             url = f"https://api.telegram.org/bot{token}/sendMessage"
             req = urllib.request.Request(url, data=payload, method="POST")
             with urllib.request.urlopen(req, timeout=10, context=self._tg_ssl_ctx()) as resp:
                 result = _json.loads(resp.read())
                 if not result.get("ok"):
-                    self._log_send_fail(f"Telegram error: {result}")
+                    return f"Telegram error: {result}"
+            return None
         except Exception as e:
-            self._log_send_fail(f"Telegram failed: {e}")
+            return explain_ssl_error(e) or str(e)
+
+    # Telegram 메시지 길이 상한은 4096자 — 여유를 두고 나눈다
+    _TELEGRAM_CHUNK = 3800
+
+    def send_message(self, text: str, urgent: bool = False,
+                     title: str = "Pythonization AI") -> List[str]:
+        """사람에게 보내는 보고 — 알람 트리거와 무관하게 전역 전송 설정으로 보낸다.
+
+        AI 자동 측정이 직접 쓴 문장을 그대로 텔레그램·이메일로 전달한다. 호출한
+        스레드에서 동기로 보낸다 (GUI 스레드에서 부르지 말 것). 소리는 urgent 일 때만.
+        반환: 실패 사유 목록 (빈 목록 = 모두 성공, 설정된 수단이 없으면 그 사유 하나).
+        """
+        try:
+            from pythonization.config.app_config import load_alarm_delivery
+            d = load_alarm_delivery()
+        except Exception as e:
+            return [f"알람 전송 설정을 읽지 못했습니다: {e}"]
+        errors: List[str] = []
+        sent_any = False
+        if urgent and d.use_sound:
+            self._play_sound()
+        if d.use_telegram and d.telegram_bot_token.strip() and d.telegram_chat_id.strip():
+            body = f"[{title}]\n{text}"
+            for i in range(0, len(body), self._TELEGRAM_CHUNK):
+                err = self._telegram_post(d.telegram_bot_token, d.telegram_chat_id,
+                                          body[i:i + self._TELEGRAM_CHUNK])
+                if err:
+                    errors.append(f"Telegram: {err}")
+                    self._log_send_fail(f"Telegram failed: {err}")
+                    break
+            else:
+                sent_any = True
+        if d.use_email and d.email_to.strip():
+            first_line = text.strip().splitlines()[0] if text.strip() else ""
+            err = self._smtp_send(d, f"[{title}] {first_line[:80]}", text)
+            if err:
+                errors.append(f"Email: {err}")
+            else:
+                sent_any = True
+        if d.ntfy_ready():
+            err = self._ntfy_publish(d, text, title, priority=5 if urgent else 3,
+                                     tags=["warning"] if urgent else ["memo"])
+            if err:
+                errors.append(f"ntfy: {err}")
+                self._log_send_fail(f"ntfy failed: {err}")
+            else:
+                sent_any = True
+        if not sent_any and not errors:
+            errors.append("ntfy·텔레그램·이메일 전송 수단이 설정되지 않았습니다 "
+                          "(Settings → 알림 (ntfy) 에서 설정).")
+        return errors
 
     @staticmethod
     def _log_send_fail(msg: str) -> None:
@@ -173,17 +264,25 @@ class AlarmManager:
             return explain_ssl_error(e) or str(e)
 
     def _send_email(self, cfg: "AlarmConfig", reason: str) -> None:
+        body = (
+            f"Pythonization — Alarm Triggered\n\n"
+            f"Trigger: {reason}\n\n"
+            f"This is an automated notification from Pythonization."
+        )
+        err = self._smtp_send(cfg, f"[Pythonization Alarm] {reason[:80]}", body)
+        if err:
+            # 이메일 실패는 조용히 기록 (UI 스레드 아님)
+            print(f"[AlarmManager] Email failed: {err}")
+
+    @staticmethod
+    def _smtp_send(cfg, subject: str, body: str) -> Optional[str]:
+        """SMTP 로 한 통 보낸다. 성공 시 None, 실패 시 사유 문자열."""
         try:
             import smtplib
             from email.mime.text import MIMEText
 
-            body = (
-                f"Pythonization — Alarm Triggered\n\n"
-                f"Trigger: {reason}\n\n"
-                f"This is an automated notification from Pythonization."
-            )
             msg = MIMEText(body, "plain", "utf-8")
-            msg["Subject"] = f"[Pythonization Alarm] {reason[:80]}"
+            msg["Subject"] = subject
             msg["From"]    = cfg.smtp_user or cfg.email_to
             msg["To"]      = cfg.email_to
 
@@ -194,6 +293,6 @@ class AlarmManager:
                 if cfg.smtp_user and cfg.smtp_password:
                     s.login(cfg.smtp_user, cfg.smtp_password)
                 s.send_message(msg)
+            return None
         except Exception as e:
-            # 이메일 실패는 조용히 기록 (UI 스레드 아님)
-            print(f"[AlarmManager] Email failed: {e}")
+            return explain_ssl_error(e) or str(e)

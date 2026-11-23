@@ -32,3 +32,12 @@ alarm_delivery:
   telegram_bot_token: '' # ← 봇 토큰. 저장소에 커밋하지 말 것.
   telegram_chat_id: ''
   telegram_contacts: []
+
+  # ntfy — 실험실 PC 의 ntfy 서버 (Settings → 알림 (ntfy) 에서 설정)
+  use_ntfy: false
+  ntfy_server: ''           # 이 프로그램이 붙는 주소, 예: http://127.0.0.1:2586
+  ntfy_public_url: ''       # 휴대폰이 붙는 주소 (알림 버튼용), 비우면 ntfy_server
+  ntfy_topic: ''            # 알람·AI 보고 주제
+  ntfy_command_topic: ''    # 휴대폰 → AI 지시 주제 (보고 주제와 다르게)
+  ntfy_token: ''            # ← 접근 토큰 tk_... 저장소에 커밋하지 말 것.
+  ntfy_commands_enabled: false
