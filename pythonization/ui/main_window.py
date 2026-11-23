@@ -1094,6 +1094,9 @@ class MainWindow(QMainWindow):
             self._vna_window = VnaWindow(
                 self._session, self._visa_lib_registry,
                 param_manager_reg=self._param_manager_reg, parent=None)
+            # 다른 측정·AI 가 장비를 쓰는 동안 사람이 Acquire 를 누르지 못하게 한다
+            self._vna_window._busy_guard = self.measurement_busy_reason
+            self._vna_window._automation_guard = self._automation_busy
         self._vna_window.show()
         self._vna_window.raise_()
 

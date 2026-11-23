@@ -3043,10 +3043,63 @@ class VnaWindow(QDialog):
             "지우고 다시 등록하면 해결됩니다.")
         return False
 
+    # ------------------------------------------------------------------
+    # 다른 측정·AI 와의 충돌 방지
+    # ------------------------------------------------------------------
+    #: 메인 창이 붙여 주는 가드 (standalone 으로 띄우면 None → 가드 없음)
+    _busy_guard = None          # () -> str   다른 측정이 돌고 있으면 그 이름
+    _automation_guard = None    # () -> bool  AI 자동 측정이 실행 중인가
+
+    def _refuse_if_busy(self) -> bool:
+        """사람이 누른 Acquire 를 막아야 하면 True (상태줄에 사유를 적는다).
+
+        같은 장비를 두 측정이 동시에 잡으면 둘 다 망가진다. 메인 창 Start 에는
+        이 가드가 있었는데 VNA 에는 없어서, AI 가 측정하는 동안 사람이 눌러도
+        그대로 시작됐다. AI 는 start_acquire_unattended 로 들어오므로 여기 걸리지 않는다.
+        """
+        guard = type(self)._automation_guard if self._automation_guard is None \
+            else self._automation_guard
+        try:
+            if guard is not None and guard():
+                self._set_status(
+                    "AI 자동 측정이 실행 중입니다 — 끝나거나 중지한 뒤에 하세요.",
+                    color="#f78166")
+                return True
+        except Exception:
+            pass
+        try:
+            busy = self._busy_guard() if self._busy_guard is not None else ""
+        except Exception:
+            busy = ""
+        if busy and busy != "VNA":
+            self._set_status(f"'{busy}' 측정이 실행 중입니다 — 끝난 뒤에 하세요.",
+                             color="#f78166")
+            return True
+        return False
+
+    def start_acquire_unattended(self, mode: str = "single") -> None:
+        """사람 가드를 건너뛰는 진입점 (AI 자동 측정 전용).
+
+        AI 가 돌리는 동안 _automation_guard 는 당연히 True 라, 사람 경로의 가드를
+        그대로 쓰면 AI 가 자기 자신을 막는다. 메인 창의 start_sweep_unattended 와
+        같은 이유로 따로 둔다.
+        """
+        if mode == "sweep":
+            self._on_sweep_acquire(_unattended=True)
+        else:
+            self._start_acquire(sweep_values=None)
+
     def _on_single_acquire(self):
+        if self._refuse_if_busy():
+            return
         self._start_acquire(sweep_values=None)
 
-    def _on_sweep_acquire(self):
+    def _on_sweep_acquire(self, _unattended: bool = False):
+        if not _unattended and self._refuse_if_busy():
+            return
+        return self._on_sweep_acquire_inner()
+
+    def _on_sweep_acquire_inner(self):
         if self._is_time_sweep_selected():
             self._on_time_sweep()
             return

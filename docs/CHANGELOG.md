@@ -4,6 +4,41 @@
 
 ---
 
+## v1.12.4 — 2026-11-23 (버그픽스)
+
+### AI 측정 중 사람이 VNA Acquire 를 눌러도 막히지 않던 문제
+
+메인 창 Start 에는 `_automation_busy()` 가드가 있어 AI 가 측정하는 동안 사람이
+누를 수 없다. **VNA Control 에는 그 가드가 없었다** — AI 가 메인 sweep 을 돌리는
+중에 사람이 VNA Single/Sweep Acquire 를 누르면 그대로 시작됐고, 두 측정이 같은
+장비를 동시에 잡는다. AI 가 VNA 도 조작하게 되면서(v1.12.3) 더 쉽게 마주친다.
+
+- `pythonization/ui/modules/vna/window.py` — `_refuse_if_busy()` 를 **사람이 누르는
+  경로**(`_on_single_acquire` / `_on_sweep_acquire`)에만 넣었다. 가드가 터져도
+  사람 조작을 막지 않고, 메인 창 없이 띄운 VNA 창(가드 없음)도 그대로 동작한다.
+  `busy` 가 `"VNA"` 면 자기 자신이므로 충돌로 보지 않는다(창 안에서 따로 막는다).
+- `start_acquire_unattended(mode)` 신설 — AI 전용 진입점. AI 가 돌리는 동안
+  `_automation_guard` 는 당연히 True 라, 사람 경로 가드를 그대로 쓰면 **AI 가
+  자기 자신을 막는다.** 메인 창의 `start_sweep_unattended` 와 같은 이유다.
+- `pythonization/ui/main_window.py` — VNA 창을 만들 때 가드를 붙인다.
+- `pythonization/ui/modules/auto_measure/bridge.py` — AI 는 전용 진입점을 쓴다.
+
+### 중지·오류로 끝난 VNA 측정을 '성공' 으로 돌려주던 문제
+
+`vna_acquire` 가 기다리던 측정이 **사람의 중지**나 **오류**로 끝났는데도 도구 결과가
+성공이었다. 모델이 부분 데이터를 완성된 것으로 읽고 다음 단계로 넘어간다.
+
+- `pythonization/automation/executor.py` — `stopped` / `errored` 면 `is_error` 로
+  돌려주고 "데이터가 불완전합니다" 를 함께 적는다.
+
+검증: `tests/test_automation_intervention.py` 17개 — 오류(중지·오류·정상 구분,
+안전 위반 전파), 개입(AI 실행 중 차단, 다른 측정 중 차단, 자기 자신은 통과,
+가드 실패·standalone 에서 막지 않음, AI 전용 진입점 사용), 추가 요구(steer 큐가
+다음 tool_result 에 한 번만 전달, 빈 지시 무시, 중지는 큐가 아닌 이벤트라 도구
+대기 중에도 전달). 전체 531개 통과.
+
+---
+
 ## v1.12.3 — 2026-11-23 (기능 추가)
 
 ### AI 모드가 VNA 도 다룬다

@@ -295,10 +295,9 @@ class MainWindowBridge(QObject):
             return {"ok": False,
                     "error": "VNA 설정에 문제가 있어 시작하지 않았습니다.",
                     "problems": problems}
-        if mode == "single":
-            win._on_single_acquire()
-        elif mode == "sweep":
-            win._on_sweep_acquire()
+        if mode in ("single", "sweep"):
+            # 사람 가드를 건너뛰는 진입점 — AI 실행 중이라 일반 경로는 막힌다
+            win.start_acquire_unattended(mode)
         else:
             return {"ok": False, "error": "알 수 없는 mode: " + str(mode) + " (single | sweep)"}
         th = getattr(win, "_acq_thread", None)

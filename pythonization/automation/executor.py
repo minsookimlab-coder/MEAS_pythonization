@@ -791,7 +791,17 @@ class LabExecutor:
         self._status(f"VNA {mode} acquire 시작")
         res = self._backend.vna_acquire(mode=mode, wait=wait,
                                         timeout_s=timeout_min * 60.0)
-        return ToolOutcome({"vna_acquire": res}, not res.get("ok", False))
+        # 사람이 중지했거나 오류로 끝난 측정을 '성공' 으로 돌려주면, 모델이 부분
+        # 데이터를 완성된 것으로 읽고 다음 단계로 넘어간다. 분명히 실패로 알린다.
+        note = ""
+        if res.get("errored"):
+            note = "VNA 측정이 오류로 중단됐습니다 — 데이터가 불완전합니다."
+        elif res.get("stopped"):
+            note = "사용자가 VNA 측정을 중지했습니다 — 데이터가 불완전합니다."
+        if note:
+            res = dict(res, note=note)
+        failed = (not res.get("ok", False)) or bool(note)
+        return ToolOutcome({"vna_acquire": res}, failed)
 
     def _tool_vna_stop(self, _a: dict) -> ToolOutcome:
         res = self._backend.vna_stop()
