@@ -182,7 +182,7 @@ path = Path("C:/Users/Main/Desktop/...")              # 금지 — 하드코딩�
 - **검증 먼저.** 돌려보지 않은 코드는 푸시하지 않는다.
 
   ```
-  python -m unittest discover -s tests -t .     # 표준 라이브러리만 쓴다 (334개)
+  python -m unittest discover -s tests -t .     # 표준 라이브러리만 쓴다 (469개)
   ```
 
   테스트가 닿지 않는 곳(측정 흐름, 창 동작)은 헤드리스로 직접 확인한다
@@ -230,7 +230,7 @@ pythonization/
   notify/       알람
   util/         네트워크·TLS
   ui/           main_window + widgets/ dialogs/ panels/ modules/ assets/
-tests/          표준 라이브러리 unittest (334개)
+tests/          표준 라이브러리 unittest (469개)
 docs/           STRUCTURE / USER_MANUAL / CHANGELOG
 ```
 

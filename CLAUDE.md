@@ -16,7 +16,7 @@ pythonization/
   app/ config/ instruments/(+drivers/) measurement/
   profiles/ analysis/ notify/ util/
   ui/ (main_window + widgets/ dialogs/ panels/ modules/ assets/)
-tests/                  표준 라이브러리 unittest (334개)
+tests/                  표준 라이브러리 unittest (469개)
 docs/                   STRUCTURE / USER_MANUAL / CHANGELOG
 ```
 
@@ -56,12 +56,17 @@ docs/                   STRUCTURE / USER_MANUAL / CHANGELOG
    방치했다가 동작이 달라진 사고가 있었다 (`v1.11.0` 에서 통합하고 브랜치는 지웠다).
    사용자가 명시적으로 만들라고 할 때만 만든다.
 
+7. **코드 작업 중에는 `pythonization-lab` MCP 도구를 부르지 않는다.** 이 폴더의
+   `.mcp.json` 은 실행 중인 프로그램의 AI 자동 측정 서버에 붙는다 — 그 도구는 실제 장비를
+   움직인다. 사용자가 측정을 요청한 세션에서만 쓴다. 측정 세션에서는 서버 안내문과
+   `get_lab_state` 를 따르고, 코드를 고치지 않는다.
+
 ## 실행 / 확인
 
 ```
 python main.py                                   # 진입점 (python -m pythonization 도 동일)
 .venv/Scripts/python.exe                         # 이 프로젝트 인터프리터
-python -m unittest discover -s tests -t .        # 테스트 334개 (추가 설치 불필요)
+python -m unittest discover -s tests -t .        # 테스트 469개 (추가 설치 불필요)
 QT_QPA_PLATFORM=offscreen                        # GUI 없이 창을 만들어 검증할 때
 ```
 
